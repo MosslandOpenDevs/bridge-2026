@@ -4,6 +4,7 @@ import { createServer } from "http";
 import { Server as SocketIOServer } from "socket.io";
 import cors from "cors";
 import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 
 // Import database
 import {
@@ -29,6 +30,16 @@ import {
   parseVoteChoice,
   VoteChoice,
 } from "./blockchain.js";
+
+// Import security utilities
+import {
+  verifyVoteSignature,
+  isVoteSignatureRequired,
+  requireAdminKey,
+  isAdminAuthEnabled,
+  sanitizeError,
+  canonicalJson,
+} from "./security.js";
 
 // Import ORACLE modules
 import {
@@ -232,7 +243,6 @@ const io = new SocketIOServer(httpServer, {
       "http://localhost:4001",
       "http://localhost:3000",
       "https://bridge.moss.land",
-      "http://bridge.moss.land",
     ],
     methods: ["GET", "POST"],
     credentials: true,
@@ -246,11 +256,54 @@ app.use(cors({
     "http://localhost:4001",
     "http://localhost:3000",
     "https://bridge.moss.land",
-    "http://bridge.moss.land",
   ],
   credentials: true,
 }));
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
+
+// Trust the first proxy hop so rate limiting sees the real client IP behind nginx.
+app.set("trust proxy", 1);
+
+// Rate limit caps are env-tunable so tests / load benchmarks can relax them.
+const RATE_LIMIT_GLOBAL = parseInt(process.env.RATE_LIMIT_GLOBAL || "120", 10);
+const RATE_LIMIT_LLM = parseInt(process.env.RATE_LIMIT_LLM || "6", 10);
+const RATE_LIMIT_VOTE = parseInt(process.env.RATE_LIMIT_VOTE || "20", 10);
+
+// Global rate limiter — protects every endpoint from naive flooding.
+app.use(
+  "/api/",
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: RATE_LIMIT_GLOBAL,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests" },
+  }),
+);
+
+// LLM endpoints are expensive — much stricter cap to protect API credits.
+app.use(
+  ["/api/deliberate", "/api/debate"],
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: RATE_LIMIT_LLM,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "LLM rate limit exceeded; please retry shortly" },
+  }),
+);
+
+// Vote endpoint — bounded per minute to prevent vote spam.
+app.use(
+  "/api/proposals/:id/vote",
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: RATE_LIMIT_VOTE,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Voting rate limit exceeded" },
+  }),
+);
 
 // Socket.IO connection handling
 io.on("connection", (socket) => {
@@ -271,6 +324,22 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log(`🔌 Client disconnected: ${socket.id}`);
   });
+});
+
+// JSON-only error handler — catches body-parser/payload errors so we never leak HTML stacks.
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!err) {
+    next();
+    return;
+  }
+  const status = err.status || err.statusCode || 500;
+  const message =
+    status === 413
+      ? "Request body too large"
+      : status >= 500
+        ? "Internal server error"
+        : sanitizeError(err, "Request failed");
+  res.status(status).json({ error: message });
 });
 
 // Health check
@@ -303,7 +372,7 @@ app.get("/api/signals", async (req, res) => {
   }
 });
 
-app.post("/api/signals/collect", async (req, res) => {
+app.post("/api/signals/collect", requireAdminKey, async (req, res) => {
   try {
     const signals = await signalRegistry.collectSignals();
 
@@ -369,7 +438,7 @@ app.get("/api/issues", async (req, res) => {
   }
 });
 
-app.post("/api/issues/detect", async (req, res) => {
+app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
   try {
     // Get signals from database
     const signalRows = signalDb.getRecent.all(1000);
@@ -441,8 +510,30 @@ app.patch("/api/issues/:id", async (req, res) => {
   }
 });
 
-// In-memory storage for debate sessions
-const debateSessions = new Map<string, any>();
+// In-memory LRU for debate sessions — avoids unbounded growth on long-running servers.
+const DEBATE_SESSION_LIMIT = parseInt(process.env.DEBATE_SESSION_LIMIT || "100", 10);
+class LRUMap<K, V> extends Map<K, V> {
+  constructor(private readonly max: number) {
+    super();
+  }
+  override get(key: K): V | undefined {
+    if (!super.has(key)) return undefined;
+    const value = super.get(key)!;
+    super.delete(key);
+    super.set(key, value);
+    return value;
+  }
+  override set(key: K, value: V): this {
+    if (super.has(key)) super.delete(key);
+    else if (this.size >= this.max) {
+      const oldest = this.keys().next().value;
+      if (oldest !== undefined) super.delete(oldest);
+    }
+    super.set(key, value);
+    return this;
+  }
+}
+const debateSessions = new LRUMap<string, any>(DEBATE_SESSION_LIMIT);
 
 // Deliberation endpoints
 app.post("/api/deliberate", async (req, res) => {
@@ -644,9 +735,35 @@ app.get("/api/proposals/:id", (req, res) => {
 
 app.post("/api/proposals/:id/vote", async (req, res) => {
   try {
-    const { voter, choice, weight, reason } = req.body;
+    const { voter, choice, weight, reason, signature, nonce, timestamp } = req.body;
     if (!voter || !choice) {
       return res.status(400).json({ error: "voter and choice are required" });
+    }
+    if (!/^0x[0-9a-fA-F]{40}$/.test(voter)) {
+      return res.status(400).json({ error: "voter must be a valid 0x address" });
+    }
+    if (!["for", "against", "abstain"].includes(String(choice).toLowerCase())) {
+      return res.status(400).json({ error: "choice must be for, against, or abstain" });
+    }
+
+    // Verify the voter actually authorized this vote (anti-spoofing).
+    // Required when MOC verification is enabled, configurable via REQUIRE_VOTE_SIGNATURE.
+    const sigRequired = isVoteSignatureRequired(blockchainService.isMocEnabled());
+    if (sigRequired) {
+      const sig = await verifyVoteSignature({
+        voter: voter as `0x${string}`,
+        proposalId: req.params.id,
+        choice: String(choice),
+        signature: signature as `0x${string}` | undefined,
+        nonce: nonce as string | undefined,
+        timestamp: typeof timestamp === "number" ? timestamp : Number(timestamp),
+      });
+      if (!sig.ok) {
+        return res.status(401).json({
+          error: sig.reason || "Vote signature verification failed",
+          code: "INVALID_SIGNATURE",
+        });
+      }
     }
 
     // Verify MOC holder eligibility and get voting weight
@@ -665,7 +782,7 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
       }
     } catch (verifyError: any) {
       return res.status(403).json({
-        error: verifyError.message,
+        error: sanitizeError(verifyError, "Voter eligibility check failed"),
         code: "NOT_MOC_HOLDER",
       });
     }
@@ -726,7 +843,7 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
         : undefined,
     });
   } catch (error: any) {
-    res.status(400).json({ error: error.message || "Failed to cast vote" });
+    res.status(400).json({ error: sanitizeError(error, "Failed to cast vote") });
   }
 });
 
@@ -743,20 +860,20 @@ app.post("/api/proposals/:id/tally", (req, res) => {
     };
     res.json({ tally: serializable });
   } catch (error: any) {
-    res.status(400).json({ error: error.message || "Failed to tally votes" });
+    res.status(400).json({ error: sanitizeError(error, "Failed to tally votes") });
   }
 });
 
-app.post("/api/proposals/:id/finalize", (req, res) => {
+app.post("/api/proposals/:id/finalize", requireAdminKey, (req, res) => {
   try {
     const proposal = votingSystem.finalizeProposal(req.params.id);
     res.json({ proposal });
   } catch (error: any) {
-    res.status(400).json({ error: error.message || "Failed to finalize proposal" });
+    res.status(400).json({ error: sanitizeError(error, "Failed to finalize proposal") });
   }
 });
 
-app.post("/api/proposals/:id/execute", async (req, res) => {
+app.post("/api/proposals/:id/execute", requireAdminKey, async (req, res) => {
   try {
     const proposalId = req.params.id;
     const proposal = votingSystem.getProposal(proposalId);
@@ -844,7 +961,7 @@ app.post("/api/proposals/:id/execute", async (req, res) => {
       message: "Proposal executed successfully",
     });
   } catch (error: any) {
-    res.status(400).json({ error: error.message || "Failed to execute proposal" });
+    res.status(400).json({ error: sanitizeError(error, "Failed to execute proposal") });
   }
 });
 
@@ -887,7 +1004,7 @@ app.get("/api/outcomes", async (req, res) => {
   }
 });
 
-app.post("/api/outcomes", async (req, res) => {
+app.post("/api/outcomes", requireAdminKey, async (req, res) => {
   try {
     const { proposalId, actions } = req.body;
     if (!proposalId || !actions) {
@@ -917,7 +1034,7 @@ app.get("/api/outcomes/:executionId/proof", async (req, res) => {
     const proof = await outcomeTracker.generateProof(req.params.executionId);
     res.json({ proof });
   } catch (error: any) {
-    res.status(400).json({ error: error.message || "Failed to generate proof" });
+    res.status(400).json({ error: sanitizeError(error, "Failed to generate proof") });
   }
 });
 
@@ -1117,7 +1234,7 @@ app.get("/api/blockchain/moc/:address", async (req, res) => {
       canVote: isHolder,
     });
   } catch (error: any) {
-    res.status(400).json({ error: error.message || "Failed to get MOC balance" });
+    res.status(400).json({ error: sanitizeError(error, "Failed to get MOC balance") });
   }
 });
 
@@ -1144,7 +1261,7 @@ app.get("/api/blockchain/verify-voter/:address", async (req, res) => {
       formatted: (Number(balance) / 1e18).toFixed(2),
     });
   } catch (error: any) {
-    res.status(400).json({ error: error.message || "Failed to verify voter" });
+    res.status(400).json({ error: sanitizeError(error, "Failed to verify voter") });
   }
 });
 
@@ -1260,6 +1377,7 @@ httpServer.listen(PORT, () => {
   const signalCount = signalDb.count.get() as { count: number };
   const issueCount = issueDb.count.get() as { count: number };
   console.log(`📊 Database: ${signalCount.count} signals, ${issueCount.count} issues stored`);
+  console.log(`🔐 Admin auth: ${isAdminAuthEnabled() ? "enabled (ADMIN_API_KEY set)" : "DISABLED — set ADMIN_API_KEY to lock admin endpoints"}`);
 
   // Auto signal collection
   if (SIGNAL_COLLECT_INTERVAL > 0) {

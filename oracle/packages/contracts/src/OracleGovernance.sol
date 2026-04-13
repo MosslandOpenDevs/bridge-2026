@@ -3,16 +3,18 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title OracleGovernance
  * @notice Main governance contract for BRIDGE 2026 / ORACLE
  * @dev Implements proposal creation, voting, and outcome proof recording
  */
-contract OracleGovernance is AccessControl, ReentrancyGuard {
+contract OracleGovernance is AccessControl, ReentrancyGuard, Pausable {
     bytes32 public constant PROPOSER_ROLE = keccak256("PROPOSER_ROLE");
     bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
     bytes32 public constant ORACLE_ROLE = keccak256("ORACLE_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
     enum ProposalStatus {
         Pending,
@@ -64,6 +66,10 @@ contract OracleGovernance is AccessControl, ReentrancyGuard {
     uint256 public defaultQuorum = 100;
     uint256 public defaultThreshold = 50; // 50%
     uint256 public defaultVotingPeriod = 7 days;
+    uint256 public executionDelay = 2 days; // Timelock between pass and execution
+
+    // Per-proposal earliest execution timestamp (set when finalized as Passed)
+    mapping(uint256 => uint256) public executionEta;
 
     mapping(uint256 => Proposal) public proposals;
     mapping(uint256 => mapping(address => bool)) public hasVoted;
@@ -98,6 +104,17 @@ contract OracleGovernance is AccessControl, ReentrancyGuard {
         _grantRole(PROPOSER_ROLE, msg.sender);
         _grantRole(EXECUTOR_ROLE, msg.sender);
         _grantRole(ORACLE_ROLE, msg.sender);
+        _grantRole(PAUSER_ROLE, msg.sender);
+    }
+
+    /// @notice Pause governance mutations in case of emergency.
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    /// @notice Resume governance after pause.
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
     }
 
     /**
@@ -114,7 +131,7 @@ contract OracleGovernance is AccessControl, ReentrancyGuard {
         uint256 quorum,
         uint256 threshold,
         uint256 votingPeriod
-    ) external onlyRole(PROPOSER_ROLE) returns (uint256) {
+    ) external onlyRole(PROPOSER_ROLE) whenNotPaused returns (uint256) {
         proposalCount++;
         uint256 proposalId = proposalCount;
 
@@ -159,7 +176,7 @@ contract OracleGovernance is AccessControl, ReentrancyGuard {
         uint256 proposalId,
         VoteChoice choice,
         uint256 weight
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused onlyRole(ORACLE_ROLE) {
         Proposal storage proposal = proposals[proposalId];
 
         require(proposal.id != 0, "Proposal does not exist");
@@ -219,6 +236,12 @@ contract OracleGovernance is AccessControl, ReentrancyGuard {
         proposal.status = passed
             ? ProposalStatus.Passed
             : ProposalStatus.Rejected;
+
+        if (passed) {
+            // Lock execution behind a timelock window so MOC holders can react
+            // (e.g., trigger pause) if a malicious proposal slipped through.
+            executionEta[proposalId] = block.timestamp + executionDelay;
+        }
     }
 
     /**
@@ -227,11 +250,15 @@ contract OracleGovernance is AccessControl, ReentrancyGuard {
      */
     function executeProposal(
         uint256 proposalId
-    ) external onlyRole(EXECUTOR_ROLE) {
+    ) external onlyRole(EXECUTOR_ROLE) whenNotPaused {
         Proposal storage proposal = proposals[proposalId];
 
         require(proposal.id != 0, "Proposal does not exist");
         require(proposal.status == ProposalStatus.Passed, "Proposal not passed");
+        require(
+            executionEta[proposalId] != 0 && block.timestamp >= executionEta[proposalId],
+            "Timelock not elapsed"
+        );
 
         proposal.status = ProposalStatus.Executed;
 
@@ -298,6 +325,24 @@ contract OracleGovernance is AccessControl, ReentrancyGuard {
         if (_quorum > 0) defaultQuorum = _quorum;
         if (_threshold > 0 && _threshold <= 100) defaultThreshold = _threshold;
         if (_votingPeriod > 0) defaultVotingPeriod = _votingPeriod;
+    }
+
+    /// @notice Update the execution timelock window. Set to 0 to disable.
+    function updateExecutionDelay(uint256 _delay) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_delay <= 30 days, "Delay too long");
+        executionDelay = _delay;
+    }
+
+    /// @notice Cancel a proposal that has not yet been executed (admin escape hatch).
+    function cancelProposal(uint256 proposalId) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        Proposal storage proposal = proposals[proposalId];
+        require(proposal.id != 0, "Proposal does not exist");
+        require(
+            proposal.status != ProposalStatus.Executed && proposal.status != ProposalStatus.Cancelled,
+            "Cannot cancel"
+        );
+        proposal.status = ProposalStatus.Cancelled;
+        emit ProposalCancelled(proposalId);
     }
 
     /**

@@ -144,10 +144,13 @@ async function testCreateProposal() {
 }
 
 async function testCastVote(proposalId: string) {
+  // Address validation requires a real 20-byte hex address; pad a deterministic test address.
+  const suffix = Date.now().toString(16).padStart(16, "0").slice(-16);
+  const voter = ("0x" + "e2eA".repeat(6) + suffix).toLowerCase();
   const { response, data } = await fetchJson(`/api/proposals/${proposalId}/vote`, {
     method: "POST",
     body: JSON.stringify({
-      voter: `0xE2E_VOTER_${Date.now()}`,
+      voter,
       choice: "for",
       weight: "1000",
       reason: "E2E test vote",
@@ -269,12 +272,13 @@ async function testFullWorkflow() {
     assert(proposalData.proposal.status === "active", "Proposal should be active");
     console.log(`   Created proposal: ${proposalData.proposal.id}`);
 
-    // 5. Cast votes
+    // 5. Cast votes — addresses must be valid 20-byte hex per security validation.
     for (let i = 0; i < 3; i++) {
+      const voter = "0x" + "deadbeef".repeat(5) + i.toString().padStart(2, "0");
       await fetchJson(`/api/proposals/${proposalData.proposal.id}/vote`, {
         method: "POST",
         body: JSON.stringify({
-          voter: `0xVOTER_${i}`,
+          voter,
           choice: i < 2 ? "for" : "against",
           weight: "100",
         }),

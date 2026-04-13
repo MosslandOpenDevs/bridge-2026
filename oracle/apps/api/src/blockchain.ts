@@ -18,6 +18,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { mainnet, sepolia, hardhat } from "viem/chains";
+import { canonicalJson } from "./security.js";
 
 // MOC Token address on Ethereum mainnet
 const MOC_TOKEN_ADDRESS = "0x8bbfe65e31b348cd823c62e02ad8c19a84dd0dab" as Address;
@@ -380,11 +381,11 @@ export class BlockchainService {
   }
 
   /**
-   * Hash a decision packet for on-chain storage
+   * Hash a decision packet for on-chain storage.
+   * Uses canonical JSON (sorted keys) so the same packet always produces the same hash.
    */
   hashDecisionPacket(decisionPacket: any): `0x${string}` {
-    const json = JSON.stringify(decisionPacket);
-    return keccak256(toBytes(json));
+    return keccak256(toBytes(canonicalJson(decisionPacket)));
   }
 
   /**
