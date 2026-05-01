@@ -246,6 +246,28 @@ export const issueDb = {
   clear: db.prepare(`DELETE FROM issues`),
 };
 
+// Proposal operations (persisted alongside in-memory VotingSystem)
+export const proposalDb = {
+  insert: db.prepare(`
+    INSERT INTO proposals (id, title, description, proposer, status, voting_starts, voting_ends, issue_id, decision_packet)
+    VALUES (@id, @title, @description, @proposer, @status, @votingStarts, @votingEnds, @issueId, @decisionPacket)
+  `),
+
+  updateStatus: db.prepare(`
+    UPDATE proposals SET status = @status, tally = @tally, updated_at = CURRENT_TIMESTAMP WHERE id = @id
+  `),
+
+  getById: db.prepare(`SELECT * FROM proposals WHERE id = ?`),
+
+  getRecent: db.prepare(`SELECT * FROM proposals ORDER BY created_at DESC LIMIT ?`),
+
+  count: db.prepare(`SELECT COUNT(*) as count FROM proposals`),
+
+  countByStatus: db.prepare(`SELECT status, COUNT(*) as count FROM proposals GROUP BY status`),
+
+  existsByIssueId: db.prepare(`SELECT id FROM proposals WHERE issue_id = ? LIMIT 1`),
+};
+
 // Decision history operations (for agent learning)
 export const decisionHistoryDb = {
   insert: db.prepare(`
@@ -301,6 +323,22 @@ export const decisionHistoryDb = {
   `),
 
   count: db.prepare(`SELECT COUNT(*) as count FROM decision_history`),
+
+  getPendingOlderThan: db.prepare(`
+    SELECT * FROM decision_history
+    WHERE outcome_status = 'pending' AND created_at < datetime('now', ?)
+    ORDER BY created_at ASC LIMIT ?
+  `),
+};
+
+// Issue follow-up queries for outcome evaluation
+export const issueFollowupDb = {
+  countNewByCategorySince: db.prepare(`
+    SELECT COUNT(*) as count FROM issues
+    WHERE category = ?
+      AND priority IN ('high', 'urgent', 'critical')
+      AND created_at > ?
+  `),
 };
 
 // Agent performance operations

@@ -10,6 +10,9 @@ import rateLimit from "express-rate-limit";
 import {
   signalDb,
   issueDb,
+  proposalDb,
+  decisionHistoryDb,
+  issueFollowupDb,
   serializeSignal,
   deserializeSignal,
   serializeIssue,
@@ -20,6 +23,7 @@ import {
 import {
   enrichContextWithHistory,
   recordDecision,
+  recordOutcome,
   recordOutcomeByIssueId,
   getAgentTrustScores,
 } from "./learning.js";
@@ -111,15 +115,22 @@ const githubAdapter = new GitHubAdapter({
 signalRegistry.registerAdapter(githubAdapter);
 console.log("✅ GitHubAdapter registered");
 
-// SocialAdapter for Medium (always) and Twitter (if token available)
+// SocialAdapter for Medium (always) and Twitter (if token available and not disabled)
+const TWITTER_DISABLED = process.env.DISABLE_TWITTER === "1";
+const effectiveTwitterToken = TWITTER_DISABLED ? undefined : TWITTER_BEARER_TOKEN;
 const socialAdapter = new SocialAdapter({
   mediumRssUrl: "https://medium.com/feed/mossland-blog",
-  twitterBearerToken: TWITTER_BEARER_TOKEN,
+  twitterBearerToken: effectiveTwitterToken,
   twitterUsername: "TheMossland",
   language: SIGNAL_LANGUAGE,
 });
 signalRegistry.registerAdapter(socialAdapter);
-console.log("✅ SocialAdapter registered" + (TWITTER_BEARER_TOKEN ? " (with Twitter)" : " (Medium only)"));
+const twitterStatus = TWITTER_DISABLED
+  ? " (Twitter disabled via DISABLE_TWITTER=1)"
+  : effectiveTwitterToken
+    ? " (with Twitter)"
+    : " (Medium only)";
+console.log("✅ SocialAdapter registered" + twitterStatus);
 
 const anomalyDetector = new AnomalyDetector({ minSamples: 3 });
 const thresholdDetector = new ThresholdDetector({
@@ -554,11 +565,11 @@ app.post("/api/deliberate", async (req, res) => {
 
     // Record decision for learning
     if (decisionPacket) {
-      const agentOpinions = Object.entries(decisionPacket.agents || {}).map(
-        ([role, opinion]: [string, any]) => ({
-          role,
-          stance: opinion.stance,
-          confidence: opinion.confidence,
+      const agentOpinions = (decisionPacket.agentOpinions || []).map(
+        (op: any) => ({
+          role: op.role,
+          stance: op.stance,
+          confidence: op.confidence,
         })
       );
 
@@ -626,11 +637,11 @@ app.post("/api/debate", async (req, res) => {
 
     // Record decision for learning
     if (decisionPacket) {
-      const agentOpinions = Object.entries(decisionPacket.agents || {}).map(
-        ([role, opinion]: [string, any]) => ({
-          role,
-          stance: opinion.stance,
-          confidence: opinion.confidence,
+      const agentOpinions = (decisionPacket.agentOpinions || []).map(
+        (op: any) => ({
+          role: op.role,
+          stance: op.stance,
+          confidence: op.confidence,
         })
       );
 
@@ -1268,6 +1279,19 @@ app.get("/api/blockchain/verify-voter/:address", async (req, res) => {
 // Background processing intervals (in seconds, 0 to disable)
 const SIGNAL_COLLECT_INTERVAL = parseInt(process.env.SIGNAL_COLLECT_INTERVAL || "60", 10);
 const ISSUE_DETECT_INTERVAL = parseInt(process.env.ISSUE_DETECT_INTERVAL || "300", 10); // 5 minutes
+const AUTO_DELIBERATE_ENABLED = process.env.AUTO_DELIBERATE_ENABLED !== "0";
+const AUTO_DELIBERATE_MIN_PRIORITY = (process.env.AUTO_DELIBERATE_MIN_PRIORITY || "high").toLowerCase();
+const PRIORITY_RANK: Record<string, number> = { low: 1, medium: 2, high: 3, urgent: 4, critical: 4 };
+const minPriorityRank = PRIORITY_RANK[AUTO_DELIBERATE_MIN_PRIORITY] ?? 3;
+
+const OUTCOME_EVAL_ENABLED = process.env.OUTCOME_EVAL_ENABLED !== "0";
+const OUTCOME_EVAL_INTERVAL = parseInt(process.env.OUTCOME_EVAL_INTERVAL || "1800", 10); // 30 min
+const OUTCOME_EVAL_AGE_HOURS = parseInt(process.env.OUTCOME_EVAL_AGE_HOURS || "6", 10);
+const OUTCOME_EVAL_BATCH = parseInt(process.env.OUTCOME_EVAL_BATCH || "20", 10);
+
+const AUTO_PROPOSAL_ENABLED = process.env.AUTO_PROPOSAL_ENABLED !== "0";
+const AUTO_PROPOSAL_THRESHOLD = parseFloat(process.env.AUTO_PROPOSAL_THRESHOLD || "0.7");
+const AUTO_PROPOSAL_PROPOSER = process.env.AUTO_PROPOSAL_PROPOSER || "auto-system";
 
 // Helper function for background signal collection
 async function collectAndSaveSignals() {
@@ -1321,7 +1345,134 @@ async function detectAndSaveIssues() {
     });
   }
 
-  return { detected: detectedIssues.length, saved: savedCount };
+  // Auto-deliberate on newly saved high-priority issues
+  let deliberatedCount = 0;
+  let promotedCount = 0;
+  if (AUTO_DELIBERATE_ENABLED && savedIssues.length > 0) {
+    for (const issue of savedIssues) {
+      const rank = PRIORITY_RANK[(issue.priority || "medium").toLowerCase()] ?? 0;
+      if (rank < minPriorityRank) continue;
+      try {
+        const enrichedContext = enrichContextWithHistory(
+          issue.category || "general",
+          issue.priority || "medium",
+          {}
+        );
+        const decisionPacket = await moderator.deliberate(issue, enrichedContext);
+        if (decisionPacket) {
+          const agentOpinions = (decisionPacket.agentOpinions || []).map(
+            (op: any) => ({
+              role: op.role,
+              stance: op.stance,
+              confidence: op.confidence,
+            })
+          );
+          recordDecision(
+            issue.id,
+            issue.category || "general",
+            issue.priority || "medium",
+            decisionPacket.consensusScore || 0,
+            decisionPacket.recommendation?.type || "investigation",
+            agentOpinions
+          );
+          deliberatedCount++;
+          io.emit("decisions:recorded", {
+            issueId: issue.id,
+            category: issue.category,
+            consensusScore: decisionPacket.consensusScore,
+          });
+
+          // Promote to proposal if consensus is strong enough
+          if (
+            AUTO_PROPOSAL_ENABLED &&
+            (decisionPacket.consensusScore || 0) >= AUTO_PROPOSAL_THRESHOLD &&
+            !proposalDb.existsByIssueId.get(issue.id)
+          ) {
+            try {
+              const proposal = votingSystem.createProposal(decisionPacket, AUTO_PROPOSAL_PROPOSER);
+              votingSystem.activateProposal(proposal.id);
+              const activated = votingSystem.getProposal(proposal.id);
+              proposalDb.insert.run({
+                id: proposal.id,
+                title: issue.title || `Proposal for ${issue.category}`,
+                description:
+                  decisionPacket.recommendation?.action ||
+                  decisionPacket.recommendation?.rationale ||
+                  issue.description ||
+                  "Auto-generated proposal",
+                proposer: AUTO_PROPOSAL_PROPOSER,
+                status: activated?.status || "active",
+                votingStarts: (activated?.votingStartsAt ?? proposal.votingStartsAt).toISOString(),
+                votingEnds: (activated?.votingEndsAt ?? proposal.votingEndsAt).toISOString(),
+                issueId: issue.id,
+                decisionPacket: JSON.stringify(decisionPacket),
+              });
+              promotedCount++;
+              io.emit("proposals:created", {
+                proposal: activated,
+                source: "auto-promotion",
+              });
+            } catch (promoteError) {
+              console.error(`[auto-promote] failed for issue ${issue.id}:`, promoteError);
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`[auto-deliberate] failed for issue ${issue.id}:`, error);
+      }
+    }
+  }
+
+  return {
+    detected: detectedIssues.length,
+    saved: savedCount,
+    deliberated: deliberatedCount,
+    promoted: promotedCount,
+  };
+}
+
+// Evaluate pending decision outcomes by checking follow-up issue activity
+async function evaluatePendingOutcomes() {
+  const ageClause = `-${OUTCOME_EVAL_AGE_HOURS} hours`;
+  const pending = decisionHistoryDb.getPendingOlderThan.all(ageClause, OUTCOME_EVAL_BATCH) as any[];
+
+  let evaluated = 0;
+  for (const decision of pending) {
+    try {
+      const followup = issueFollowupDb.countNewByCategorySince.get(
+        decision.category,
+        decision.created_at
+      ) as { count: number };
+
+      const newIssueCount = followup?.count ?? 0;
+      // Heuristic: fewer follow-up high-priority issues in this category = better outcome
+      let successRate: number;
+      if (newIssueCount === 0) successRate = 0.85;
+      else if (newIssueCount === 1) successRate = 0.55;
+      else if (newIssueCount <= 3) successRate = 0.35;
+      else successRate = 0.2;
+
+      const kpiResults = [
+        {
+          metric: "followup_high_priority_issues",
+          category: decision.category,
+          window_hours: OUTCOME_EVAL_AGE_HOURS,
+          value: newIssueCount,
+        },
+      ];
+
+      recordOutcome(decision.id, successRate, kpiResults);
+      evaluated++;
+    } catch (error) {
+      console.error(`[outcome-eval] failed for decision ${decision.id}:`, error);
+    }
+  }
+
+  if (evaluated > 0) {
+    io.emit("outcomes:evaluated", { count: evaluated });
+  }
+
+  return { pending: pending.length, evaluated };
 }
 
 // Start server
@@ -1409,7 +1560,7 @@ httpServer.listen(PORT, () => {
     setTimeout(async () => {
       try {
         const result = await detectAndSaveIssues();
-        console.log(`   ✅ Initial detection: ${result.detected} found, ${result.saved} new issues saved`);
+        console.log(`   ✅ Initial detection: ${result.detected} found, ${result.saved} new, ${result.deliberated} deliberated, ${result.promoted} promoted`);
       } catch (error) {
         console.error("   ❌ Initial issue detection failed:", error);
       }
@@ -1420,12 +1571,40 @@ httpServer.listen(PORT, () => {
       try {
         const result = await detectAndSaveIssues();
         if (result.saved > 0) {
-          console.log(`🔍 Detected ${result.detected} issues, saved ${result.saved} new at ${new Date().toLocaleTimeString()}`);
+          console.log(`🔍 Detected ${result.detected} issues, saved ${result.saved} new, ${result.deliberated} deliberated, ${result.promoted} promoted at ${new Date().toLocaleTimeString()}`);
         }
       } catch (error) {
         console.error("❌ Auto-detection failed:", error);
       }
     }, ISSUE_DETECT_INTERVAL * 1000);
+  }
+
+  if (AUTO_DELIBERATE_ENABLED) {
+    console.log(`🧠 Auto deliberation: ENABLED (min priority: ${AUTO_DELIBERATE_MIN_PRIORITY})`);
+  } else {
+    console.log(`🧠 Auto deliberation: DISABLED (set AUTO_DELIBERATE_ENABLED=1 to enable)`);
+  }
+
+  if (AUTO_PROPOSAL_ENABLED) {
+    console.log(`📝 Auto proposal promotion: ENABLED (consensus ≥ ${AUTO_PROPOSAL_THRESHOLD}, proposer ${AUTO_PROPOSAL_PROPOSER})`);
+  } else {
+    console.log(`📝 Auto proposal promotion: DISABLED`);
+  }
+
+  if (OUTCOME_EVAL_ENABLED && OUTCOME_EVAL_INTERVAL > 0) {
+    console.log(`📈 Outcome evaluation: every ${OUTCOME_EVAL_INTERVAL}s, age threshold ${OUTCOME_EVAL_AGE_HOURS}h, batch ${OUTCOME_EVAL_BATCH}`);
+    setInterval(async () => {
+      try {
+        const result = await evaluatePendingOutcomes();
+        if (result.evaluated > 0) {
+          console.log(`📈 Evaluated ${result.evaluated}/${result.pending} pending decisions at ${new Date().toLocaleTimeString()}`);
+        }
+      } catch (error) {
+        console.error("❌ Outcome evaluation failed:", error);
+      }
+    }, OUTCOME_EVAL_INTERVAL * 1000);
+  } else {
+    console.log(`📈 Outcome evaluation: DISABLED`);
   }
 });
 
