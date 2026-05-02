@@ -239,7 +239,7 @@ export const issueDb = {
     SELECT * FROM issues
     WHERE category = ?
       AND status IN ('detected', 'deliberating', 'proposed')
-      AND detected_at > datetime('now', '-1 hour')
+      AND detected_at > datetime('now', '-15 minutes')
     LIMIT 1
   `),
 

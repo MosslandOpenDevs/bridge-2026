@@ -1,13 +1,14 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 
-export type LLMProvider = "anthropic" | "openai";
+export type LLMProvider = "anthropic" | "openai" | "ollama";
 
 export interface LLMConfig {
   provider?: LLMProvider;
   apiKey?: string;
   model?: string;
   maxTokens?: number;
+  baseURL?: string;
 }
 
 export interface LLMMessage {
@@ -27,11 +28,13 @@ export interface LLMResponse {
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
   anthropic: "claude-sonnet-4-20250514",
   openai: "gpt-4o",
+  ollama: "qwen3.5:9b",
 };
 
 const DEFAULT_MAX_TOKENS: Record<LLMProvider, number> = {
   anthropic: 4096,
   openai: 4096,
+  ollama: 4096,
 };
 
 export class LLMClient {
@@ -58,11 +61,20 @@ export class LLMClient {
     this.model = config.model || DEFAULT_MODELS[this.provider];
     this.maxTokens = config.maxTokens || DEFAULT_MAX_TOKENS[this.provider];
 
-    if (config.apiKey) {
+    if (this.provider === "ollama") {
+      // Ollama exposes an OpenAI-compatible API; apiKey is unused server-side
+      this.openaiClient = new OpenAI({
+        apiKey: config.apiKey || "ollama",
+        baseURL: config.baseURL,
+      });
+    } else if (config.apiKey) {
       if (this.provider === "anthropic") {
         this.anthropicClient = new Anthropic({ apiKey: config.apiKey });
       } else {
-        this.openaiClient = new OpenAI({ apiKey: config.apiKey });
+        this.openaiClient = new OpenAI({
+          apiKey: config.apiKey,
+          baseURL: config.baseURL,
+        });
       }
     }
   }
@@ -89,7 +101,10 @@ export class LLMClient {
 
     if (this.provider === "anthropic" && this.anthropicClient) {
       return this.chatWithAnthropic(systemPrompt, userMessage);
-    } else if (this.provider === "openai" && this.openaiClient) {
+    } else if (
+      (this.provider === "openai" || this.provider === "ollama") &&
+      this.openaiClient
+    ) {
       return this.chatWithOpenAI(systemPrompt, userMessage);
     }
 

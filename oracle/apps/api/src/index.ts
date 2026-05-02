@@ -211,14 +211,25 @@ const proposalGenerator = new ProposalGenerator();
 
 // LLM Configuration from environment
 const LLM_API_KEY = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;
-const LLM_PROVIDER = process.env.LLM_PROVIDER as "anthropic" | "openai" | undefined;
+const LLM_PROVIDER = process.env.LLM_PROVIDER as "anthropic" | "openai" | "ollama" | undefined;
 const LLM_MODEL = process.env.LLM_MODEL;
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL;
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL;
 
-const llmConfig = LLM_API_KEY ? {
-  apiKey: LLM_API_KEY,
-  provider: LLM_PROVIDER,
-  model: LLM_MODEL,
-} : {};
+// Prefer Ollama when OLLAMA_BASE_URL is set, otherwise fall back to Anthropic/OpenAI
+const llmConfig = OLLAMA_BASE_URL
+  ? {
+      provider: "ollama" as const,
+      baseURL: OLLAMA_BASE_URL,
+      model: OLLAMA_MODEL || LLM_MODEL,
+    }
+  : LLM_API_KEY
+    ? {
+        apiKey: LLM_API_KEY,
+        provider: LLM_PROVIDER,
+        model: LLM_MODEL,
+      }
+    : {};
 
 // Initialize agents with LLM config
 const riskAgent = new RiskAgent(llmConfig);
