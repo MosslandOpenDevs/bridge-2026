@@ -7,6 +7,7 @@ import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { ExperimentalBanner } from "@/components/ExperimentalBanner";
 import { ExperimentalWarningModal } from "@/components/ExperimentalWarningModal";
+import { NpcCityStrip } from "@/components/NpcCityStrip";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -38,6 +39,9 @@ export default async function RootLayout({
               <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-1">
                 {children}
               </main>
+              {/* NPC city cross-link — read-side fetch with 10-min
+                  revalidate; renders nothing if npc.moss.land is down. */}
+              <NpcCityStrip />
               <Footer />
             </div>
           </Providers>
