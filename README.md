@@ -10,6 +10,8 @@ This repository defines the **vision, conceptual architecture, and specification
 
 **Core Vision**: "Mossland becomes a self-evolving ecosystem where reality is covered with data like moss (Reality Oracle), agents define problems on that data (Inference Mining), communities reach consensus (Agentic Consensus), reality/products are updated (Atomic Actuation), and results are proven (Proof of Outcome)."
 
+**Live Media Layer**: [Alpha](https://alpha.moss.land?utm_source=github&utm_medium=referral&utm_campaign=bridge-readme) (alpha.moss.land) — Mossland's crypto × AI media that consumes upstream signals and surfaces them as channel-stance distributions, AI-synthesized briefs, and a 12-tool MCP server for Claude / Cursor. The kind of user-facing surface BRIDGE 2026's outputs feed into ([alpha repo](https://github.com/MosslandOpenDevs/alpha)).
+
 ---
 
 ## What BRIDGE 2026 is
