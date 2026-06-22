@@ -27,10 +27,10 @@ module.exports = {
       name: 'oracle-web',
       cwd: './apps/web',
       script: './node_modules/.bin/next',
-      args: 'dev --port 3100',
+      args: 'start --port 3100',
       interpreter: 'none',
       env: {
-        NODE_ENV: 'development',
+        NODE_ENV: 'production',
         NEXT_PUBLIC_API_URL: '',
       },
       env_production: {

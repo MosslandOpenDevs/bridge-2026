@@ -1,4 +1,5 @@
-import { API_BASE_URL } from "./config";
+// Empty string means same origin, which lets nginx proxy /api and /socket.io.
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
 class APIClient {
   private baseUrl: string;
