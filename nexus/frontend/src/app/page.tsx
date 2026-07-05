@@ -150,7 +150,7 @@ export default function Home() {
               <strong>Contract:</strong>
             </p>
             <p className="text-sm font-mono text-moss-600 mb-4 break-all">
-              {process.env.NEXT_PUBLIC_MOSS_COIN_ADDRESS || '0x8bbfe65e31b348cd823c62e02ad8c19a84d'}
+              {process.env.NEXT_PUBLIC_MOSS_COIN_ADDRESS || '0x8bbfe65e31b348cd823c62e02ad8c19a84dd0dab'}
             </p>
             <p className="text-gray-600 text-sm">
               ERC-20 기반 거버넌스 토큰

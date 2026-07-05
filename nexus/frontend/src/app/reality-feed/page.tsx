@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { SignalCard } from '@/components/signal-card';
 import { useState, useEffect } from 'react';
 import type { Signal } from '@bridge-2026/shared';
+import { api } from '@/lib/api';
 
 export default function RealityFeedPage() {
   const [signals, setSignals] = useState<Signal[]>([]);

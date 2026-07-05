@@ -2,8 +2,8 @@
  * Smart Contract Addresses
  */
 
-export const MOSS_COIN_ADDRESS = process.env.NEXT_PUBLIC_MOSS_COIN_ADDRESS || 
-  '0x8bbfe65e31b348cd823c62e02ad8c19a84d';
+export const MOSS_COIN_ADDRESS = process.env.NEXT_PUBLIC_MOSS_COIN_ADDRESS ||
+  '0x8bbfe65e31b348cd823c62e02ad8c19a84dd0dab';
 
 // TODO: 실제 거버넌스 컨트랙트 주소
 export const GOVERNANCE_CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_GOVERNANCE_CONTRACT_ADDRESS || 

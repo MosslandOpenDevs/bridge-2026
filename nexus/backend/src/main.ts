@@ -1,16 +1,33 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  
-  // CORS 설정
+
+  // Secure HTTP headers (CSP off by default for API-only responses).
+  app.use(helmet());
+
+  // Global rate limit to blunt naive flooding / brute force. Env-tunable.
+  const rateLimitMax = parseInt(process.env.RATE_LIMIT_GLOBAL || '120', 10);
+  app.use(
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: rateLimitMax,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: { error: 'Too many requests' },
+    }),
+  );
+
+  // CORS: restrict to the configured frontend origin.
   app.enableCors({
     origin: process.env.FRONTEND_URL || 'http://localhost:3000',
     credentials: true,
   });
-  
+
   // Validation 파이프
   app.useGlobalPipes(
     new ValidationPipe({
@@ -19,7 +36,7 @@ async function bootstrap() {
       transform: true,
     })
   );
-  
+
   const port = process.env.PORT || 3001;
   await app.listen(port);
   

@@ -10,7 +10,7 @@ export class BlockchainService {
     const rpcUrl = process.env.RPC_URL || 'https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY';
     this.provider = new ethers.JsonRpcProvider(rpcUrl);
     
-    const mossCoinAddress = process.env.MOSS_COIN_ADDRESS || '0x8bbfe65e31b348cd823c62e02ad8c19a84d';
+    const mossCoinAddress = process.env.MOSS_COIN_ADDRESS || '0x8bbfe65e31b348cd823c62e02ad8c19a84dd0dab';
     const abi = [
       'function balanceOf(address owner) view returns (uint256)',
       'function totalSupply() view returns (uint256)',
