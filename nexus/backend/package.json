@@ -29,6 +29,8 @@
     "class-validator": "^0.14.0",
     "class-transformer": "^0.5.1",
     "ethers": "^6.8.0",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
     "uuid": "^9.0.0"
   },
   "devDependencies": {

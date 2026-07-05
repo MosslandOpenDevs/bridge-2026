@@ -291,6 +291,22 @@ const RATE_LIMIT_GLOBAL = parseInt(process.env.RATE_LIMIT_GLOBAL || "120", 10);
 const RATE_LIMIT_LLM = parseInt(process.env.RATE_LIMIT_LLM || "6", 10);
 const RATE_LIMIT_VOTE = parseInt(process.env.RATE_LIMIT_VOTE || "20", 10);
 
+// Upper bound for client-supplied voting weight in non-MOC (demo) mode.
+// Defaults to MOC total supply (500M * 1e18). Rejecting absurd/negative
+// values prevents tally corruption; note demo mode is NOT sybil-resistant —
+// enable MOC verification and REQUIRE_VOTE_SIGNATURE=always in production.
+const MAX_VOTE_WEIGHT = BigInt(
+  process.env.MAX_VOTE_WEIGHT || "500000000000000000000000000",
+);
+
+// Clamp a client-supplied list limit into a sane range so a caller can't ask
+// for an unbounded / negative SQL LIMIT.
+function clampLimit(raw: unknown, fallback: number, max = 500): number {
+  const n = parseInt(String(raw), 10);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(n, max);
+}
+
 // Global rate limiter — protects every endpoint from naive flooding.
 app.use(
   "/api/",
@@ -376,7 +392,7 @@ app.get("/health", (req, res) => {
 // Signal endpoints
 app.get("/api/signals", async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit as string) || 100;
+    const limit = clampLimit(req.query.limit, 100);
     const category = req.query.category as string;
 
     let rows;
@@ -435,7 +451,7 @@ function populateIssueSignals(issue: any) {
 // Issue endpoints
 app.get("/api/issues", async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit as string) || 50;
+    const limit = clampLimit(req.query.limit, 50);
     const status = req.query.status as string;
     const includeSignals = req.query.includeSignals !== "false"; // Include signals by default
 
@@ -508,9 +524,18 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
   }
 });
 
-app.patch("/api/issues/:id", async (req, res) => {
+const VALID_ISSUE_STATUSES = ["detected", "deliberating", "proposed", "resolved"];
+
+app.patch("/api/issues/:id", requireAdminKey, async (req, res) => {
   try {
     const { status, decisionPacket } = req.body;
+
+    if (status !== undefined && !VALID_ISSUE_STATUSES.includes(String(status))) {
+      return res.status(400).json({
+        error: `status must be one of: ${VALID_ISSUE_STATUSES.join(", ")}`,
+      });
+    }
+
     const issue = issueDb.getById.get(req.params.id);
 
     if (!issue) {
@@ -718,7 +743,7 @@ app.get("/api/proposals", (req, res) => {
   }
 });
 
-app.post("/api/proposals", (req, res) => {
+app.post("/api/proposals", requireAdminKey, (req, res) => {
   try {
     const { decisionPacket, proposer, options } = req.body;
     if (!decisionPacket || !proposer) {
@@ -796,11 +821,26 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
         votingWeight = await blockchainService.verifyVoterEligibility(voter as `0x${string}`);
         console.log(`✅ Voter ${voter} verified: ${Number(votingWeight) / 1e18} MOC`);
       } else {
-        // Fallback to provided weight if MOC service not enabled
-        if (!weight) {
+        // Demo mode: MOC verification disabled, so weight is client-supplied.
+        // Validate it is a positive integer within a sane bound so a caller
+        // can't corrupt tallies with a negative value or dominate the
+        // threshold with an absurd one. (Full sybil resistance requires MOC.)
+        if (weight === undefined || weight === null || weight === "") {
           return res.status(400).json({ error: "weight is required when MOC verification is disabled" });
         }
-        votingWeight = BigInt(weight);
+        let parsedWeight: bigint;
+        try {
+          parsedWeight = BigInt(weight);
+        } catch {
+          return res.status(400).json({ error: "weight must be an integer" });
+        }
+        if (parsedWeight <= 0n) {
+          return res.status(400).json({ error: "weight must be a positive integer" });
+        }
+        if (parsedWeight > MAX_VOTE_WEIGHT) {
+          return res.status(400).json({ error: "weight exceeds the maximum allowed" });
+        }
+        votingWeight = parsedWeight;
       }
     } catch (verifyError: any) {
       return res.status(403).json({
@@ -1032,6 +1072,9 @@ app.post("/api/outcomes", requireAdminKey, async (req, res) => {
     if (!proposalId || !actions) {
       return res.status(400).json({ error: "proposalId and actions are required" });
     }
+    if (!Array.isArray(actions)) {
+      return res.status(400).json({ error: "actions must be an array" });
+    }
     const execution = await outcomeTracker.recordExecution(proposalId, actions);
     res.status(201).json({ execution });
   } catch (error) {
@@ -1076,7 +1119,7 @@ app.get("/api/trust/:entityId", (req, res) => {
 app.get("/api/trust/leaderboard/:type", (req, res) => {
   try {
     const entityType = req.params.type as "agent" | "proposer" | "delegate";
-    const limit = parseInt(req.query.limit as string) || 10;
+    const limit = clampLimit(req.query.limit, 10, 100);
     const topPerformers = trustManager.getTopPerformers(entityType, limit);
     res.json({ leaderboard: topPerformers });
   } catch (error) {
