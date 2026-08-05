@@ -108,7 +108,7 @@ bridge-2026/
     ├── backend/         # NestJS API (signals, proposals, delegation, outcomes)
     ├── reality-oracle/  · inference-mining/ · agentic-consensus/
     ├── human-governance/ (Solidity BridgeLog) · proof-of-outcome/
-    ├── atomic-actuation/ · inference-mining/ · integration/
+    ├── atomic-actuation/ · infrastructure/ · integration/ · shared/
     └── implementation/  # specs: mvp-spec, delegation-policy, project-structure
 ```
 
@@ -125,18 +125,20 @@ Each sub-package carries its own `README.md`. The **`oracle/`** tree is the acti
 ```bash
 cd oracle
 pnpm install
+pnpm --filter "@oracle/web..." build   # web needs a production build for pm2
 
-# Run everything with pm2 (recommended)
-pm2 start ecosystem.config.cjs
+# Run the web + API with pm2 (recommended)
+pm2 start ecosystem.config.cjs --only oracle-api,oracle-web
 #   Web  → http://localhost:3100
 #   API  → http://localhost:3101
+#   (bridge-deploy in the same file is the server-side auto-deployer — do not start it locally)
 
 # …or run apps individually for development
-pnpm --filter @oracle/api dev   # Express API
-pnpm --filter @oracle/web dev   # Next.js web (port 3100)
+PORT=3101 pnpm --filter @oracle/api dev   # Express API (defaults to 4000 without PORT)
+pnpm --filter @oracle/web dev             # Next.js web (port 3100)
 ```
 
-Copy `oracle/apps/api/.env.example` → `.env` and fill in the values you need
+Copy `oracle/apps/api/.env.example` → `oracle/apps/api/.env` and fill in the values you need
 (LLM keys, RPC URL, `ADMIN_API_KEY`, etc.). **MOC verification is on by
 default** — the API falls back to a public Ethereum RPC for read-only Moss
 Coin balance checks, so votes require a wallet signature and a nonzero MOC
@@ -261,10 +263,10 @@ the web app). The API exposes `GET /api/health` for uptime monitoring.
 Deploys are **pull-based**: a one-shot script
 ([`oracle/scripts/deploy.sh`](oracle/scripts/deploy.sh)) runs on the app server
 every 5 minutes as the pm2 app `bridge-deploy`. When `origin/main` moves it
-classifies the diff (docs-only changes skip build and restart), snapshots the
-SQLite DB, rebuilds only what changed, restarts the affected pm2 apps, health
-checks, and **rolls back automatically** on failure. Merging to `main` is
-deploying. Operations detail:
+classifies the diff, snapshots the SQLite DB, rebuilds only what changed,
+restarts the affected pm2 apps, health checks, and **rolls back automatically**
+on failure. Merging code to `main` is deploying; **docs-only merges are not
+deployed at all** — the next code deploy carries them. Operations detail:
 [`oracle/deploy/README.md`](oracle/deploy/README.md).
 
 ---
