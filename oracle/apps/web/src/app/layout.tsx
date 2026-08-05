@@ -21,7 +21,7 @@ const SITE_URL =
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
-    default: "BRIDGE 2026 — Physical AI Governance OS",
+    default: "BRIDGE 2026 — Physical AI Governance OS · Mossland",
     template: "%s · BRIDGE 2026",
   },
   description:
@@ -47,14 +47,14 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     url: SITE_URL,
-    siteName: "BRIDGE 2026",
-    title: "BRIDGE 2026 — Physical AI Governance OS",
+    siteName: "Mossland",
+    title: "BRIDGE 2026 — Physical AI Governance OS · Mossland",
     description:
       "Where agents propose, people decide, reality updates. Mossland's reality-driven governance system.",
   },
   twitter: {
     card: "summary_large_image",
-    title: "BRIDGE 2026 — Physical AI Governance OS",
+    title: "BRIDGE 2026 — Physical AI Governance OS · Mossland",
     description:
       "Where agents propose, people decide, reality updates. Mossland's reality-driven governance system.",
     creator: "@TheMossland",
