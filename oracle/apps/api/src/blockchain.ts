@@ -248,7 +248,14 @@ export class BlockchainService {
     const privateKey = process.env.ORACLE_PRIVATE_KEY;
     const contractAddress = process.env.GOVERNANCE_CONTRACT_ADDRESS;
     const chainId = process.env.CHAIN_ID || "31337"; // Default to hardhat
-    const mainnetRpcUrl = process.env.MAINNET_RPC_URL || process.env.ETHERSCAN_RPC_URL;
+    // MOC balance checks are read-only, so a public RPC is enough to enable
+    // them out of the box. Set MAINNET_RPC_URL=off to force demo mode, or set
+    // a dedicated (e.g. Alchemy/Infura) URL for production reliability.
+    const configuredMainnetRpc = process.env.MAINNET_RPC_URL || process.env.ETHERSCAN_RPC_URL;
+    const mainnetRpcUrl =
+      configuredMainnetRpc === "off"
+        ? undefined
+        : configuredMainnetRpc || "https://ethereum-rpc.publicnode.com";
 
     // Initialize mainnet client for MOC token balance checks
     if (mainnetRpcUrl) {
@@ -263,7 +270,7 @@ export class BlockchainService {
         console.warn("⚠️  MOC token service disabled:", error);
       }
     } else {
-      console.log("⚠️  MOC token service disabled: Missing MAINNET_RPC_URL");
+      console.log("⚠️  MOC token service disabled: MAINNET_RPC_URL=off");
     }
 
     if (!rpcUrl || !privateKey || !contractAddress) {

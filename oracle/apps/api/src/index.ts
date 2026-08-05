@@ -381,13 +381,16 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
 });
 
 // Health check
-app.get("/health", (req, res) => {
+// Registered under /api as well, since nginx only proxies /api/* to this app
+const healthHandler = (req: express.Request, res: express.Response) => {
   res.json({
     status: "ok",
     version: "0.1.0",
     timestamp: new Date().toISOString(),
   });
-});
+};
+app.get("/health", healthHandler);
+app.get("/api/health", healthHandler);
 
 // Signal endpoints
 app.get("/api/signals", async (req, res) => {

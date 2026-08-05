@@ -5,9 +5,29 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
 import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Play, Zap } from "lucide-react";
 import { cn, getStatusColor, timeAgo, formatNumber } from "@/lib/utils";
+import { useSignMessage } from "wagmi";
 import { useVotingPower, useAccount } from "@/hooks/useMOC";
 import { useToast } from "@/contexts/ToastContext";
 import { api } from "@/lib/api";
+
+// Must match buildVoteMessage() in apps/api/src/security.ts exactly.
+function buildVoteMessage(params: {
+  proposalId: string;
+  choice: string;
+  voter: string;
+  nonce: string;
+  timestamp: number;
+}): string {
+  const { proposalId, choice, voter, nonce, timestamp } = params;
+  return [
+    "BRIDGE Oracle Vote",
+    `Proposal: ${proposalId}`,
+    `Voter: ${voter.toLowerCase()}`,
+    `Choice: ${choice.toLowerCase()}`,
+    `Nonce: ${nonce}`,
+    `Timestamp: ${timestamp}`,
+  ].join("\n");
+}
 
 function VotingBar({ forVotes, againstVotes, abstainVotes, t }: { forVotes: number; againstVotes: number; abstainVotes: number; t: any }) {
   const total = forVotes + againstVotes + abstainVotes;
@@ -47,15 +67,30 @@ function VoteModal({ proposal, onClose, onSuccess, t }: { proposal: any; onClose
     dp?.issue?.title ||
     `Proposal #${proposal.id.slice(0, 8)}`;
 
+  const { signMessageAsync } = useSignMessage();
+
   const voteMutation = useMutation({
     mutationFn: async () => {
       if (!selectedChoice || !address) throw new Error("Invalid vote");
+      // Sign the vote so the API can verify it (EIP-191, anti-spoofing).
+      const nonce = crypto.randomUUID();
+      const timestamp = Date.now();
+      const signature = await signMessageAsync({
+        message: buildVoteMessage({
+          proposalId: proposal.id,
+          choice: selectedChoice,
+          voter: address,
+          nonce,
+          timestamp,
+        }),
+      });
       return api.castVote(
         proposal.id,
         address,
         selectedChoice,
         votingPower?.toString() || "1",
-        reason || undefined
+        reason || undefined,
+        { signature, nonce, timestamp }
       );
     },
     onSuccess: () => {
