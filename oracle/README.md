@@ -67,6 +67,22 @@ pnpm --filter @oracle/api dev   # API (port 3101)
 pnpm --filter @oracle/web dev   # Web (port 3100)
 ```
 
+> **MOC 검증 기본 활성화**: API는 별도 설정 없이 공개 이더리움 RPC로 MOC 잔고를
+> 검증합니다 — 투표에는 지갑 서명(EIP-191)과 MOC 보유가 필요하고, 잔고가 곧
+> 투표 가중치입니다. 로컬 탐색용 오픈 데모 모드는 `.env`에
+> `MAINNET_RPC_URL=off`를 설정하세요.
+
+## 배포 (Production)
+
+bridge.moss.land 는 nginx(SSL) 뒤에서 pm2로 `oracle-api`(3101) /
+`oracle-web`(3100)을 실행하며, 헬스체크는 `GET /api/health` 입니다.
+
+배포는 **pull 방식 자동배포**입니다: pm2 앱 `bridge-deploy`가 5분마다
+[`scripts/deploy.sh`](scripts/deploy.sh)를 실행해 `origin/main`이 움직였을 때만
+변경 분류 → SQLite 스냅샷 → 필요한 것만 빌드 → 해당 pm2 앱만 재시작 →
+헬스체크(실패 시 자동 롤백)를 수행합니다. 즉 **main에 머지하면 곧 배포**입니다.
+자세한 운영 방법은 [`deploy/README.md`](deploy/README.md) 참고.
+
 ## 2026 H1 MVP 범위
 
 ### 포함
