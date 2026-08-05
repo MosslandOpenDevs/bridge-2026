@@ -13,6 +13,9 @@
 # as Algora's scripts/deploy.sh, adapted for this repo's layout: the git root is
 # bridge-2026/ while the pnpm workspace root is bridge-2026/oracle/.
 #
+# Doc-only pushes (README, docs, nexus/, …) are not deployment events: the
+# script leaves the checkout untouched and the next code deploy carries them.
+#
 # Restarting oracle-api kills any in-flight debate session; that is accepted
 # (signal collection and issue detection resume on their own timers).
 #
@@ -137,6 +140,50 @@ fi
 
 CHANGED=$(git diff --name-only "${CURRENT}" "${TARGET}")
 SUBJECT=$(git log -1 --format='%s' "${TARGET}")
+
+# What kind of change is this? Everything lives under oracle/ — nexus/ and root
+# docs never require a build or restart. oracle/packages/* and the workspace
+# config feed both apps, so they mark both. oracle/scripts/* and the ecosystem
+# file are deploy infrastructure: they must reach the server (the script
+# self-updates via the reset) but need no build or restart.
+API_CHANGED=0
+WEB_CHANGED=0
+DEPS_CHANGED=0
+ECOSYSTEM_CHANGED=0
+INFRA_CHANGED=0
+while IFS= read -r f; do
+  [ -n "${f}" ] || continue
+  case "${f}" in
+    oracle/apps/api/*) API_CHANGED=1 ;;
+    oracle/apps/web/*) WEB_CHANGED=1 ;;
+    oracle/packages/*|oracle/package.json|oracle/turbo.json|oracle/tsconfig*.json) API_CHANGED=1; WEB_CHANGED=1 ;;
+    oracle/scripts/*) INFRA_CHANGED=1 ;;
+  esac
+  case "${f}" in
+    oracle/pnpm-lock.yaml) DEPS_CHANGED=1; API_CHANGED=1; WEB_CHANGED=1 ;;
+    oracle/ecosystem.config.cjs) ECOSYSTEM_CHANGED=1 ;;
+  esac
+done <<EOF
+${CHANGED}
+EOF
+
+# Docs-only pushes (README, docs/, nexus/, …) are NOT deployment events: the
+# server serves no docs, so leave the checkout untouched and let the next code
+# deploy carry them along. Remember the skipped tip so repeat ticks stay quiet.
+SKIP_STATE="${APP_ROOT}/logs/.deploy-docs-skipped"
+if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ] \
+   && [ "${ECOSYSTEM_CHANGED}" = "0" ] && [ "${INFRA_CHANGED}" = "0" ]; then
+  if [ "${CHECK_ONLY}" = "1" ]; then
+    log "--check: docs-only change ${CURRENT:0:8} -> ${TARGET:0:8} -- would skip (no deploy)"
+    exit 0
+  fi
+  if [ ! -f "${SKIP_STATE}" ] || [ "$(cat "${SKIP_STATE}" 2>/dev/null)" != "${TARGET}" ]; then
+    log "docs-only change ${CURRENT:0:8} -> ${TARGET:0:8} (${SUBJECT}) -- skipping (no deploy)"
+    mkdir -p "$(dirname "${SKIP_STATE}")" && echo "${TARGET}" >"${SKIP_STATE}"
+  fi
+  exit 0
+fi
+
 log "update available: ${CURRENT:0:8} -> ${TARGET:0:8} (${SUBJECT})"
 
 # ---------------------------------------------------------------------------
@@ -198,31 +245,9 @@ if [ "${DEPLOY_REQUIRE_CI}" = "1" ] && [ "${FORCE}" = "0" ]; then
   esac
 fi
 
-# What kind of change is this? Everything lives under oracle/ — nexus/ and root
-# docs never require a build or restart. oracle/packages/* and the workspace
-# config feed both apps, so they mark both.
-API_CHANGED=0
-WEB_CHANGED=0
-DEPS_CHANGED=0
-ECOSYSTEM_CHANGED=0
-while IFS= read -r f; do
-  [ -n "${f}" ] || continue
-  case "${f}" in
-    oracle/apps/api/*) API_CHANGED=1 ;;
-    oracle/apps/web/*) WEB_CHANGED=1 ;;
-    oracle/packages/*|oracle/package.json|oracle/turbo.json|oracle/tsconfig*.json) API_CHANGED=1; WEB_CHANGED=1 ;;
-  esac
-  case "${f}" in
-    oracle/pnpm-lock.yaml) DEPS_CHANGED=1; API_CHANGED=1; WEB_CHANGED=1 ;;
-    oracle/ecosystem.config.cjs) ECOSYSTEM_CHANGED=1 ;;
-  esac
-done <<EOF
-${CHANGED}
-EOF
-
 if [ "${CHECK_ONLY}" = "1" ]; then
   log "--check: would deploy ${TARGET:0:8} (api=${API_CHANGED} web=${WEB_CHANGED} \
-deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED})"
+deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED} infra=${INFRA_CHANGED})"
   exit 0
 fi
 
@@ -338,7 +363,7 @@ if [ "${ECOSYSTEM_CHANGED}" = "1" ]; then
 fi
 
 if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ]; then
-  log "DEPLOYED ${CURRENT:0:8} -> ${TARGET:0:8} (docs/scripts only -- no build or restart)"
+  log "DEPLOYED ${CURRENT:0:8} -> ${TARGET:0:8} (deploy scripts/config only -- checkout updated, no build or restart)"
   exit 0
 fi
 

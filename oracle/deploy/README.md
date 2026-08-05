@@ -17,10 +17,13 @@ no public inbound), so the server pulls.
 What a deploy tick does:
 
 1. `git fetch` — exits immediately when already at the remote tip
-2. Guards: refuses to touch a checkout that is on another branch or has local
+2. Classifies the diff — **docs-only merges (README, docs, nexus/) are not
+   deployed at all**: the checkout is left untouched and the next code deploy
+   carries them. `oracle/apps/api` → API, `oracle/apps/web` → web,
+   `oracle/packages` → both; `oracle/scripts` / `ecosystem.config.cjs` update
+   the checkout without build or restart
+3. Guards: refuses to touch a checkout that is on another branch or has local
    tracked-file edits; optional CI-green gate (`DEPLOY_REQUIRE_CI=1`)
-3. Classifies the diff — docs/nexus-only changes skip build and restart;
-   `oracle/apps/api` → API, `oracle/apps/web` → web, `oracle/packages` → both
 4. Best-effort SQLite snapshot to `apps/api/data/backup/` before API changes
 5. `git reset --hard` to the tip (untracked `.env` / `data/` are never touched;
    the script never runs `git clean`)
