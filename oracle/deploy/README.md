@@ -17,9 +17,10 @@ no public inbound), so the server pulls.
 What a deploy tick does:
 
 1. `git fetch` — exits immediately when already at the remote tip
-2. Classifies the diff — **docs-only merges (README, docs, nexus/) are not
-   deployed at all**: the checkout is left untouched and the next code deploy
-   carries them. `oracle/apps/api` → API, `oracle/apps/web` → web,
+2. Classifies the diff — **docs-only merges (README, docs, nexus/) are synced,
+   not deployed**: the checkout is reset to the tip so on-server docs stay
+   current, but nothing is built, restarted, or snapshotted (logged as
+   `SYNCED`). `oracle/apps/api` → API, `oracle/apps/web` → web,
    `oracle/packages` → both; `oracle/scripts` / `ecosystem.config.cjs` update
    the checkout without build or restart
 3. Guards: refuses to touch a checkout that is on another branch or has local

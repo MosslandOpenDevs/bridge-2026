@@ -85,8 +85,9 @@ bridge.moss.land는 nginx(SSL) 뒤에서 pm2로 `oracle-api`(3101) /
 [`scripts/deploy.sh`](scripts/deploy.sh)를 실행해 `origin/main`이 움직였을 때만
 변경 분류 → SQLite 스냅샷 → 필요한 것만 빌드 → 해당 pm2 앱만 재시작 →
 헬스체크(실패 시 자동 롤백)를 수행합니다. **코드가 main에 머지되면 곧
-배포**되고, 문서만 바뀐 머지는 배포하지 않습니다(다음 코드 배포에 함께
-반영). 자세한 운영 방법은 [`deploy/README.md`](deploy/README.md) 참고.
+배포**되고, 문서만 바뀐 머지는 서버 체크아웃만 동기화하며 배포로 취급하지
+않습니다(빌드·재시작 없음, 로그에 `SYNCED`로 기록). 자세한 운영 방법은
+[`deploy/README.md`](deploy/README.md) 참고.
 
 ## 2026 H1 MVP 범위
 
