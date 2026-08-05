@@ -50,8 +50,10 @@ MOC 홀더의 3가지 역할:
 # 의존성 설치
 pnpm install
 
-# 웹 프로덕션 빌드 (pm2의 next start에 선행 필요; API는 tsx 실행이라 빌드 불필요)
+# 프로덕션 빌드 (pm2 기동에 선행 필요: web은 next start가 .next를,
+# api는 node가 apps/api/dist를 읽는다)
 pnpm --filter "@oracle/web..." build
+pnpm --filter "@oracle/api..." build
 
 # pm2로 서버 실행 (권장)
 # bridge-deploy는 운영 서버 전용 자동배포 프로세스 — 로컬에서 켜지 말 것

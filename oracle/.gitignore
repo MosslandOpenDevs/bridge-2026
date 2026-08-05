@@ -6,8 +6,10 @@ dist/
 build/
 *.tsbuildinfo
 
-# Next.js
+# Next.js (.next.new / .next.old are deploy.sh's atomic-swap staging dirs)
 .next/
+.next.new/
+.next.old/
 out/
 
 # Environment
