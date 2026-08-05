@@ -100,10 +100,17 @@ class APIClient {
     return this.fetch<{ proposal: any }>(`/api/proposals/${id}`);
   }
 
-  async castVote(proposalId: string, voter: string, choice: string, weight: string, reason?: string) {
+  async castVote(
+    proposalId: string,
+    voter: string,
+    choice: string,
+    weight: string,
+    reason?: string,
+    auth?: { signature: string; nonce: string; timestamp: number }
+  ) {
     return this.fetch<{ vote: any }>(`/api/proposals/${proposalId}/vote`, {
       method: "POST",
-      body: JSON.stringify({ voter, choice, weight, reason }),
+      body: JSON.stringify({ voter, choice, weight, reason, ...auth }),
     });
   }
 
