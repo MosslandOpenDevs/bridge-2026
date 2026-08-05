@@ -46,5 +46,21 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       merge_logs: true,
     },
+    {
+      // Pull-based auto-deploy (same pattern as algora-deploy / moss-ao-deploy):
+      // a one-shot script pm2 re-runs on a cron schedule. The :03 offset
+      // staggers it against algora (:01) and moss-ao (:04) on the shared box.
+      name: 'bridge-deploy',
+      cwd: '.',
+      script: './scripts/deploy.sh',
+      interpreter: 'bash',
+      autorestart: false,
+      cron_restart: '3-59/5 * * * *',
+      watch: false,
+      error_file: './logs/deploy-error.log',
+      out_file: './logs/deploy-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      merge_logs: true,
+    },
   ],
 };

@@ -1,42 +1,53 @@
 # Deployment
 
-Production runs like ao/algora: nginx on the Lightsail box (13.209.131.190)
-terminates SSL for `bridge.moss.land` and reverse-proxies to the pm2 machine,
-which runs `oracle-web` (port 3100) and `oracle-api` (port 3101) from
-`ecosystem.config.cjs`.
+Production runs like ao/algora: nginx on the Lightsail box terminates SSL for
+`bridge.moss.land` and reverse-proxies (over Tailscale) to the application
+server, which runs `oracle-web` (port 3100) and `oracle-api` (port 3101) from
+[`ecosystem.config.cjs`](../ecosystem.config.cjs).
 
 ## Auto-deploy
 
-The pm2 machine sits behind NAT, so instead of a push-based CI deploy the
-machine polls the repo and redeploys itself when `main` moves
-([auto-deploy.sh](auto-deploy.sh)).
+Same mechanism as `algora-deploy` / `moss-ao-deploy` on the shared box: a
+one-shot script, [`scripts/deploy.sh`](../scripts/deploy.sh), registered as the
+pm2 app **`bridge-deploy`** with `cron_restart: '3-59/5 * * * *'` — every 5
+minutes it fetches `origin/main` and, only when the remote moved, rebuilds and
+restarts what changed. Push CI can't reach the app server (Tailscale-only,
+no public inbound), so the server pulls.
 
-One-time setup on the pm2 machine:
+What a deploy tick does:
+
+1. `git fetch` — exits immediately when already at the remote tip
+2. Guards: refuses to touch a checkout that is on another branch or has local
+   tracked-file edits; optional CI-green gate (`DEPLOY_REQUIRE_CI=1`)
+3. Classifies the diff — docs/nexus-only changes skip build and restart;
+   `oracle/apps/api` → API, `oracle/apps/web` → web, `oracle/packages` → both
+4. Best-effort SQLite snapshot to `apps/api/data/backup/` before API changes
+5. `git reset --hard` to the tip (untracked `.env` / `data/` are never touched;
+   the script never runs `git clean`)
+6. Build (workspace packages + `next build`) and `pm2 restart` only the
+   affected app — never `pm2 restart all` on this shared box
+7. Health checks (`/api/health`, web `/`); on failure it **rolls back** to the
+   previous commit, rebuilds, and alerts (`DEPLOY_ALERT_WEBHOOK`)
+
+One-time registration on the app server:
 
 ```bash
-chmod +x /path/to/bridge-2026/oracle/deploy/auto-deploy.sh
-crontab -e
-# add:
-*/2 * * * * /path/to/bridge-2026/oracle/deploy/auto-deploy.sh >> $HOME/bridge-deploy.log 2>&1
+cd ~/bridge-2026/oracle
+pm2 start ecosystem.config.cjs --only bridge-deploy
+pm2 save
 ```
 
-What each run does:
+Useful invocations on the server:
 
-1. `git fetch` — exits immediately if `origin/main` hasn't moved (cheap; safe every 2 min)
-2. `git pull --ff-only` — never force-overwrites local state
-3. `pnpm install --frozen-lockfile` + workspace package builds + `next build`
-4. `pm2 startOrRestart ecosystem.config.cjs`
-5. Health checks `GET /api/health` (API) and `GET /` (web), logging the result
-
-Notes:
-
-- A lock dir prevents overlapping runs; stale locks (>30 min) are cleared automatically.
-- Deploy a different branch with `BRIDGE_DEPLOY_BRANCH=<branch>` in the cron line.
-- Nothing on GitHub needs secrets or runners — the machine only needs read access to the repo.
-- To deploy manually, just run the script directly.
+```bash
+oracle/scripts/deploy.sh --check   # dry run: report what would happen
+oracle/scripts/deploy.sh           # deploy now if the remote moved
+oracle/scripts/deploy.sh --force   # override guards (discards local edits!)
+tail -f ~/bridge-2026/oracle/logs/deploy.log
+```
 
 ## nginx (Lightsail box)
 
-`bridge.moss.land` should proxy `/api` and `/socket.io` to the pm2 machine's
-port 3101 and everything else to port 3100. The API's health endpoint is
-exposed at `/api/health` for external uptime monitoring.
+`bridge.moss.land` proxies `/api` and `/socket.io` to the app server's port
+3101 and everything else to port 3100. The API's health endpoint is exposed at
+`/api/health` for external uptime monitoring.
