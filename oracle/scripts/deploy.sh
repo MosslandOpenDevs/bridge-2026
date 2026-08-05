@@ -47,6 +47,20 @@
 
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Env hygiene. When this script runs under PM2 (the bridge-deploy poller),
+# PM2 injects the poller's OWN process config into the environment as plain
+# variables -- cron_restart, autorestart, watch, ... -- and PM2 reads those
+# same names back as config keys. Any `pm2 ... --update-env` (or `pm2 start`)
+# executed with them present stamps the poller's config onto the target app:
+# exactly this attached the deploy cron (3-59/5) to oracle-web, force-
+# restarting it every 5 minutes (2026-08-05 incident, first found in
+# agentic-orchestrator -- see its docs/deployment.md "cron_restart 오염").
+# Scrub them so no pm2 invocation in this script can inherit them.
+# ---------------------------------------------------------------------------
+unset -v cron_restart autorestart watch instances exec_mode \
+         max_memory_restart node_args name namespace || true
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 APP_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)     # bridge-2026/oracle — pnpm/pm2 root
 REPO_ROOT=$(cd -- "${APP_ROOT}/.." && pwd)      # bridge-2026 — git root
@@ -306,14 +320,20 @@ build_and_restart() {
       || { log "ERROR web build failed"; return 1; }
   fi
 
+  # No --update-env on these restarts. It would merge THIS process's
+  # environment into the target app's stored definition -- and under PM2 that
+  # environment carries the deploy poller's own config keys (cron_restart & co,
+  # scrubbed at the top but a future edit could reintroduce one) plus
+  # deploy-only values like GITHUB_TOKEN. The apps' env is registered once from
+  # ecosystem.config.cjs; a plain restart preserves it (2026-08-05 incident).
   if [ "${api}" = "1" ]; then
     log "pm2 restart oracle-api"
-    "${PM2_BIN}" restart oracle-api --update-env >/dev/null \
+    "${PM2_BIN}" restart oracle-api >/dev/null \
       || { log "ERROR pm2 restart oracle-api failed"; return 1; }
   fi
   if [ "${web}" = "1" ]; then
     log "pm2 restart oracle-web"
-    "${PM2_BIN}" restart oracle-web --update-env >/dev/null \
+    "${PM2_BIN}" restart oracle-web >/dev/null \
       || { log "ERROR pm2 restart oracle-web failed"; return 1; }
   fi
   # Never `pm2 restart all` here: the box hosts ~20 unrelated projects.
@@ -363,6 +383,9 @@ if [ "${ECOSYSTEM_CHANGED}" = "1" ]; then
   log "NOTE ecosystem.config.cjs changed -- process definitions (cron, env) are"
   log "     NOT re-registered automatically. Run on the server when convenient:"
   log "     cd oracle && pm2 restart ecosystem.config.cjs --update-env && pm2 save"
+  log "     (from a login shell only -- never from inside a PM2-managed process:"
+  log "      PM2 injects config keys like cron_restart into the environment and"
+  log "      --update-env would copy them onto every app)"
 fi
 
 if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ]; then
