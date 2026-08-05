@@ -3,7 +3,7 @@
 > **Where agents propose, people decide, reality updates.**
 
 <p>
-  <img alt="Status" src="https://img.shields.io/badge/status-conceptual%20%2B%20MVP-16a34a" />
+  <img alt="Status" src="https://img.shields.io/badge/status-live%20MVP%20%2B%20spec-16a34a" />
   <img alt="License" src="https://img.shields.io/badge/license-BUSL--1.1-052e16" />
   <img alt="Next.js" src="https://img.shields.io/badge/Next.js-14-black" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178c6" />
@@ -29,6 +29,7 @@ This repository holds both the **vision / conceptual specification** for Mosslan
 - [Tech stack](#tech-stack)
 - [Conceptual layers](#conceptual-layers)
 - [Security posture](#security-posture)
+- [Deployment](#deployment)
 - [2026 scope (design intent)](#2026-scope-design-intent)
 - [Design principles](#design-principles)
 - [Roadmap](#roadmap-high-level)
@@ -87,7 +88,7 @@ bridge-2026/
 │
 ├── oracle/              # Production implementation — deployed to bridge.moss.land
 │   ├── apps/
-│   │   ├── web/         # Next.js 14 frontend (i18n, wallet, realtime)
+│   │   ├── web/         # Next.js 14 frontend (i18n, RainbowKit wallet, realtime)
 │   │   └── api/         # Express + Socket.IO REST API + SQLite
 │   ├── packages/
 │   │   ├── core/                # shared types & utilities
@@ -97,7 +98,9 @@ bridge-2026/
 │   │   ├── human-governance/    # L3: voting + delegation
 │   │   ├── proof-of-outcome/    # L4: outcome tracking
 │   │   └── contracts/           # Solidity (OracleGovernance, OracleToken)
-│   ├── ecosystem.config.cjs     # pm2 process definitions
+│   ├── scripts/deploy.sh        # pull-based auto-deploy (pm2 cron one-shot)
+│   ├── deploy/README.md         # deployment architecture & operations
+│   ├── ecosystem.config.cjs     # pm2 process definitions (incl. bridge-deploy)
 │   └── turbo.json               # Turborepo pipeline
 │
 └── nexus/               # Reference / research implementation
@@ -134,7 +137,10 @@ pnpm --filter @oracle/web dev   # Next.js web (port 3100)
 ```
 
 Copy `oracle/apps/api/.env.example` → `.env` and fill in the values you need
-(LLM keys, RPC URL, `ADMIN_API_KEY`, etc.). See
+(LLM keys, RPC URL, `ADMIN_API_KEY`, etc.). **MOC verification is on by
+default** — the API falls back to a public Ethereum RPC for read-only Moss
+Coin balance checks, so votes require a wallet signature and a nonzero MOC
+balance out of the box. Set `MAINNET_RPC_URL=off` for an open demo mode. See
 [Security posture](#security-posture) for the settings that harden a real
 deployment. Blockchain wiring is documented in
 [`oracle/docs/BLOCKCHAIN_SETUP.md`](oracle/docs/BLOCKCHAIN_SETUP.md).
@@ -221,9 +227,11 @@ implementations ship with defense-in-depth and honest boundaries:
 - **API hardening** — `helmet`, a strict CORS allowlist, tiered
   `express-rate-limit` (global / LLM / vote), a 100 KB body cap, and
   production error sanitization (no stack-trace leakage).
-- **Vote authenticity** — votes can be gated behind **EIP-191 signature
-  verification** with nonce + timestamp **replay protection**, and behind
-  on-chain **Moss Coin balance** eligibility checks.
+- **Vote authenticity (on by default)** — votes are gated behind **EIP-191
+  signature verification** with nonce + timestamp **replay protection**, and
+  behind on-chain **Moss Coin balance** eligibility checks (balance = voting
+  weight). The web app connects real wallets via RainbowKit/wagmi and signs
+  each vote.
 - **Admin-gated mutations** — sensitive endpoints (signal collection, issue
   detection, proposal finalize/execute, outcome recording) require
   `ADMIN_API_KEY`.
@@ -231,15 +239,33 @@ implementations ship with defense-in-depth and honest boundaries:
   `AccessControl`, `ReentrancyGuard`, and `Pausable`, with an
   **execution timelock** between a proposal passing and executing.
 
-> **Demo vs. production.** With no `ADMIN_API_KEY`, no RPC, and signatures set
-> to `auto`, the API runs in an open **demo mode** for local exploration — do
-> not expose that configuration publicly. For any real deployment set
-> `ADMIN_API_KEY`, enable MOC verification (`MAINNET_RPC_URL`), and set
-> `REQUIRE_VOTE_SIGNATURE=always`. See
+> **Default vs. demo.** MOC verification defaults **on** via a public
+> Ethereum RPC, which also turns vote signatures on (`REQUIRE_VOTE_SIGNATURE`
+> defaults to `auto`). Set `MAINNET_RPC_URL=off` to run an open **demo mode**
+> for local exploration — do not expose that configuration publicly. For a
+> hardened deployment additionally set `ADMIN_API_KEY`, and prefer a dedicated
+> RPC (Alchemy/Infura) over the public fallback for reliability. See
 > [`oracle/apps/api/.env.example`](oracle/apps/api/.env.example).
 
 Found a vulnerability? Please email **security@moss.land** rather than opening a
 public issue.
+
+---
+
+## Deployment
+
+[bridge.moss.land](https://bridge.moss.land) runs the `oracle/` stack behind an
+nginx front (SSL, `/api` + `/socket.io` proxied to the API, everything else to
+the web app). The API exposes `GET /api/health` for uptime monitoring.
+
+Deploys are **pull-based**: a one-shot script
+([`oracle/scripts/deploy.sh`](oracle/scripts/deploy.sh)) runs on the app server
+every 5 minutes as the pm2 app `bridge-deploy`. When `origin/main` moves it
+classifies the diff (docs-only changes skip build and restart), snapshots the
+SQLite DB, rebuilds only what changed, restarts the affected pm2 apps, health
+checks, and **rolls back automatically** on failure. Merging to `main` is
+deploying. Operations detail:
+[`oracle/deploy/README.md`](oracle/deploy/README.md).
 
 ---
 
@@ -295,11 +321,24 @@ public issue.
 This repository currently represents:
 - Vision and research direction
 - Conceptual and specification-level design
-- Working MVP implementations of the governance loop (mock/demo data)
+- A working MVP of the governance loop, **live at
+  [bridge.moss.land](https://bridge.moss.land)**
+
+What is real on the live deployment today:
+- **Signal collection** — live adapters (MOC price/market, on-chain activity,
+  Mossland disclosure, Medium, GitHub, …) have accumulated 600k+ signals
+- **Token-gated voting** — wallet connect, EIP-191-signed votes, voting weight
+  read from on-chain MOC balance
+- **Auto-deploy** — merges to `main` roll out automatically with health checks
+  and rollback
+
+What is not yet enabled:
+- **On-chain recording** — proposals/votes are not yet anchored to the
+  `OracleGovernance` contract (requires contract deployment and a funded
+  signer); outcome KPIs shown in the UI remain illustrative
 
 It does **not** claim the existence of production-grade autonomous
-infrastructure. All dashboard figures, events, and KPIs in the UI are mockups
-unless wired to live adapters.
+infrastructure.
 
 ---
 
