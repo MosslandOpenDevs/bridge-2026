@@ -215,7 +215,8 @@
     "ecosystemLabel": "Mossland Ecosystem",
     "bridgeRole": "Governance OS",
     "algoraRole": "AI Deliberation Lab",
-    "aoRole": "Agentic Orchestrator"
+    "aoRole": "Agentic Orchestrator",
+    "newTab": "opens in new tab"
   },
   "experimental": {
     "banner": {

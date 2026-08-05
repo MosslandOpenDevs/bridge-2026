@@ -22,12 +22,15 @@ export function Footer() {
             {t("ecosystemLabel")}
           </p>
           <ul className="mt-2 flex flex-wrap justify-center md:justify-start gap-x-6 gap-y-1.5">
+            {/* The {" "} after each site name is load-bearing: the margin on
+                the role span adds no text, so without it the accessible name
+                reads "BRIDGEGovernance OS". */}
             {ECOSYSTEM.map((s) => (
               <li key={s.name} className="text-xs">
                 {s.current ? (
                   <span aria-current="page" className="font-semibold text-gray-900">
                     <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-moss-600 align-middle" />
-                    {s.name}
+                    {s.name}{" "}
                     <span className="ml-1.5 font-normal text-gray-400">{t(s.roleKey)}</span>
                   </span>
                 ) : (
@@ -37,8 +40,12 @@ export function Footer() {
                     rel="noopener"
                     className="font-medium text-gray-500 hover:text-moss-600 transition-colors"
                   >
-                    {s.name}
+                    {s.name}{" "}
                     <span className="ml-1.5 font-normal text-gray-400">{t(s.roleKey)}</span>
+                    <span aria-hidden="true" className="ml-1 text-gray-400">
+                      ↗
+                    </span>
+                    <span className="sr-only">{` (${t("newTab")})`}</span>
                   </a>
                 )}
               </li>
