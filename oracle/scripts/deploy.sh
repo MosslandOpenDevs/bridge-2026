@@ -13,8 +13,10 @@
 # as Algora's scripts/deploy.sh, adapted for this repo's layout: the git root is
 # bridge-2026/ while the pnpm workspace root is bridge-2026/oracle/.
 #
-# Doc-only pushes (README, docs, nexus/, …) are not deployment events: the
-# script leaves the checkout untouched and the next code deploy carries them.
+# Doc-only pushes (README, docs, nexus/, …) are synced but not deployed: the
+# checkout is reset to the tip so on-server docs stay current, but nothing is
+# built, restarted, or snapshotted, and the log says SYNCED rather than
+# DEPLOYED.
 #
 # Restarting oracle-api kills any in-flight debate session; that is accepted
 # (signal collection and issue detection resume on their own timers).
@@ -167,24 +169,21 @@ done <<EOF
 ${CHANGED}
 EOF
 
-# Docs-only pushes (README, docs/, nexus/, …) are NOT deployment events: the
-# server serves no docs, so leave the checkout untouched and let the next code
-# deploy carry them along. Remember the skipped tip so repeat ticks stay quiet.
-SKIP_STATE="${APP_ROOT}/logs/.deploy-docs-skipped"
+# Docs-only pushes (README, docs/, nexus/, …) are synced, not deployed: the
+# checkout is brought to the tip so on-server docs stay current, but there is
+# no build, restart, or snapshot, and the log distinguishes SYNCED from
+# DEPLOYED. Once synced, HEAD equals the tip, so repeat ticks stay quiet.
+DOCS_ONLY=0
 if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ] \
    && [ "${ECOSYSTEM_CHANGED}" = "0" ] && [ "${INFRA_CHANGED}" = "0" ]; then
-  if [ "${CHECK_ONLY}" = "1" ]; then
-    log "--check: docs-only change ${CURRENT:0:8} -> ${TARGET:0:8} -- would skip (no deploy)"
-    exit 0
-  fi
-  if [ ! -f "${SKIP_STATE}" ] || [ "$(cat "${SKIP_STATE}" 2>/dev/null)" != "${TARGET}" ]; then
-    log "docs-only change ${CURRENT:0:8} -> ${TARGET:0:8} (${SUBJECT}) -- skipping (no deploy)"
-    mkdir -p "$(dirname "${SKIP_STATE}")" && echo "${TARGET}" >"${SKIP_STATE}"
-  fi
-  exit 0
+  DOCS_ONLY=1
 fi
 
-log "update available: ${CURRENT:0:8} -> ${TARGET:0:8} (${SUBJECT})"
+if [ "${DOCS_ONLY}" = "1" ]; then
+  [ "${CHECK_ONLY}" = "1" ] || log "docs-only change ${CURRENT:0:8} -> ${TARGET:0:8} (${SUBJECT}) -- syncing checkout, no deploy"
+else
+  log "update available: ${CURRENT:0:8} -> ${TARGET:0:8} (${SUBJECT})"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Guards
@@ -232,7 +231,7 @@ process.stdin.on("end", () => {
 ' 2>/dev/null || echo "unknown"
 }
 
-if [ "${DEPLOY_REQUIRE_CI}" = "1" ] && [ "${FORCE}" = "0" ]; then
+if [ "${DEPLOY_REQUIRE_CI}" = "1" ] && [ "${FORCE}" = "0" ] && [ "${DOCS_ONLY}" = "0" ]; then
   CI_STATUS=$(ci_conclusion "${TARGET}")
   case "${CI_STATUS}" in
     success) log "CI: green" ;;
@@ -246,8 +245,12 @@ if [ "${DEPLOY_REQUIRE_CI}" = "1" ] && [ "${FORCE}" = "0" ]; then
 fi
 
 if [ "${CHECK_ONLY}" = "1" ]; then
-  log "--check: would deploy ${TARGET:0:8} (api=${API_CHANGED} web=${WEB_CHANGED} \
+  if [ "${DOCS_ONLY}" = "1" ]; then
+    log "--check: docs-only change ${CURRENT:0:8} -> ${TARGET:0:8} -- would sync checkout (no deploy)"
+  else
+    log "--check: would deploy ${TARGET:0:8} (api=${API_CHANGED} web=${WEB_CHANGED} \
 deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED} infra=${INFRA_CHANGED})"
+  fi
   exit 0
 fi
 
@@ -363,7 +366,11 @@ if [ "${ECOSYSTEM_CHANGED}" = "1" ]; then
 fi
 
 if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ]; then
-  log "DEPLOYED ${CURRENT:0:8} -> ${TARGET:0:8} (deploy scripts/config only -- checkout updated, no build or restart)"
+  if [ "${DOCS_ONLY}" = "1" ]; then
+    log "SYNCED ${CURRENT:0:8} -> ${TARGET:0:8} (docs only -- no deploy)"
+  else
+    log "DEPLOYED ${CURRENT:0:8} -> ${TARGET:0:8} (deploy scripts/config only -- checkout updated, no build or restart)"
+  fi
   exit 0
 fi
 

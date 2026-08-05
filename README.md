@@ -2,6 +2,8 @@
 
 > **Where agents propose, people decide, reality updates.**
 
+### 🟢 Live: [bridge.moss.land](https://bridge.moss.land)
+
 <p>
   <img alt="Status" src="https://img.shields.io/badge/status-live%20MVP%20%2B%20spec-16a34a" />
   <img alt="License" src="https://img.shields.io/badge/license-BUSL--1.1-052e16" />
@@ -265,8 +267,9 @@ Deploys are **pull-based**: a one-shot script
 every 5 minutes as the pm2 app `bridge-deploy`. When `origin/main` moves it
 classifies the diff, snapshots the SQLite DB, rebuilds only what changed,
 restarts the affected pm2 apps, health checks, and **rolls back automatically**
-on failure. Merging code to `main` is deploying; **docs-only merges are not
-deployed at all** — the next code deploy carries them. Operations detail:
+on failure. Merging code to `main` is deploying; **docs-only merges only sync
+the server checkout** (logged as `SYNCED`, not `DEPLOYED`) — nothing is built
+or restarted. Operations detail:
 [`oracle/deploy/README.md`](oracle/deploy/README.md).
 
 ---
