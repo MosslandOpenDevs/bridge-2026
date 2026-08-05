@@ -539,7 +539,7 @@ app.patch("/api/issues/:id", requireAdminKey, async (req, res) => {
       });
     }
 
-    const issue = issueDb.getById.get(req.params.id);
+    const issue = issueDb.getById.get(req.params.id) as any;
 
     if (!issue) {
       return res.status(404).json({ error: "Issue not found" });
@@ -617,7 +617,7 @@ app.post("/api/deliberate", async (req, res) => {
         issue.category || "general",
         issue.priority || "medium",
         decisionPacket.consensusScore || 0,
-        decisionPacket.recommendation?.type || "investigation",
+        (decisionPacket.recommendation as any)?.type || "investigation",
         agentOpinions
       );
     }
@@ -689,7 +689,7 @@ app.post("/api/debate", async (req, res) => {
         issue.category || "general",
         issue.priority || "medium",
         decisionPacket.consensusScore || debateSession.finalConsensusScore || 0,
-        decisionPacket.recommendation?.type || "investigation",
+        (decisionPacket.recommendation as any)?.type || "investigation",
         agentOpinions
       );
     }
@@ -970,7 +970,7 @@ app.post("/api/proposals/:id/execute", requireAdminKey, async (req, res) => {
     if (dp?.recommendation?.action) {
       const actionDescription = typeof dp.recommendation.action === "string"
         ? dp.recommendation.action
-        : dp.recommendation.action?.action || "Execute recommendation";
+        : (dp.recommendation.action as any)?.action || "Execute recommendation";
 
       actions.push({
         type: "governance",
@@ -995,8 +995,8 @@ app.post("/api/proposals/:id/execute", requireAdminKey, async (req, res) => {
     trustManager.recordOutcome(proposal.proposer, "proposer", proof);
 
     // Update trust score for agents involved in deliberation
-    if (dp?.agents) {
-      for (const agentId of Object.keys(dp.agents)) {
+    if ((dp as any)?.agents) {
+      for (const agentId of Object.keys((dp as any).agents)) {
         trustManager.recordOutcome(agentId, "agent", proof);
       }
     }
@@ -1039,7 +1039,7 @@ app.get("/api/outcomes", async (req, res) => {
       const dp = proposal?.decisionPacket;
       const rec = dp?.recommendation;
       const title = proposal?.decisionPacket?.issue?.title ||
-        (typeof rec?.action === "string" ? rec.action : rec?.action?.action) ||
+        (typeof rec?.action === "string" ? rec.action : (rec?.action as any)?.action) ||
         `Proposal #${proof.proposalId.slice(0, 8)}`;
 
       return {
@@ -1429,7 +1429,7 @@ async function detectAndSaveIssues() {
             issue.category || "general",
             issue.priority || "medium",
             decisionPacket.consensusScore || 0,
-            decisionPacket.recommendation?.type || "investigation",
+            (decisionPacket.recommendation as any)?.type || "investigation",
             agentOpinions
           );
           deliberatedCount++;

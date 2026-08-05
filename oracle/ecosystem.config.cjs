@@ -3,9 +3,13 @@ module.exports = {
     {
       name: 'oracle-api',
       cwd: './apps/api',
-      script: './node_modules/.bin/tsx',
-      args: 'watch src/index.ts',
-      interpreter: 'none',
+      // Production runs the compiled output (deploy.sh builds apps/api/dist
+      // BEFORE any restart). This used to be `tsx watch src/index.ts`, which
+      // hot-reloaded half-updated sources the moment deploy.sh ran its
+      // `git reset --hard` -- i.e. before `pnpm install` and the builds --
+      // crash-looping the API on every commit that added a dependency.
+      // Production never hot-reloads: a deploy restart is the only reload.
+      script: './dist/index.js',
       env: {
         PORT: 3101,
         NODE_ENV: 'development',
