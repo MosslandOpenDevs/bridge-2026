@@ -210,7 +210,11 @@
   "footer": {
     "poweredBy": "Powered by BRIDGE 2026",
     "mossland": "Mossland",
-    "experimental": "실험 환경 / 연구용 / 비프로덕션"
+    "experimental": "실험 환경 / 연구용 / 비프로덕션",
+    "ecosystemLabel": "모스랜드 에코시스템",
+    "bridgeRole": "거버넌스 OS",
+    "algoraRole": "AI 숙의 실험실",
+    "aoRole": "에이전트 오케스트레이터"
   },
   "experimental": {
     "banner": {
