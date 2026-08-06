@@ -9,6 +9,7 @@ import { AlertTriangle, MessageSquare, Users, Shield, Coins, Code, ChevronRight,
 import { cn, timeAgo } from "@/lib/utils";
 import { useToast } from "@/contexts/ToastContext";
 import { api } from "@/lib/api";
+import { useHasAdminKey } from "@/hooks/useAdminKey";
 import { DebatePanel } from "@/components/DebatePanel";
 
 // Progress component for deliberation
@@ -107,6 +108,8 @@ const stanceColors: Record<string, string> = {
 export default function IssuesPage() {
   const t = useTranslations();
   const tToast = useTranslations("toast");
+  const tAdmin = useTranslations("admin");
+  const hasAdminKey = useHasAdminKey();
   const toast = useToast();
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -194,7 +197,8 @@ export default function IssuesPage() {
         </div>
         <button
           onClick={() => detectMutation.mutate()}
-          disabled={isLoading || detectMutation.isPending}
+          disabled={isLoading || detectMutation.isPending || !hasAdminKey}
+          title={hasAdminKey ? undefined : tAdmin("required")}
           className="btn-primary flex items-center justify-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
         >
           {detectMutation.isPending ? (
@@ -291,15 +295,17 @@ export default function IssuesPage() {
                     <div className="flex flex-col space-y-2 mt-4">
                       <button
                         onClick={() => deliberateMutation.mutate(selectedIssue)}
-                        disabled={deliberateMutation.isPending || debateMutation.isPending}
-                        className="btn-primary"
+                        disabled={deliberateMutation.isPending || debateMutation.isPending || !hasAdminKey}
+                        title={hasAdminKey ? undefined : tAdmin("required")}
+                        className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {t("issues.deliberate")}
                       </button>
                       <button
                         onClick={() => debateMutation.mutate(selectedIssue)}
-                        disabled={deliberateMutation.isPending || debateMutation.isPending}
-                        className="btn-secondary flex items-center justify-center space-x-2"
+                        disabled={deliberateMutation.isPending || debateMutation.isPending || !hasAdminKey}
+                        title={hasAdminKey ? undefined : tAdmin("required")}
+                        className="btn-secondary flex items-center justify-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <MessageCircle className="w-4 h-4" />
                         <span>{t("issues.startDebate")}</span>
@@ -420,7 +426,8 @@ export default function IssuesPage() {
                             });
                           }
                         }}
-                        disabled={createProposalMutation.isPending || !selectedIssue?.decisionPacket}
+                        disabled={createProposalMutation.isPending || !selectedIssue?.decisionPacket || !hasAdminKey}
+                        title={hasAdminKey ? undefined : tAdmin("required")}
                         className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {createProposalMutation.isPending ? (

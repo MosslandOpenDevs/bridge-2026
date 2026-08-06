@@ -42,6 +42,8 @@ import {
   isVoteSignatureRequired,
   requireAdminKey,
   isAdminAuthEnabled,
+  adminAuthMode,
+  adminAuthStartupError,
   sanitizeError,
   canonicalJson,
 } from "./security.js";
@@ -70,6 +72,14 @@ import {
 } from "@oracle/agentic-consensus";
 import { VotingSystem, DelegationManager } from "@oracle/human-governance";
 import { OutcomeTrackerImpl, TrustManager } from "@oracle/proof-of-outcome";
+
+// Refuse to start on an unsafe auth configuration rather than discovering it
+// when an anonymous caller executes a proposal.
+const adminAuthError = adminAuthStartupError();
+if (adminAuthError) {
+  console.error(`❌ Refusing to start: ${adminAuthError}`);
+  process.exit(1);
+}
 
 // Initialize services
 const signalRegistry = new SignalRegistry();
@@ -586,8 +596,9 @@ class LRUMap<K, V> extends Map<K, V> {
 }
 const debateSessions = new LRUMap<string, any>(DEBATE_SESSION_LIMIT);
 
-// Deliberation endpoints
-app.post("/api/deliberate", async (req, res) => {
+// Deliberation endpoints.
+// Admin-gated: each call spends LLM credits on behalf of the operator.
+app.post("/api/deliberate", requireAdminKey, async (req, res) => {
   try {
     const { issue, context } = req.body;
     if (!issue) {
@@ -630,8 +641,9 @@ app.post("/api/deliberate", async (req, res) => {
   }
 });
 
-// Debate endpoints - multi-round agent discussion
-app.post("/api/debate", async (req, res) => {
+// Debate endpoints - multi-round agent discussion.
+// Admin-gated: a debate fans out to every agent for several rounds.
+app.post("/api/debate", requireAdminKey, async (req, res) => {
   try {
     const { issue, context, maxRounds = 3 } = req.body;
     if (!issue) {
@@ -1586,7 +1598,19 @@ httpServer.listen(PORT, () => {
   const signalCount = signalDb.count.get() as { count: number };
   const issueCount = issueDb.count.get() as { count: number };
   console.log(`📊 Database: ${signalCount.count} signals, ${issueCount.count} issues stored`);
-  console.log(`🔐 Admin auth: ${isAdminAuthEnabled() ? "enabled (ADMIN_API_KEY set)" : "DISABLED — set ADMIN_API_KEY to lock admin endpoints"}`);
+  if (adminAuthMode === "enforced") {
+    console.log("🔐 Admin auth: enforced (ADMIN_API_KEY set)");
+  } else if (adminAuthMode === "demo-open") {
+    console.warn(
+      "🚨 Admin auth: DISABLED via DEMO_MODE=1 — every admin endpoint is\n" +
+        "   anonymous. Never expose this process to an untrusted network.",
+    );
+  } else {
+    console.log(
+      "🔐 Admin auth: admin endpoints are BLOCKED (503) — set ADMIN_API_KEY to\n" +
+        "   enable them, or DEMO_MODE=1 for an anonymous local demo.",
+    );
+  }
 
   // Auto signal collection
   if (SIGNAL_COLLECT_INTERVAL > 0) {

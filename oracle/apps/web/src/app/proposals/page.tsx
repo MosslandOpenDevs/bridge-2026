@@ -9,6 +9,7 @@ import { useSignMessage } from "wagmi";
 import { useVotingPower, useAccount } from "@/hooks/useMOC";
 import { useToast } from "@/contexts/ToastContext";
 import { api } from "@/lib/api";
+import { useHasAdminKey } from "@/hooks/useAdminKey";
 
 // Must match buildVoteMessage() in apps/api/src/security.ts exactly.
 function buildVoteMessage(params: {
@@ -197,6 +198,7 @@ export default function ProposalsPage() {
   const tToast = useTranslations("toast");
   const toast = useToast();
   const { isConnected } = useAccount();
+  const hasAdminKey = useHasAdminKey();
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<string>("all");
   const [votingProposal, setVotingProposal] = useState<any>(null);
@@ -354,7 +356,9 @@ export default function ProposalsPage() {
                         {t("proposals.vote")}
                       </button>
                     )}
-                    {proposal.status === "passed" && isConnected && (
+                    {/* Execution is an operator action, not a wallet action:
+                        it is gated on the admin key, not on a connected wallet. */}
+                    {proposal.status === "passed" && hasAdminKey && (
                       <button
                         onClick={() => executeMutation.mutate(proposal.id)}
                         disabled={executeMutation.isPending}
