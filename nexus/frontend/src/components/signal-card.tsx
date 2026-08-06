@@ -1,6 +1,6 @@
 'use client';
 
-import { Signal } from '@bridge-2026/shared';
+import { Signal, SignalSource } from '@bridge-2026/shared';
 import { formatDate, formatRelativeTime } from '@bridge-2026/shared/utils';
 
 interface SignalCardProps {
@@ -8,7 +8,7 @@ interface SignalCardProps {
 }
 
 export function SignalCard({ signal }: SignalCardProps) {
-  const sourceType = signal.metadata.sourceType || 'unknown';
+  const source = signal.metadata.source;
   const confidence = signal.metadata.confidence || 0;
   const isAnomaly = signal.metadata.tags?.includes('anomaly');
 
@@ -23,7 +23,7 @@ export function SignalCard({ signal }: SignalCardProps) {
       <div className="flex justify-between items-start mb-3">
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-1">
-            <SourceBadge sourceType={sourceType} />
+            <SourceBadge source={source} />
             {isAnomaly && (
               <span className="px-2 py-1 text-xs font-medium bg-red-100 text-red-700 rounded">
                 이상 징후
@@ -71,16 +71,18 @@ export function SignalCard({ signal }: SignalCardProps) {
   );
 }
 
-function SourceBadge({ sourceType }: { sourceType: string }) {
+function SourceBadge({ source }: { source: SignalSource }) {
+  // Keyed by SignalSource so a new collector source shows up as a missing key
+  // here rather than silently rendering the raw enum value.
   const sourceConfig: Record<string, { label: string; color: string }> = {
-    onchain: { label: '온체인', color: 'bg-blue-100 text-blue-700' },
-    community: { label: '커뮤니티', color: 'bg-green-100 text-green-700' },
-    public_api: { label: '공개 API', color: 'bg-purple-100 text-purple-700' },
-    telemetry: { label: '텔레메트리', color: 'bg-orange-100 text-orange-700' },
+    [SignalSource.ONCHAIN]: { label: '온체인', color: 'bg-blue-100 text-blue-700' },
+    [SignalSource.COMMUNITY]: { label: '커뮤니티', color: 'bg-green-100 text-green-700' },
+    [SignalSource.PUBLIC_DATA]: { label: '공개 데이터', color: 'bg-purple-100 text-purple-700' },
+    [SignalSource.TELEMETRY]: { label: '텔레메트리', color: 'bg-orange-100 text-orange-700' },
   };
 
-  const config = sourceConfig[sourceType] || {
-    label: sourceType,
+  const config = sourceConfig[source] || {
+    label: source ?? 'unknown',
     color: 'bg-gray-100 text-gray-700',
   };
 
@@ -91,6 +93,18 @@ function SourceBadge({ sourceType }: { sourceType: string }) {
   );
 }
 
+/**
+ * `Signal.data` is `Record<string, unknown>` by contract — its shape depends on
+ * the collector, so every reader narrows just the field it needs instead of
+ * asserting a shape the payload may not have.
+ */
+function readLocationName(data: Record<string, unknown>): string | undefined {
+  const location = data.location;
+  if (typeof location !== 'object' || location === null) return undefined;
+  const name = (location as { name?: unknown }).name;
+  return typeof name === 'string' ? name : undefined;
+}
+
 function getSignalTitle(signal: Signal): string {
   const data = signal.data as Record<string, unknown>;
   
@@ -98,7 +112,7 @@ function getSignalTitle(signal: Signal): string {
     return `${data.eventType} 이벤트`;
   }
   if (data.checkInType) {
-    return `체크인: ${data.location?.name || '위치 정보 없음'}`;
+    return `체크인: ${readLocationName(data) || '위치 정보 없음'}`;
   }
   if (data.source === 'weather') {
     return `날씨 정보: ${data.city || '도시'}`;
@@ -120,7 +134,7 @@ function getSignalDescription(signal: Signal): string {
     return `투표가 진행되었습니다.`;
   }
   if (data.checkInType) {
-    return `체크인 완료: ${data.location?.name || ''}`;
+    return `체크인 완료: ${readLocationName(data) || ''}`;
   }
   if (data.source === 'weather') {
     return `온도: ${data.temperature}°C, 습도: ${data.humidity}%`;

@@ -4,7 +4,7 @@
  * Decision Packet을 구성하고 검증하는 빌더입니다.
  */
 
-import type { DecisionPacket } from '../../../shared/types';
+import type { DecisionPacket } from '@bridge-2026/shared';
 
 export interface PacketBuilderConfig {
   /** 필수 필드 검증 여부 */

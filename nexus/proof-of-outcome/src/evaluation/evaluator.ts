@@ -4,8 +4,8 @@
  * 결과를 평가하는 서비스입니다.
  */
 
-import type { Outcome, OutcomeEvaluation, KPIMeasurement } from '../../../shared/types';
-import { kpiTracker } from '../kpi-tracking/kpi-tracker';
+import { OutcomeStatus } from '@bridge-2026/shared';
+import type { Outcome, OutcomeEvaluation } from '@bridge-2026/shared';
 
 /**
  * 결과 평가기
@@ -69,9 +69,9 @@ export class OutcomeEvaluator {
       reasoning += `\n미달성 KPI:\n${failedKPIs.map(k => `- ${k}`).join('\n')}\n`;
     }
     
-    if (outcome.status === 'success') {
+    if (outcome.status === OutcomeStatus.SUCCESS) {
       reasoning += `\n전체적으로 성공적으로 실행되었습니다.`;
-    } else if (outcome.status === 'partial_success') {
+    } else if (outcome.status === OutcomeStatus.PARTIAL_SUCCESS) {
       reasoning += `\n부분적으로 성공했습니다. 일부 KPI는 목표를 달성하지 못했습니다.`;
     } else {
       reasoning += `\n실행이 실패했습니다. 대부분의 KPI가 목표를 달성하지 못했습니다.`;

@@ -4,7 +4,7 @@
  * 모든 신호 수집기의 기본 클래스입니다.
  */
 
-import type { Signal, SignalMetadata, SignalSource } from '../../../shared/types';
+import type { Signal, SignalMetadata, SignalSource } from '@bridge-2026/shared';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -25,8 +25,13 @@ export interface ICollector {
   
   /**
    * 수집기를 시작합니다.
+   * @param intervalMs 수집 간격 (밀리초). 생략하면 구현이 정한 기본값을 쓴다.
+   *
+   * 인자를 받는 것은 RealityOracle.startCollectors(intervalMs)가 간격을
+   * 수집기마다 그대로 넘겨주기 때문이다. 여기서 0-인자로 선언하면 인터페이스
+   * 타입으로 다루는 호출부는 간격을 전달할 방법이 없다.
    */
-  start(): Promise<void>;
+  start(intervalMs?: number): Promise<void>;
   
   /**
    * 수집기를 중지합니다.

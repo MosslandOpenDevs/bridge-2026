@@ -6,13 +6,67 @@
  * Reality Oracle → Inference Mining → Agentic Consensus → Human Governance → Atomic Actuation → Proof of Outcome
  */
 
-import { realityOracle, OnChainCollector, CheckInCollector } from '../reality-oracle';
-import { inference_mining } from '../inference-mining/src/inference-mining';
-import { agenticConsensus } from '../agentic-consensus';
-import { governanceService, agoraIntegration } from '../human-governance';
-import { atomicActuation } from '../atomic-actuation';
-import { proofOfOutcome } from '../proof-of-outcome';
-import type { Signal, Issue, DecisionPacket, Proposal } from '../shared/types';
+import { execFile } from 'node:child_process';
+import * as path from 'node:path';
+
+import { realityOracle, OnChainCollector, CheckInCollector } from '@bridge-2026/reality-oracle';
+import { agenticConsensus } from '@bridge-2026/agentic-consensus';
+import { governanceService, agoraIntegration } from '@bridge-2026/human-governance';
+import { atomicActuation } from '@bridge-2026/atomic-actuation';
+import { proofOfOutcome } from '@bridge-2026/proof-of-outcome';
+import type { Signal, Issue } from '@bridge-2026/shared';
+
+/**
+ * Inference Mining 레이어는 Python(numpy)으로 구현되어 있어 이 프로세스 안에서
+ * 직접 부를 수 없다. `nexus/inference-mining/src/cli.py`가 stdin/stdout JSON
+ * 프로토콜로 그 경계를 담당한다.
+ *
+ * 사전 준비: `cd nexus/inference-mining && pip install -r requirements.txt`
+ * 인터프리터 경로는 PYTHON_BIN으로 바꿀 수 있다 (venv를 쓰는 경우).
+ */
+const INFERENCE_MINING_DIR = path.resolve(__dirname, '../inference-mining');
+
+async function callInferenceMining<T>(command: string, request: unknown): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const child = execFile(
+      process.env.PYTHON_BIN || 'python3',
+      ['-m', 'src.cli', command],
+      { cwd: INFERENCE_MINING_DIR },
+      (error, stdout, stderr) => {
+        if (error) {
+          // CLI는 실패를 stderr JSON + 0이 아닌 종료 코드로 알린다.
+          reject(new Error(`inference-mining ${command} 실패: ${stderr.trim() || error.message}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(stdout) as T);
+        } catch {
+          reject(new Error(`inference-mining ${command} 응답이 JSON이 아님: ${stdout}`));
+        }
+      },
+    );
+    child.stdin?.end(JSON.stringify(request));
+  });
+}
+
+/**
+ * `src/cli.py extract-issue`의 응답 형태.
+ *
+ * Python 쪽이 이미 camelCase 키를 내보내므로 Issue와 필드가 1:1로 대응하지만,
+ * 프로세스 경계를 넘어온 JSON은 검증되지 않았으므로 유니온 타입 대신 string으로
+ * 받아 두고 아래에서 Issue로 옮긴다.
+ */
+interface ExtractedIssue {
+  id: string;
+  title: string;
+  description: string;
+  priority: string;
+  status: string;
+  evidence: Issue['evidence'];
+  categories?: string[];
+  detectedAt: number;
+  updatedAt: number;
+}
 
 /**
  * 전체 거버넌스 루프 실행 예제
@@ -36,39 +90,37 @@ export async function runGovernanceLoop(): Promise<void> {
   const signals: Signal[] = []; // 실제로는 수집기에서 수집됨
   console.log(`   수집된 신호: ${signals.length}개\n`);
   
-  // 2. Inference Mining: 이슈 추출
+  // 2. Inference Mining: 이슈 추출 (Python 프로세스 호출)
   console.log('2. Inference Mining: 이슈 추출 중...');
-  // 신호 데이터를 Python 형식으로 변환 (실제로는 API 호출)
   const signalData = signals.map(s => ({
     id: s.id,
     data: s.data,
     metadata: s.metadata,
   }));
-  
-  const issue = inference_mining.extract_issue(
-    signal_data=signalData,
-    issue_title="거버넌스 참여율 감소",
-    issue_description="최근 거버넌스 참여율이 지속적으로 감소하고 있습니다.",
-    priority="high"
-  );
-  
-  console.log(`   추출된 이슈: ${issue['title']}\n`);
-  
+
+  const issue = await callInferenceMining<ExtractedIssue>('extract-issue', {
+    signalData,
+    issueTitle: '거버넌스 참여율 감소',
+    issueDescription: '최근 거버넌스 참여율이 지속적으로 감소하고 있습니다.',
+    priority: 'high',
+  });
+
+  console.log(`   추출된 이슈: ${issue.title}\n`);
+
   // 3. Agentic Consensus: 에이전트 협의
   console.log('3. Agentic Consensus: 에이전트 협의 중...');
-  // Issue를 TypeScript 형식으로 변환 (실제로는 공통 타입 사용)
   const issueTS: Issue = {
-    id: issue['id'],
-    title: issue['title'],
-    description: issue['description'],
-    priority: issue['priority'] as any,
-    status: issue['status'] as any,
-    evidence: issue['evidence'] as any,
-    categories: issue.get('categories', []),
-    detectedAt: issue['detectedAt'],
-    updatedAt: issue['updatedAt'],
+    id: issue.id,
+    title: issue.title,
+    description: issue.description,
+    priority: issue.priority as Issue['priority'],
+    status: issue.status as Issue['status'],
+    evidence: issue.evidence,
+    categories: issue.categories ?? [],
+    detectedAt: issue.detectedAt,
+    updatedAt: issue.updatedAt,
   };
-  
+
   const decisionPacket = await agenticConsensus.processIssue(issueTS, {
     availableBudget: 1000000,
     sentiment: 'neutral',

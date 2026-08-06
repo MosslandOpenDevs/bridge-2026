@@ -1,0 +1,30 @@
+# Every directory below holds a package.json and must be listed here: the local
+# packages depend on each other with the `workspace:*` specifier, which only
+# resolves for members of this workspace.
+#
+# Paths are enumerated rather than globbed because the layer packages sit at
+# several depths (`infrastructure/event-bus`, `human-governance/contracts`) and
+# two of them are nested inside another package's directory.
+packages:
+  # `shared/utils` is compiled by `shared`'s tsc run (see shared/tsconfig.json),
+  # so it ships no dist of its own; it is a separate project only to carry the
+  # Jest setup for the tests that live beside those sources.
+  - "shared"
+  - "shared/utils"
+
+  - "infrastructure/event-bus"
+
+  - "reality-oracle"
+  - "agentic-consensus"
+  - "human-governance"
+  - "human-governance/contracts"
+  - "atomic-actuation"
+  - "proof-of-outcome"
+
+  - "backend"
+  - "frontend"
+
+  # The end-to-end example. It is a workspace member so it is actually
+  # type-checked: outside the workspace no tsconfig included it, so it could
+  # reference layers that had changed shape underneath it and nothing noticed.
+  - "integration"

@@ -3,103 +3,57 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import Link from 'next/link';
 import { OutcomeCard } from '@/components/outcome-card';
+import { DemoModeBanner } from '@/components/demo-mode-banner';
 import { useState, useEffect } from 'react';
 import type { Outcome } from '@bridge-2026/shared';
-import { api } from '@/lib/api';
+import { api, isAbortError } from '@/lib/api';
+import { DEMO_MODE, getDemoOutcomes } from '@/lib/demo-data';
 
 export default function OutcomesPage() {
   const [outcomes, setOutcomes] = useState<Outcome[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'success' | 'failure'>('all');
 
   useEffect(() => {
-    // API 호출
-    const statusMap: Record<string, string> = {
-      all: '',
-      success: 'success',
-      failure: 'failure',
-    };
-    
-    api.getOutcomes({ status: statusMap[filter], limit: 100 })
-      .then(result => setOutcomes(result.outcomes))
-      .catch(error => {
-        console.error('Error fetching outcomes:', error);
-        // 에러 시 빈 배열
-        setOutcomes([]);
-      })
-      .finally(() => setLoading(false));
-    
-    // 임시 데이터 (API 실패 시 fallback)
-    const mockOutcomes: Outcome[] = [
-      {
-        id: 'outcome-1',
-        proposalId: 'prop-1',
-        decisionPacketId: 'dp-1',
-        status: 'success',
-        kpiMeasurements: [
-          {
-            kpiName: '참여율',
-            value: 0.35,
-            targetValue: 0.3,
-            measuredAt: Date.now(),
-            measurementMethod: 'automatic',
-            dataSource: 'governance-api',
-          },
-          {
-            kpiName: '투표 완료 시간',
-            value: 4.2,
-            targetValue: 5,
-            measuredAt: Date.now(),
-            measurementMethod: 'automatic',
-            dataSource: 'governance-api',
-          },
-        ],
-        evaluation: {
-          evaluator: 'automatic',
-          success: true,
-          successRate: 0.9,
-          reasoning: '모든 KPI가 목표를 달성했습니다. 참여율이 35%로 목표 30%를 초과 달성했으며, 투표 완료 시간도 목표보다 빠릅니다.',
-          evaluatedAt: Date.now(),
-        },
-        executionStartTime: Date.now() - 10 * 24 * 60 * 60 * 1000,
-        executionEndTime: Date.now() - 3 * 24 * 60 * 60 * 1000,
-        createdAt: Date.now() - 10 * 24 * 60 * 60 * 1000,
-        updatedAt: Date.now() - 3 * 24 * 60 * 60 * 1000,
-      },
-      {
-        id: 'outcome-2',
-        proposalId: 'prop-2',
-        decisionPacketId: 'dp-2',
-        status: 'partial_success',
-        kpiMeasurements: [
-          {
-            kpiName: '예산 효율성',
-            value: 0.65,
-            targetValue: 0.8,
-            measuredAt: Date.now(),
-            measurementMethod: 'automatic',
-            dataSource: 'treasury-api',
-          },
-        ],
-        evaluation: {
-          evaluator: 'automatic',
-          success: false,
-          successRate: 0.65,
-          reasoning: '예산 효율성이 목표를 달성하지 못했습니다. 추가 개선이 필요합니다.',
-          evaluatedAt: Date.now(),
-        },
-        executionStartTime: Date.now() - 20 * 24 * 60 * 60 * 1000,
-        executionEndTime: Date.now() - 13 * 24 * 60 * 60 * 1000,
-        createdAt: Date.now() - 20 * 24 * 60 * 60 * 1000,
-        updatedAt: Date.now() - 13 * 24 * 60 * 60 * 1000,
-      },
-    ];
-    
-    setTimeout(() => {
-      setOutcomes(mockOutcomes);
+    // 데모 모드에서는 백엔드를 호출하지 않습니다. 데모 데이터는 API 실패의
+    // 대체물이 아니므로, 실패는 아래 catch에서 실패로 드러나야 합니다.
+    if (DEMO_MODE) {
+      setOutcomes(getDemoOutcomes());
+      setError(null);
       setLoading(false);
-    }, 500);
+      return;
+    }
+
+    // 상단 통계는 필터와 무관한 전체 집계이고, "실패" 탭은 failure와
+    // partial_success를 함께 보여줍니다. 그래서 전체를 한 번 받아 아래에서
+    // 걸러냅니다 — 서버에서 좁히면 통계까지 같이 좁혀집니다.
+    const controller = new AbortController();
+
+    setLoading(true);
+    setError(null);
+
+    api.getOutcomes({ limit: 100 }, { signal: controller.signal })
+      .then(result => {
+        setOutcomes(result.outcomes);
+        setError(null);
+      })
+      .catch(err => {
+        if (isAbortError(err)) return;
+        console.error('Error fetching outcomes:', err);
+        setOutcomes([]);
+        setError('결과 목록을 불러오지 못했습니다.');
+      })
+      .finally(() => {
+        // The abort already discarded the result; leaving `loading` alone keeps
+        // the spinner up for the newer request that replaced this one.
+        if (controller.signal.aborted) return;
+        setLoading(false);
+      });
+
+    return () => controller.abort();
   }, []);
+
 
   const filteredOutcomes = outcomes.filter(o => {
     if (filter === 'all') return true;
@@ -131,6 +85,8 @@ export default function OutcomesPage() {
             <ConnectButton />
           </div>
         </header>
+
+        {DEMO_MODE && <DemoModeBanner />}
 
         {/* Stats */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
@@ -186,6 +142,14 @@ export default function OutcomesPage() {
         {loading ? (
           <div className="text-center py-12">
             <p className="text-gray-600">로딩 중...</p>
+          </div>
+        ) : error ? (
+          // 조회 실패를 "결과 없음"으로 보여주면 사용자가 잘못된 결론을 내립니다.
+          <div className="bg-white rounded-lg shadow-md p-12 text-center border border-red-200">
+            <p className="text-red-700 mb-4">{error}</p>
+            <p className="text-sm text-gray-500">
+              백엔드 API 연결을 확인한 뒤 다시 시도해주세요.
+            </p>
           </div>
         ) : filteredOutcomes.length === 0 ? (
           <div className="bg-white rounded-lg shadow-md p-12 text-center">

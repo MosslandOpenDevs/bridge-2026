@@ -26,7 +26,7 @@ export class OutcomesService {
     const total = await queryBuilder.getCount();
 
     const entities = await queryBuilder
-      .orderBy('outcome.evaluatedAt', 'DESC')
+      .orderBy('outcome.executionStartTime', 'DESC')
       .skip(options.offset)
       .take(options.limit)
       .getMany();
@@ -45,7 +45,8 @@ export class OutcomesService {
       return entity.toOutcome();
     }
 
-    // proofOfOutcome에서도 확인
+    // Proof of Outcome holds outcomes in process until they are written back,
+    // so an evaluation still in flight is only findable there.
     return proofOfOutcome.getOutcome(id) || null;
   }
 }

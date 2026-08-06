@@ -29,6 +29,17 @@ const nextConfig = {
       fs: false,
       net: false,
       tls: false,
+      // The wagmi/RainbowKit connector chain pulls in @coinbase/cdp-sdk, whose
+      // x402 payment signing lazily imports the @x402/* packages. Those are
+      // declared optional peer dependencies and are therefore never installed;
+      // webpack still resolves the dynamic import statically and fails the
+      // build. This app only reads governance state and casts votes — it never
+      // signs an x402 payment — so the branch is unreachable here. Drop these
+      // entries if x402 payments are ever added, and install the peers instead.
+      '@x402/core': false,
+      '@x402/evm': false,
+      '@x402/svm': false,
+      '@x402/extensions': false,
     };
     return config;
   },

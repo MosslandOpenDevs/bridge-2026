@@ -4,29 +4,18 @@
  * 정책 기반 위임을 관리하는 서비스입니다.
  */
 
-import type { DelegationPolicy } from '../../../shared/types/proposal';
+import type { DelegationPolicy } from '@bridge-2026/shared';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
  * 위임 정책 인터페이스
+ *
+ * 정책 필드는 공유 계약(DelegationPolicy)에서 상속받고, 저장소가 부여하는
+ * 식별자와 타임스탬프만 여기에 더합니다. 필드를 복제해 두면 공유 계약이
+ * 바뀔 때 조용히 어긋나므로 상속으로 묶어 둡니다.
  */
-export interface DelegationPolicyInternal {
+export interface DelegationPolicyInternal extends DelegationPolicy {
   id: string;
-  wallet: string;
-  agent_id: string;
-  scope: {
-    categories?: string[];
-    tags?: string[];
-    exclude_categories?: string[];
-    exclude_tags?: string[];
-  };
-  max_budget_per_month?: number;
-  max_budget_per_proposal?: number;
-  no_vote_on_emergency: boolean;
-  cooldown_window_hours: number;
-  veto_enabled: boolean;
-  require_human_review_above?: number;
-  max_votes_per_day?: number;
   created_at: number;
   updated_at: number;
 }
@@ -175,7 +164,7 @@ export class DelegationManager {
       if (hoursSinceLastVote < policy.cooldown_window_hours) {
         return { 
           allowed: false, 
-          reason: `Cooldown period: ${policy.cooldown_window_hours - hoursSinceLastVote.toFixed(1)} hours remaining` 
+          reason: `Cooldown period: ${(policy.cooldown_window_hours - hoursSinceLastVote).toFixed(1)} hours remaining`
         };
       }
     }

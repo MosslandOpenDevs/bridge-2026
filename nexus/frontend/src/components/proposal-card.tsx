@@ -10,8 +10,13 @@ interface ProposalCardProps {
 
 export function ProposalCard({ proposal }: ProposalCardProps) {
   const isActive = proposal.status === 'active';
-  const isPassed = proposal.status === 'passed';
-  const isRejected = proposal.status === 'rejected';
+  // `metadata` is an open `Record<string, unknown>`, so every read has to prove
+  // the shape it wants before rendering it.
+  const aiAssisted = proposal.metadata?.aiAssisted === true;
+  const agentConfidence =
+    typeof proposal.metadata?.agentConfidence === 'number'
+      ? proposal.metadata.agentConfidence
+      : undefined;
 
   return (
     <div className="bg-white rounded-lg shadow-md p-6 border border-moss-200 hover:shadow-lg transition-shadow">
@@ -21,7 +26,7 @@ export function ProposalCard({ proposal }: ProposalCardProps) {
             <h3 className="text-xl font-semibold text-moss-700">
               {proposal.title}
             </h3>
-            {proposal.metadata?.aiAssisted && (
+            {aiAssisted && (
               <span className="px-2 py-1 text-xs font-medium bg-moss-100 text-moss-700 rounded">
                 AI Assisted
               </span>
@@ -67,7 +72,7 @@ export function ProposalCard({ proposal }: ProposalCardProps) {
         )}
       </div>
 
-      {proposal.metadata?.agentConfidence && (
+      {agentConfidence !== undefined && (
         <div className="mb-4">
           <div className="flex items-center gap-2">
             <span className="text-sm text-gray-500">에이전트 신뢰도:</span>
@@ -75,12 +80,12 @@ export function ProposalCard({ proposal }: ProposalCardProps) {
               <div
                 className="bg-moss-600 h-2 rounded-full"
                 style={{
-                  width: `${(proposal.metadata.agentConfidence as number) * 100}%`,
+                  width: `${agentConfidence * 100}%`,
                 }}
               />
             </div>
             <span className="text-sm text-moss-600 font-medium">
-              {formatPercent(proposal.metadata.agentConfidence as number)}
+              {formatPercent(agentConfidence)}
             </span>
           </div>
         </div>

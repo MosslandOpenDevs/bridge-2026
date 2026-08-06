@@ -10,12 +10,12 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "paths": {
-      "@bridge-2026/shared": ["../../shared"],
-      "@bridge-2026/event-bus": ["../../infrastructure/event-bus"]
-    }
+    "resolveJsonModule": true
   },
+  // @bridge-2026/shared와 @bridge-2026/event-bus는 workspace 심볼릭 링크를 통해
+  // 각 패키지의 dist 선언 파일로 해석됩니다. "paths"로 소스 디렉터리를 직접
+  // 가리키면 그 .ts 파일들이 이 패키지의 입력이 되어 rootDir를 벗어나므로
+  // (TS6059) 빌드 산출물이 shared/ 트리에 쏟아집니다. 매핑을 두지 않습니다.
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

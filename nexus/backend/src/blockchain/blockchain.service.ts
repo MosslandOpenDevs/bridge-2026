@@ -20,28 +20,22 @@ export class BlockchainService {
 
   /**
    * Moss Coin 잔액을 조회합니다.
+   *
+   * Errors propagate rather than collapsing to 0: this number is a voter's
+   * weight, and an unreachable RPC endpoint is not the same answer as an empty
+   * wallet.
    */
   async getBalance(address: string): Promise<number> {
-    try {
-      const balance = await this.mossCoinContract.balanceOf(address);
-      return parseFloat(ethers.formatEther(balance));
-    } catch (error) {
-      console.error('Error getting balance:', error);
-      return 0;
-    }
+    const balance = await this.mossCoinContract.balanceOf(address);
+    return parseFloat(ethers.formatEther(balance));
   }
 
   /**
    * 총 공급량을 조회합니다.
    */
   async getTotalSupply(): Promise<number> {
-    try {
-      const supply = await this.mossCoinContract.totalSupply();
-      return parseFloat(ethers.formatEther(supply));
-    } catch (error) {
-      console.error('Error getting total supply:', error);
-      return 0;
-    }
+    const supply = await this.mossCoinContract.totalSupply();
+    return parseFloat(ethers.formatEther(supply));
   }
 
   /**

@@ -1,0 +1,20 @@
+{
+  // Compiler baseline shared by the Nexus layer packages. Kept free of path
+  // options (`rootDir`, `outDir`, `paths`): a path written here would resolve
+  // against this file's directory, not against the package that extends it.
+  //
+  // Named `tsconfig.base.json` rather than `tsconfig.json` on purpose — a
+  // `tsconfig.json` at the workspace root would make editors treat the whole
+  // tree as one program and compile every layer at once.
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "declaration": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  }
+}

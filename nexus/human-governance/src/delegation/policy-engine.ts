@@ -4,8 +4,12 @@
  * 위임 정책을 평가하고 적용하는 엔진입니다.
  */
 
-import type { Proposal } from '../../../shared/types';
-import { DelegationManager, type DelegationPolicyInternal } from './delegation-manager';
+import type { Proposal } from '@bridge-2026/shared';
+import {
+  DelegationManager,
+  delegationManager,
+  type DelegationPolicyInternal,
+} from './delegation-manager';
 
 /**
  * 정책 엔진
@@ -84,7 +88,7 @@ export class PolicyEngine {
       errors.push('Max budget per month must be non-negative');
     }
     
-    if (policy.cooldown_window_hours < 0) {
+    if (policy.cooldown_window_hours !== undefined && policy.cooldown_window_hours < 0) {
       errors.push('Cooldown window must be non-negative');
     }
     

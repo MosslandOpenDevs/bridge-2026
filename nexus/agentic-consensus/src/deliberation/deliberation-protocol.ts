@@ -5,7 +5,8 @@
  * Evidence → Proposal → Critique → Synthesis
  */
 
-import type { Issue, AgentReasoning, AgentType, Signal } from '../../../shared/types';
+import { AgentType } from '@bridge-2026/shared';
+import type { Issue, AgentReasoning } from '@bridge-2026/shared';
 import type { IAgent } from '../agents/base-agent';
 
 /**
@@ -72,7 +73,7 @@ export class DeliberationProtocol {
     
     // 각 에이전트가 최소 3개의 신호를 인용
     for (const [agentType, agent] of agents.entries()) {
-      if (agentType === 'moderator') {
+      if (agentType === AgentType.MODERATOR) {
         continue; // Moderator는 Evidence Round에 참여하지 않음
       }
       
@@ -95,7 +96,7 @@ export class DeliberationProtocol {
     const proposals = new Map<AgentType, ProposalRoundResult>();
     
     for (const [agentType, agent] of agents.entries()) {
-      if (agentType === 'moderator') {
+      if (agentType === AgentType.MODERATOR) {
         continue; // Moderator는 Proposal Round에 참여하지 않음
       }
       
@@ -128,7 +129,7 @@ export class DeliberationProtocol {
     
     // 각 에이전트가 다른 에이전트의 제안을 비판
     for (const [criticType, criticAgent] of agents.entries()) {
-      if (criticType === 'moderator') {
+      if (criticType === AgentType.MODERATOR) {
         continue;
       }
       

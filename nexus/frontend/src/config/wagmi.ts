@@ -1,8 +1,8 @@
 import { getDefaultConfig } from '@rainbow-me/rainbowkit';
 import { mainnet, sepolia, goerli } from 'wagmi/chains';
 
-// Moss Coin Contract Address
-export const MOSS_COIN_ADDRESS = '0x8bbfe65e31b348cd823c62e02ad8c19a84d' as const;
+// Contract addresses live in `@/config/contracts` only. A second copy here had
+// drifted to a 35-character string, which is not a valid 20-byte address.
 
 export const config = getDefaultConfig({
   appName: 'BRIDGE 2026 — Moss Coin DAO',

@@ -4,7 +4,7 @@
  * Agora 거버넌스 플랫폼과의 연동을 담당합니다.
  */
 
-import type { Proposal, DecisionPacket } from '../../shared/types';
+import type { Proposal, DecisionPacket } from '@bridge-2026/shared';
 import { governanceService } from './governance-service';
 
 /**

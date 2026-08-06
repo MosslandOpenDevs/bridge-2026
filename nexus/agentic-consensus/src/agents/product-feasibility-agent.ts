@@ -5,11 +5,19 @@
  */
 
 import { BaseAgent } from './base-agent';
-import type { AgentType, AgentReasoning, Issue } from '../../../shared/types';
+import { AgentType } from '@bridge-2026/shared';
+import type { AgentReasoning, Issue } from '@bridge-2026/shared';
+
+/** `analyze` 가 각 평가 메서드의 결과를 묶어 넘기는 구조. */
+interface FeasibilityAssessments {
+  technicalFeasibility: { level: string; details: string[] };
+  timelineFeasibility: { level: string; estimatedTime?: string };
+  resourceFeasibility: { level: string; requiredResources: string[] };
+}
 
 export class ProductFeasibilityAgent extends BaseAgent {
   constructor() {
-    super('product_feasibility' as AgentType, 'Product Feasibility Agent');
+    super(AgentType.PRODUCT_FEASIBILITY, 'Product Feasibility Agent');
   }
   
   async analyze(issue: Issue, context?: Record<string, unknown>): Promise<AgentReasoning> {
@@ -191,7 +199,7 @@ export class ProductFeasibilityAgent extends BaseAgent {
   
   private calculateConfidence(
     issue: Issue,
-    assessments: Record<string, any>
+    assessments: FeasibilityAssessments
   ): number {
     let confidence = 0.6; // 기본 신뢰도
     
@@ -205,7 +213,7 @@ export class ProductFeasibilityAgent extends BaseAgent {
     }
     
     // 모든 실현 가능성이 높으면 신뢰도 증가
-    const allHigh = Object.values(assessments).every((a: any) => a.level === 'high');
+    const allHigh = Object.values(assessments).every(a => a.level === 'high');
     if (allHigh) {
       confidence += 0.1;
     }
@@ -215,7 +223,7 @@ export class ProductFeasibilityAgent extends BaseAgent {
   
   private generateRecommendation(
     issue: Issue,
-    assessments: Record<string, any>
+    assessments: FeasibilityAssessments
   ): string {
     if (assessments.technicalFeasibility.level === 'low') {
       return '기술적 제약이 있어 추가 기술 검토나 대안적 접근 방식을 고려해야 합니다.';
@@ -234,7 +242,7 @@ export class ProductFeasibilityAgent extends BaseAgent {
   
   private generateAnalysis(
     issue: Issue,
-    assessments: Record<string, any>
+    assessments: FeasibilityAssessments
   ): string {
     return `제품 실현 가능성 관점 분석:
 

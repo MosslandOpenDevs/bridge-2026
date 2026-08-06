@@ -1,0 +1,33 @@
+{
+  "name": "@bridge-2026/integration",
+  "version": "0.1.0",
+  "description": "End-to-end example wiring every BRIDGE 2026 governance layer together",
+  "private": true,
+  "main": "dist/governance-loop.js",
+  "types": "dist/governance-loop.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "governance",
+    "bridge-2026",
+    "integration",
+    "example"
+  ],
+  "author": "",
+  "license": "BUSL-1.1",
+  "dependencies": {
+    "@bridge-2026/shared": "workspace:*",
+    "@bridge-2026/reality-oracle": "workspace:*",
+    "@bridge-2026/agentic-consensus": "workspace:*",
+    "@bridge-2026/human-governance": "workspace:*",
+    "@bridge-2026/atomic-actuation": "workspace:*",
+    "@bridge-2026/proof-of-outcome": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}

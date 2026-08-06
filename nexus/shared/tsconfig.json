@@ -1,26 +1,15 @@
 {
+  "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "commonjs",
-    "lib": ["ES2020"],
-    "declaration": true,
-    "outDir": "./dist",
+    // rootDir is the package root so that `index.ts` lands at `dist/index.js`
+    // and `utils/index.ts` at `dist/utils/index.js` — the two paths the
+    // "exports" map in package.json points at.
     "rootDir": "./",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true
+    "outDir": "./dist"
   },
-  "include": ["types/**/*", "utils/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["index.ts", "types/**/*", "utils/**/*"],
+  // The tests next to utils/ run through this workspace's Jest setup, not tsc;
+  // compiling them here would emit them into dist and would need Jest's global
+  // types, which the library build deliberately does not depend on.
+  "exclude": ["node_modules", "dist", "**/__tests__/**"]
 }
-
-
-
-
-
-
-
-
-

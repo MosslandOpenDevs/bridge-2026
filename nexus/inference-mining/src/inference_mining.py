@@ -103,9 +103,13 @@ class InferenceMining:
             })
         
         # 통계적 증거 수집
-        statistical_evidence = {}
+        statistical_evidence: Dict[str, Any] = {}
         if len(signal_data) > 0:
-            # 첫 번째 메트릭으로 이상 탐지 시도
+            # 첫 번째 메트릭으로 이상 탐지 시도.
+            # metric_keys는 아래 트렌드 분석에서도 읽히므로 isinstance 분기 밖에서
+            # 초기화한다. data가 dict가 아닌 신호(누락/스칼라)가 첫 번째로 오면
+            # 분기 안에서만 바인딩된 이름은 NameError를 낸다.
+            metric_keys: List[str] = []
             first_signal = signal_data[0]
             if isinstance(first_signal.get("data"), dict):
                 metric_keys = list(first_signal["data"].keys())

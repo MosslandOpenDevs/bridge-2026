@@ -5,7 +5,8 @@
  */
 
 import { BaseAgent } from './base-agent';
-import type { AgentType, AgentReasoning, Issue } from '../../../shared/types';
+import { AgentType } from '@bridge-2026/shared';
+import type { AgentReasoning, Issue } from '@bridge-2026/shared';
 
 export class ModeratorAgent extends BaseAgent {
   constructor() {

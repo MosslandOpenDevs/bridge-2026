@@ -1,4 +1,12 @@
 {
+  // No `paths` entry for `@bridge-2026/shared`: it must resolve through the
+  // pnpm node_modules link to that package's built `dist/*.d.ts`. Aiming it at
+  // the sibling source tree instead pulls those sources into this program,
+  // where they sit outside `rootDir` (TS6059) and make tsc emit compiled
+  // output into `shared/`.
+  //
+  // `lib` is pinned to ES2020 without the DOM: this is a Node library, so the
+  // globals it uses (`console`) come from @types/node, not from lib.dom.
   "compilerOptions": {
     "target": "ES2020",
     "module": "commonjs",
@@ -10,10 +18,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "paths": {
-      "@bridge-2026/shared": ["../../shared"]
-    }
+    "resolveJsonModule": true
   },
   "include": ["**/*.ts"],
   "exclude": ["node_modules", "dist"]

@@ -51,6 +51,51 @@ jobs:
       - name: Test
         run: pnpm test
 
+  # Nexus is the reference stack and is never deployed, so it is not part of the
+  # deploy gate's required checks. It is built here so its documented setup
+  # cannot silently rot again.
+  nexus:
+    name: nexus
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nexus
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: nexus/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Test
+        run: |
+          pnpm --filter @bridge-2026/reality-oracle exec jest
+          pnpm --filter @bridge-2026/shared-utils exec jest
+
+      # The build must not write into source directories. It used to emit 24
+      # files beside the shared sources, which a `git add -A` would commit.
+      - name: No build output in sources
+        run: |
+          strays=$(git status --porcelain | grep '^??' || true)
+          if [ -n "$strays" ]; then
+            echo "Build left untracked files in the source tree:"
+            echo "$strays"
+            exit 1
+          fi
+
   deploy-script:
     name: deploy-script
     runs-on: ubuntu-latest

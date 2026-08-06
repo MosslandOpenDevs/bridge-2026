@@ -16,6 +16,11 @@
     "test:cov": "jest --coverage"
   },
   "dependencies": {
+    "@bridge-2026/agentic-consensus": "workspace:*",
+    "@bridge-2026/human-governance": "workspace:*",
+    "@bridge-2026/proof-of-outcome": "workspace:*",
+    "@bridge-2026/reality-oracle": "workspace:*",
+    "@bridge-2026/shared": "workspace:*",
     "@nestjs/common": "^10.2.0",
     "@nestjs/core": "^10.2.0",
     "@nestjs/platform-express": "^10.2.0",

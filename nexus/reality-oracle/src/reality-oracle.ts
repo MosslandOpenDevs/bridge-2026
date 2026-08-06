@@ -4,13 +4,12 @@
  * Reality Oracle는 실세계 신호를 수집, 정규화, 증명하는 메인 서비스입니다.
  */
 
-import type { Signal, NormalizedSignal } from '../../shared/types';
-import { BaseCollector, ICollector } from './collectors/base-collector';
+import type { Signal, NormalizedSignal } from '@bridge-2026/shared';
+import { ICollector } from './collectors/base-collector';
 import { signalNormalizer } from './normalizers/signal-normalizer';
 import { signatureService } from './attestation/signature-service';
 import { hashChain } from './attestation/hash-chain';
-import { eventPublisher } from '../../infrastructure/event-bus';
-import { EventType } from '../../infrastructure/event-bus/event-types';
+import { eventPublisher, EventType } from '@bridge-2026/event-bus';
 
 /**
  * Reality Oracle 서비스

@@ -4,7 +4,7 @@
  * 다양한 형식의 신호를 표준 형식으로 정규화합니다.
  */
 
-import type { Signal, NormalizedSignal } from '../../../shared/types';
+import type { Signal, NormalizedSignal } from '@bridge-2026/shared';
 
 /**
  * 정규화 규칙 인터페이스
