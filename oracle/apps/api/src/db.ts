@@ -418,11 +418,11 @@ export const governanceDb = {
     INSERT INTO proposals (
       id, title, description, proposer, status, voting_starts, voting_ends,
       issue_id, decision_packet, voting_period_ms, quorum, threshold,
-      execution_eta, executed_at, snapshot_block, onchain_id
+      execution_eta, executed_at, snapshot_block, onchain_id, created_at
     ) VALUES (
       @id, @title, @description, @proposer, @status, @votingStarts, @votingEnds,
       @issueId, @decisionPacket, @votingPeriodMs, @quorum, @threshold,
-      @executionEta, @executedAt, @snapshotBlock, @onchainId
+      @executionEta, @executedAt, @snapshotBlock, @onchainId, @createdAt
     )
     ON CONFLICT(id) DO UPDATE SET
       title = @title,
@@ -491,13 +491,17 @@ export const governanceDb = {
       @id, @executionId, @proposalId, @kpiResults, @overallSuccess,
       @successRate, @proofHash, @attestation, @txHash, @recordedAt
     )
+    -- recorded_at is updated with the rest: the proof hash covers the
+    -- timestamp, so keeping an older recorded_at alongside a newer hash leaves
+    -- a row whose hash cannot be recomputed from its own contents.
     ON CONFLICT(id) DO UPDATE SET
       kpi_results = @kpiResults,
       overall_success = @overallSuccess,
       success_rate = @successRate,
       proof_hash = @proofHash,
       attestation = @attestation,
-      tx_hash = @txHash
+      tx_hash = @txHash,
+      recorded_at = @recordedAt
   `),
 
   allProofs: db.prepare(`SELECT * FROM outcome_proofs ORDER BY recorded_at ASC`),

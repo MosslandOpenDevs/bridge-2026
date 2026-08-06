@@ -221,7 +221,11 @@ export async function verifyDelegationSignature(input: {
  */
 export function isVoteSignatureRequired(mocEnabled: boolean): boolean {
   if (REQUIRE_VOTE_SIGNATURE === "always") return true;
-  if (REQUIRE_VOTE_SIGNATURE === "never") return false;
+  // "never" is a demo switch. Honouring it in production would leave voting
+  // open to anyone able to name someone else's address, which is the one thing
+  // the signature exists to stop — the admin key and delegation switches are
+  // ignored in production for the same reason.
+  if (REQUIRE_VOTE_SIGNATURE === "never") return IS_PROD;
   return mocEnabled;
 }
 

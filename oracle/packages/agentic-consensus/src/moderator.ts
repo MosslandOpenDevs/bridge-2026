@@ -594,38 +594,45 @@ Be objective, thorough, and actionable.`;
     ];
   }
 
+  /**
+   * Each KPI carries the direction its target is judged in: "at_most" for
+   * metrics to keep down (resolution time, error rate), "at_least" for ones to
+   * push up (uptime, engagement). Scoring them all one way marks a perfect
+   * uptime as a miss and a total outage as a hit.
+   */
   private generateKPIs(issue: DetectedIssue): DecisionPacket["kpis"] {
-    const baseKPIs = [
+    const baseKPIs: DecisionPacket["kpis"] = [
       {
         name: "Resolution Time",
         target: issue.priority === "urgent" ? 24 : issue.priority === "high" ? 72 : 168,
+        direction: "at_most",
         unit: "hours",
         measurementMethod: `Time from approval to ${issue.title} resolution`,
       },
     ];
 
     // Category-specific KPIs
-    const categoryKPIs: Record<string, Array<{ name: string; target: number; unit: string; measurementMethod: string }>> = {
+    const categoryKPIs: Record<string, DecisionPacket["kpis"]> = {
       treasury: [
-        { name: "Treasury Balance Impact", target: 0, unit: "percent deviation", measurementMethod: "Compare treasury balance before/after" },
-        { name: "Transaction Success Rate", target: 100, unit: "percent", measurementMethod: "Successful vs failed treasury operations" },
+        { name: "Treasury Balance Impact", target: 0, direction: "at_most", unit: "percent deviation", measurementMethod: "Compare treasury balance before/after" },
+        { name: "Transaction Success Rate", target: 100, direction: "at_least", unit: "percent", measurementMethod: "Successful vs failed treasury operations" },
       ],
       protocol: [
-        { name: "Protocol Uptime", target: 99.9, unit: "percent", measurementMethod: "System availability after changes" },
-        { name: "Error Rate", target: 0, unit: "errors per hour", measurementMethod: "Monitor error logs post-deployment" },
+        { name: "Protocol Uptime", target: 99.9, direction: "at_least", unit: "percent", measurementMethod: "System availability after changes" },
+        { name: "Error Rate", target: 0, direction: "at_most", unit: "errors per hour", measurementMethod: "Monitor error logs post-deployment" },
       ],
       community: [
-        { name: "Community Engagement", target: 50, unit: "responses", measurementMethod: "Community feedback count within 7 days" },
-        { name: "Sentiment Score", target: 70, unit: "percent positive", measurementMethod: "Analyze community reaction sentiment" },
+        { name: "Community Engagement", target: 50, direction: "at_least", unit: "responses", measurementMethod: "Community feedback count within 7 days" },
+        { name: "Sentiment Score", target: 70, direction: "at_least", unit: "percent positive", measurementMethod: "Analyze community reaction sentiment" },
       ],
       security: [
-        { name: "Vulnerability Status", target: 0, unit: "open vulnerabilities", measurementMethod: "Security scan after mitigation" },
-        { name: "Incident Recurrence", target: 0, unit: "incidents", measurementMethod: "Similar security events within 30 days" },
+        { name: "Vulnerability Status", target: 0, direction: "at_most", unit: "open vulnerabilities", measurementMethod: "Security scan after mitigation" },
+        { name: "Incident Recurrence", target: 0, direction: "at_most", unit: "incidents", measurementMethod: "Similar security events within 30 days" },
       ],
     };
 
     const specific = categoryKPIs[issue.category] || [
-      { name: "Issue Recurrence", target: 0, unit: "occurrences", measurementMethod: `Similar ${issue.category} issues within 30 days` },
+      { name: "Issue Recurrence", target: 0, direction: "at_most" as const, unit: "occurrences", measurementMethod: `Similar ${issue.category} issues within 30 days` },
     ];
 
     return [...baseKPIs, ...specific];

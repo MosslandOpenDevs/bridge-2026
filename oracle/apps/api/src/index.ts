@@ -958,11 +958,20 @@ const proposalOptionsSchema = z
   })
   .strict();
 
+/** A proposal cannot be created because its balance snapshot cannot be pinned. */
+class SnapshotUnavailableError extends Error {
+  readonly code = "SNAPSHOT_UNAVAILABLE";
+}
+
 /**
  * Block height that fixes voting power for a new proposal. Taken from chain
- * state, never from the request. Returns undefined when MOC verification is
- * off (demo weights) or the chain is unreachable, in which case voting falls
- * back to live balances and says so in the log.
+ * state, never from the request.
+ *
+ * Returns undefined only when snapshots do not apply — MOC verification off
+ * (demo weights), or VOTE_WEIGHT_MODE=current. When they do apply and the
+ * height cannot be read, creation fails: a proposal with no snapshot cannot be
+ * voted on safely, and quietly creating one would move the failure to vote
+ * time, where it looks like a voter problem.
  */
 async function currentSnapshotBlock(): Promise<number | undefined> {
   if (!blockchainService.isMocEnabled() || VOTE_WEIGHT_MODE !== "snapshot") {
@@ -971,12 +980,12 @@ async function currentSnapshotBlock(): Promise<number | undefined> {
   try {
     return await blockchainService.getCurrentBlockNumber();
   } catch (error) {
-    console.warn(
-      "⚠️  Could not read the current block for the voting snapshot; this " +
-        "proposal will fall back to live balances:",
-      error,
+    throw new SnapshotUnavailableError(
+      "Could not read the current block to pin this proposal's balance " +
+        `snapshot: ${sanitizeError(error, "chain unreachable")}. Retry once the ` +
+        "RPC is reachable, or set VOTE_WEIGHT_MODE=current to accept live " +
+        "balances (not sybil-resistant across wallets).",
     );
-    return undefined;
   }
 }
 
@@ -998,14 +1007,27 @@ app.post("/api/proposals", requireAdminKey, async (req, res) => {
       });
     }
 
+    // Pin the snapshot before creating anything, so a chain outage cannot
+    // leave a proposal behind that no one can vote on.
+    const snapshotBlock = await currentSnapshotBlock();
+
     const proposal = votingSystem.createProposal(decisionPacket, proposer, {
       ...parsedOptions.data,
-      snapshotBlock: await currentSnapshotBlock(),
+      snapshotBlock,
     });
     // Auto-activate the proposal for immediate voting
     votingSystem.activateProposal(proposal.id);
     const activatedProposal = votingSystem.getProposal(proposal.id)!;
-    saveProposal(activatedProposal);
+
+    try {
+      saveProposal(activatedProposal);
+    } catch (persistError) {
+      // Without this the proposal would live in memory only: visible, votable,
+      // and gone at the next restart, while its votes were written against a
+      // proposal id that storage has never heard of.
+      votingSystem.removeProposal(activatedProposal.id);
+      throw persistError;
+    }
 
     // Emit real-time event
     const allProposals = votingSystem.listProposals();
@@ -1018,8 +1040,12 @@ app.post("/api/proposals", requireAdminKey, async (req, res) => {
 
     res.status(201).json({ proposal: withTally(activatedProposal) });
   } catch (error) {
-    // Rejected settings are a client mistake, not a server fault.
     console.error("Failed to create proposal:", error);
+    if (error instanceof SnapshotUnavailableError) {
+      // Not the caller's mistake: the chain is unreachable right now.
+      return res.status(503).json({ error: error.message, code: error.code });
+    }
+    // Rejected settings are a client mistake, not a server fault.
     res.status(400).json({ error: sanitizeError(error, "Failed to create proposal") });
   }
 });
@@ -1049,17 +1075,34 @@ if (!["snapshot", "current"].includes(VOTE_WEIGHT_MODE)) {
   process.exit(1);
 }
 
-/** Voting weight for a MOC-verified voter, per VOTE_WEIGHT_MODE. */
+/**
+ * Voting weight for a MOC-verified voter, per VOTE_WEIGHT_MODE.
+ *
+ * In snapshot mode a proposal without a snapshot block is refused rather than
+ * weighted from the live balance. Falling back would silently return the
+ * system to the behaviour snapshots exist to prevent — vote, forward the
+ * tokens, vote again — and it would do so for exactly the proposals created
+ * while the chain was unreachable, with nothing in the response to say so.
+ */
 async function resolveVotingWeight(
   voter: `0x${string}`,
-  proposal: { snapshotBlock?: number },
+  proposal: { id: string; snapshotBlock?: number },
 ): Promise<bigint> {
-  if (VOTE_WEIGHT_MODE === "current" || proposal.snapshotBlock === undefined) {
+  if (VOTE_WEIGHT_MODE === "current") {
     const balance = await blockchainService.verifyVoterEligibility(voter);
     if (balance === 0n) {
       throw new Error(`Address ${voter} is not a MOC holder.`);
     }
     return balance;
+  }
+
+  if (proposal.snapshotBlock === undefined) {
+    throw new Error(
+      `Proposal ${proposal.id} has no balance snapshot, so voting power cannot ` +
+        "be established. It was created while the chain was unreachable; " +
+        "create a replacement proposal, or set VOTE_WEIGHT_MODE=current to " +
+        "accept live balances (not sybil-resistant across wallets).",
+    );
   }
 
   const balance = await blockchainService.getMocBalanceAt(voter, proposal.snapshotBlock);
@@ -1370,11 +1413,26 @@ app.post("/api/outcomes/:executionId/measurements", requireAdminKey, async (req,
       return res.status(404).json({ error: "Execution not found" });
     }
 
+    // Already measured: report the existing proof rather than issuing a
+    // second one. Re-running would re-apply the trust adjustment and could
+    // amend a recorded failure into a success.
+    const alreadyMeasured = outcomeTracker.getProofByExecution(execution.id);
+    if (alreadyMeasured) {
+      return res.status(409).json({
+        error:
+          `Execution ${execution.id} was already measured at ` +
+          `${alreadyMeasured.recordedAt.toISOString()}; outcomes are recorded once.`,
+        code: "ALREADY_MEASURED",
+        proof: alreadyMeasured,
+      });
+    }
+
     const proposal = votingSystem.getProposal(execution.proposalId);
     const declaredKpis = (proposal?.decisionPacket?.kpis ?? []).map((k) => ({
       name: k.name,
       target: k.target,
       unit: k.unit,
+      direction: k.direction,
     }));
 
     const kpiResults = outcomeTracker.submitMeasurements(
@@ -1548,15 +1606,35 @@ app.get("/api/outcomes/:executionId", async (req, res) => {
   }
 });
 
-app.get("/api/outcomes/:executionId/proof", async (req, res) => {
+/**
+ * Read the proof issued for an execution.
+ *
+ * Strictly a read. Generating the proof here would rewrite it: the hashed
+ * payload embeds the current time, so each call produced a different
+ * proofHash for the same measurements and persisted it over the stored row —
+ * an unauthenticated request could change an attestation the UI displays and
+ * the chain would anchor. Proofs are issued once, by
+ * POST /api/outcomes/:executionId/measurements.
+ */
+app.get("/api/outcomes/:executionId/proof", (req, res) => {
   try {
-    // Returns the proof for an already-measured execution. It does not
-    // manufacture one: without measurements this reports what is missing.
-    const proof = await outcomeTracker.generateProof(req.params.executionId);
-    saveProof(proof);
+    const execution = outcomeTracker.getExecution(req.params.executionId);
+    if (!execution) {
+      return res.status(404).json({ error: "Execution not found" });
+    }
+    const proof = outcomeTracker.getProofByExecution(req.params.executionId);
+    if (!proof) {
+      const status = outcomeTracker.measurementStatus(req.params.executionId);
+      return res.status(409).json({
+        error:
+          "No outcome proof yet: this execution's KPIs have not been measured.",
+        code: "PENDING_MEASUREMENT",
+        measurementDueAt: status.dueAt.toISOString(),
+      });
+    }
     res.json({ proof });
   } catch (error: any) {
-    res.status(400).json({ error: sanitizeError(error, "Failed to generate proof") });
+    res.status(400).json({ error: sanitizeError(error, "Failed to read proof") });
   }
 });
 
@@ -1655,6 +1733,31 @@ const delegationConditionSchema = z
         code: z.ZodIssueCode.custom,
         message: `operator '${condition.operator}' requires a numeric value`,
       });
+    }
+    // Equality is by identity, so an array or object value can never match a
+    // scalar field: the policy would be accepted and then never fire. And an
+    // empty `contains` matches every string, which is a blanket delegation
+    // wearing a condition.
+    if (["eq", "ne"].includes(condition.operator) && Array.isArray(condition.value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `operator '${condition.operator}' compares by identity and can never match an array value`,
+      });
+    }
+    if (condition.operator === "contains") {
+      if (typeof condition.value !== "string") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "operator 'contains' requires a string value",
+        });
+      } else if (condition.value.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "operator 'contains' with an empty string matches every proposal; " +
+            "use delegateAll: true if that is the intent",
+        });
+      }
     }
   });
 
@@ -2081,17 +2184,27 @@ async function detectAndSaveIssues() {
             !proposalDb.existsByIssueId.get(issue.id)
           ) {
             try {
+              // Pin the snapshot first: if the chain is unreachable this
+              // throws and the issue stays un-promoted, to be retried on the
+              // next detection pass, rather than becoming a proposal nobody
+              // can vote on.
+              const snapshotBlock = await currentSnapshotBlock();
               const proposal = votingSystem.createProposal(
                 decisionPacket,
                 AUTO_PROPOSAL_PROPOSER,
-                { snapshotBlock: await currentSnapshotBlock() },
+                { snapshotBlock },
               );
               votingSystem.activateProposal(proposal.id);
               const activated = votingSystem.getProposal(proposal.id)!;
               // Same write path as a manual proposal, so an auto-promoted one
               // is restored on the next boot instead of leaving a row that
               // only blocks the issue from being proposed again.
-              saveProposal(activated, issue.id);
+              try {
+                saveProposal(activated, issue.id);
+              } catch (persistError) {
+                votingSystem.removeProposal(activated.id);
+                throw persistError;
+              }
               promotedCount++;
               const all = votingSystem.listProposals();
               io.emit(SOCKET_EVENTS.proposalCreated, {
@@ -2202,6 +2315,38 @@ function finalizeDueProposals(): { finalized: number; failed: number } {
   return { finalized, failed };
 }
 
+/**
+ * Snapshot voting reads a balance at the block a proposal pinned, which needs
+ * an archive-capable RPC. Most public endpoints keep only ~128 blocks of
+ * state, so the reads succeed for roughly 25 minutes after a proposal is
+ * created and fail for every voter after that — a failure that shows up long
+ * after the misconfiguration, on the voter's request. Probe once at boot and
+ * say so plainly instead.
+ */
+async function checkArchiveRpc(): Promise<void> {
+  if (!blockchainService.isMocEnabled() || VOTE_WEIGHT_MODE !== "snapshot") return;
+
+  const probeDepth = envInt("SNAPSHOT_PROBE_DEPTH", 1000);
+  try {
+    const head = await blockchainService.getCurrentBlockNumber();
+    const target = Math.max(1, head - probeDepth);
+    await blockchainService.getMocBalanceAt(
+      "0x0000000000000000000000000000000000000001",
+      target,
+    );
+    console.log(`🗄️  Archive RPC: ok (read state at block ${target})`);
+  } catch {
+    console.warn(
+      "🚨 Archive RPC: this endpoint cannot serve historical state " +
+        `(${probeDepth} blocks back).\n` +
+        "   Snapshot voting will start failing for every voter roughly\n" +
+        "   half an hour after a proposal is created. Point MAINNET_RPC_URL at\n" +
+        "   an archive-capable provider, or set VOTE_WEIGHT_MODE=current to\n" +
+        "   accept live balances (not sybil-resistant across wallets).",
+    );
+  }
+}
+
 // Rebuild governance state from storage BEFORE accepting traffic. Serving
 // requests first would briefly report zero proposals and let a holder vote
 // again on a proposal they had already voted on.
@@ -2223,6 +2368,10 @@ if (hydration.skipped.length > 0) {
     console.warn(`     - ${reason}`);
   }
 }
+
+// Non-blocking: report an RPC that cannot serve snapshots rather than letting
+// it surface later as a voter-facing failure.
+void checkArchiveRpc();
 
 // Start server
 const PORT = process.env.PORT || 4000;

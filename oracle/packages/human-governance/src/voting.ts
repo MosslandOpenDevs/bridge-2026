@@ -268,11 +268,17 @@ export class VotingSystem {
     const totalVotes = forVotes + againstVotes + abstainVotes;
     const quorumReached = votes.length >= proposal.quorum;
 
-    // Calculate pass/fail (abstains don't count toward threshold)
+    // Calculate pass/fail (abstains don't count toward threshold).
+    //
+    // Scaled before the BigInt division so the percentage keeps four decimal
+    // places. Dividing by 100n directly truncates to a whole percent, which
+    // reverses the outcome around a fractional threshold: 50.9% support
+    // against a 50.5 threshold truncates to 50 and fails.
     const decisiveVotes = forVotes + againstVotes;
+    const PERCENT_SCALE = 1_000_000n; // 100% * 10^4
     const forPercentage =
       decisiveVotes > 0n
-        ? Number((forVotes * 100n) / decisiveVotes)
+        ? Number((forVotes * PERCENT_SCALE) / decisiveVotes) / 10_000
         : 0;
     const passed = quorumReached && forPercentage >= proposal.threshold;
 
@@ -364,6 +370,16 @@ export class VotingSystem {
     proposal.executedAt = now();
 
     return proposal;
+  }
+
+  /**
+   * Drop a proposal and its votes from memory. Used to roll back when
+   * persisting a newly created proposal failed, so nothing is left that
+   * storage has never heard of.
+   */
+  removeProposal(proposalId: string): void {
+    this.proposals.delete(proposalId);
+    this.votes.delete(proposalId);
   }
 
   /**

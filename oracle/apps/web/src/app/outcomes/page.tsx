@@ -137,7 +137,10 @@ export default function OutcomesPage() {
                 <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center flex-wrap gap-1 sm:gap-2 mb-2">
-                      {outcome.status === "completed" ? (
+                      {/* "measured" is the API's status for an outcome whose
+                          KPIs have actually been observed; anything else is
+                          still awaiting measurement. */}
+                      {outcome.status === "measured" ? (
                         outcome.overallSuccess ? (
                           <span className="badge bg-green-50 text-green-700 text-xs">
                             <CheckCircle className="w-3 h-3 mr-1" />

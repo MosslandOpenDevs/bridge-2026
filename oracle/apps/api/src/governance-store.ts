@@ -75,6 +75,11 @@ export function saveProposal(proposal: Proposal, issueId?: string | null): void 
     executedAt: iso(proposal.executedAt),
     snapshotBlock: proposal.snapshotBlock ?? null,
     onchainId: proposal.onchainId ?? null,
+    // Written explicitly rather than left to the column default: SQLite's
+    // CURRENT_TIMESTAMP is UTC without a zone marker, and reading it back with
+    // `new Date(...)` interprets it as local time, shifting every restored
+    // proposal's creation time by the host's offset.
+    createdAt: iso(proposal.createdAt),
   });
 }
 
@@ -209,6 +214,21 @@ export function saveExecutionOutcome(params: {
 
 /* ----------------------------- reads ------------------------------ */
 
+/**
+ * Read a stored timestamp. Rows written before createdAt was persisted carry
+ * SQLite's CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS"), which is UTC but has no
+ * zone marker, so `new Date()` would read it as local time. Anything already
+ * in ISO form is returned as-is.
+ */
+function parseStoredDate(raw: unknown): Date | undefined {
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)
+    ? `${raw.replace(" ", "T")}Z`
+    : raw;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
 function parseJson<T>(raw: unknown, fallback: T): T {
   if (typeof raw !== "string" || raw.length === 0) return fallback;
   try {
@@ -277,7 +297,7 @@ export function hydrate(deps: {
           Math.max(1, votingEndsAt.getTime() - votingStartsAt.getTime()),
         quorum: row.quorum ?? 100,
         threshold: row.threshold ?? 50,
-        createdAt: row.created_at ? new Date(row.created_at) : votingStartsAt,
+        createdAt: parseStoredDate(row.created_at) ?? votingStartsAt,
         ...(row.execution_eta ? { executionEta: new Date(row.execution_eta) } : {}),
         ...(row.executed_at ? { executedAt: new Date(row.executed_at) } : {}),
         ...(row.snapshot_block !== null && row.snapshot_block !== undefined

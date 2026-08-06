@@ -15,6 +15,16 @@ export class DelegationManager {
   private policies: Map<string, DelegationPolicy> = new Map();
   private delegatorIndex: Map<string, Set<string>> = new Map();
 
+  /**
+   * Index key for a delegator. Ethereum addresses are case-insensitive, so
+   * indexing by the exact string a caller happened to send means a policy
+   * stored under a checksummed address is invisible to a client that asks with
+   * the lowercase one — the holder's own policies simply do not exist to them.
+   */
+  static delegatorKey(delegator: string): string {
+    return delegator.trim().toLowerCase();
+  }
+
   createPolicy(
     delegator: string,
     delegate: string,
@@ -37,9 +47,10 @@ export class DelegationManager {
     this.policies.set(policy.id, policy);
 
     // Update index
-    const delegatorPolicies = this.delegatorIndex.get(delegator) || new Set();
+    const key = DelegationManager.delegatorKey(delegator);
+    const delegatorPolicies = this.delegatorIndex.get(key) || new Set();
     delegatorPolicies.add(policy.id);
-    this.delegatorIndex.set(delegator, delegatorPolicies);
+    this.delegatorIndex.set(key, delegatorPolicies);
 
     return policy;
   }
@@ -47,10 +58,10 @@ export class DelegationManager {
   /** Load a persisted policy at boot, indexes included. */
   restorePolicy(policy: DelegationPolicy): void {
     this.policies.set(policy.id, policy);
-    const delegatorPolicies =
-      this.delegatorIndex.get(policy.delegator) || new Set<string>();
+    const key = DelegationManager.delegatorKey(policy.delegator);
+    const delegatorPolicies = this.delegatorIndex.get(key) || new Set<string>();
     delegatorPolicies.add(policy.id);
-    this.delegatorIndex.set(policy.delegator, delegatorPolicies);
+    this.delegatorIndex.set(key, delegatorPolicies);
   }
 
   revokePolicy(policyId: string): void {
@@ -65,7 +76,8 @@ export class DelegationManager {
   }
 
   getPoliciesForDelegator(delegator: string): DelegationPolicy[] {
-    const policyIds = this.delegatorIndex.get(delegator) || new Set();
+    const policyIds =
+      this.delegatorIndex.get(DelegationManager.delegatorKey(delegator)) || new Set();
     return Array.from(policyIds)
       .map((id) => this.policies.get(id))
       .filter((p): p is DelegationPolicy => p !== undefined && p.active);

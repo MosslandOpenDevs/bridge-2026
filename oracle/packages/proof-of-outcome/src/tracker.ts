@@ -26,11 +26,22 @@ export interface KPIMeasurement {
   target?: number;
   unit?: string;
   /**
-   * Whether the measurement met the goal. Defaults to actual <= target, which
-   * suits "lower is better" metrics; pass explicitly for anything else.
+   * Whether the measurement met the goal. Normally left unset and derived from
+   * the KPI's declared direction; set it only when the caller genuinely knows
+   * better than the declaration.
    */
   success?: boolean;
   source?: string;
+}
+
+/** Which side of its target a KPI has to land on. */
+export type KPIDirection = "at_most" | "at_least";
+
+export interface DeclaredKPI {
+  name: string;
+  target: number;
+  unit: string;
+  direction?: KPIDirection;
 }
 
 export interface MeasurementStatus {
@@ -128,13 +139,24 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
    */
   submitMeasurements(
     executionId: string,
-    declaredKpis: Array<{ name: string; target: number; unit: string }>,
+    declaredKpis: DeclaredKPI[],
     measurements: KPIMeasurement[],
     options: { at?: Date } = {},
   ): KPIResult[] {
     const execution = this.executions.get(executionId);
     if (!execution) {
       throw new Error(`Execution ${executionId} not found`);
+    }
+
+    // Measurements are recorded once. Allowing a resubmission would let a
+    // recorded failure be amended into a success after trust scores had
+    // already moved on the first result.
+    const existing = this.kpiResults.get(executionId);
+    if (existing && existing.length > 0) {
+      throw new Error(
+        `Execution ${executionId} has already been measured at ` +
+          `${existing[0].measuredAt.toISOString()}; outcomes are recorded once.`,
+      );
     }
 
     const at = options.at ?? now();
@@ -152,9 +174,28 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
     }
 
     const declaredByName = new Map(declaredKpis.map((k) => [k.name, k]));
+
+    // Every KPI the proposal committed to must be reported. Scoring only the
+    // subset a submitter chose to send would let them drop the ones they
+    // missed and reach 100%.
+    const submitted = new Set(measurements.map((m) => m.name));
+    const unreported = declaredKpis.filter((k) => !submitted.has(k.name));
+    if (unreported.length > 0) {
+      throw new Error(
+        "Every declared KPI must be measured. Missing: " +
+          unreported.map((k) => `"${k.name}"`).join(", "),
+      );
+    }
+
+    const seen = new Set<string>();
     const results: KPIResult[] = [];
 
     for (const measurement of measurements) {
+      if (seen.has(measurement.name)) {
+        throw new Error(`KPI "${measurement.name}" was submitted more than once`);
+      }
+      seen.add(measurement.name);
+
       const declared = declaredByName.get(measurement.name);
       const target = measurement.target ?? declared?.target;
       if (target === undefined) {
@@ -166,6 +207,14 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
       if (!Number.isFinite(measurement.actual)) {
         throw new Error(`KPI "${measurement.name}" needs a numeric actual value`);
       }
+
+      // Direction comes from the declaration, so a metric to maximize is not
+      // scored by the rule for one to minimize.
+      const direction: KPIDirection = declared?.direction ?? "at_most";
+      const met =
+        direction === "at_least"
+          ? measurement.actual >= target
+          : measurement.actual <= target;
 
       const deviation =
         target !== 0
@@ -182,7 +231,7 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
         actualValue: measurement.actual,
         unit: measurement.unit ?? declared?.unit ?? "",
         measuredAt: at,
-        success: measurement.success ?? measurement.actual <= target,
+        success: measurement.success ?? met,
         deviation,
       });
     }

@@ -119,10 +119,18 @@ async function freePort(): Promise<number> {
   });
 }
 
-async function startServer(): Promise<void> {
-  const port = await freePort();
-  baseUrl = `http://127.0.0.1:${port}`;
-  dataDir = mkdtempSync(join(tmpdir(), "oracle-e2e-"));
+/**
+ * Boot an API process. Reused for the restart test, which needs a second
+ * process over the same database file, so the port and data directory are only
+ * allocated on the first call.
+ */
+async function startServer(overrides: Record<string, string> = {}): Promise<void> {
+  if (!dataDir) dataDir = mkdtempSync(join(tmpdir(), "oracle-e2e-"));
+  if (!baseUrl) {
+    const port = await freePort();
+    baseUrl = `http://127.0.0.1:${port}`;
+  }
+  const port = new URL(baseUrl).port;
 
   server = spawn(process.execPath, [join(API_ROOT, "dist", "index.js")], {
     cwd: API_ROOT,
@@ -149,6 +157,7 @@ async function startServer(): Promise<void> {
       RATE_LIMIT_GLOBAL: "100000",
       RATE_LIMIT_VOTE: "100000",
       RATE_LIMIT_LLM: "100000",
+      ...overrides,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -174,9 +183,13 @@ async function startServer(): Promise<void> {
   throw new Error(`API did not become healthy:\n${serverLog.join("")}`);
 }
 
-function stopServer() {
+function stopServer(keepData = false) {
   server?.kill("SIGTERM");
-  if (dataDir) rmSync(dataDir, { recursive: true, force: true });
+  server = undefined;
+  if (dataDir && !keepData) {
+    rmSync(dataDir, { recursive: true, force: true });
+    dataDir = "";
+  }
 }
 
 /* ------------------------------ fixtures ----------------------------- */
@@ -219,9 +232,17 @@ function decisionPacket(overrides: Record<string, any> = {}) {
   };
 }
 
-/** Distinct, well-formed 20-byte addresses. */
+/**
+ * Distinct, well-formed 20-byte addresses.
+ *
+ * The tail is padded with `a` so every address contains alphabetic hex digits;
+ * a purely numeric address is byte-identical under toUpperCase(), which would
+ * make a "same address, different casing" test pass without exercising any
+ * canonicalization at all.
+ */
 function voterAddress(index: number): string {
-  return `0x${index.toString(16).padStart(40, "0")}`;
+  const suffix = index.toString(16).padStart(8, "0");
+  return `0x${"a".repeat(32)}${suffix}`;
 }
 
 async function createProposal(options: Record<string, unknown> = {}) {
@@ -314,6 +335,10 @@ async function testVotingIntegrity() {
 
   // Same address, different casing: one holder, one vote.
   const checksummed = voterAddress(1).toUpperCase().replace("0X", "0x");
+  assert(
+    checksummed !== voterAddress(1),
+    "fixture error: the two spellings must actually differ, or this proves nothing",
+  );
   const duplicate = await post(
     `/api/proposals/${proposal.id}/vote`,
     { voter: checksummed, choice: "against", weight: "100" },
@@ -566,6 +591,119 @@ async function testDelegationAuthorization() {
   );
 }
 
+/**
+ * Restart the API over the same database and check what survived. Without
+ * this the persistence work is only ever exercised on the write path.
+ */
+async function testRestartRestoresState() {
+  const proposal = await createProposal({ votingPeriod: 60_000 });
+  const voter = voterAddress(41);
+  const vote = await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter, choice: "for", weight: "123" },
+    false,
+  );
+  assertStatus(vote.response, 201, "vote before restart");
+
+  const before = await post(`/api/proposals/${proposal.id}/tally`);
+  assert(before.data.tally.forVotes === "123", "tally before restart");
+
+  stopServer(true);
+  await sleep(500);
+  await startServer();
+
+  const after = await post(`/api/proposals/${proposal.id}/tally`);
+  assertStatus(after.response, 200, "tally after restart");
+  assert(
+    after.data.tally.forVotes === "123",
+    `restored tally should match: expected 123, got ${after.data.tally.forVotes}`,
+  );
+  assert(after.data.tally.voteCount === 1, "restored ballot count should match");
+
+  const restored = await get(`/api/proposals/${proposal.id}`);
+  assertStatus(restored.response, 200, "proposal after restart");
+  assert(
+    restored.data.proposal.quorum === proposal.quorum &&
+      restored.data.proposal.threshold === proposal.threshold,
+    "restored proposal keeps its settings",
+  );
+
+  // The one-vote-per-holder rule has to survive the restore, not just the
+  // in-process cache.
+  const again = await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter: voter.toUpperCase().replace("0X", "0x"), choice: "against", weight: "999" },
+    false,
+  );
+  assertStatus(again.response, 400, "double vote after restart");
+}
+
+/**
+ * With signatures required — the production posture — an unsigned delegation
+ * must be refused. The main delegation test runs with them off, so without
+ * this the signature work has no coverage at all.
+ */
+async function testDelegationRequiresSignature() {
+  stopServer(true);
+  await sleep(500);
+  await startServer({ REQUIRE_DELEGATION_SIGNATURE: "always" });
+
+  const owner = privateKeyToAccount(generatePrivateKey());
+  const conditions = [
+    { field: "decisionPacket.issue.category", operator: "in", value: ["governance"] },
+  ];
+
+  const unsigned = await post(
+    "/api/delegations",
+    { delegator: owner.address, delegate: "risk-agent", conditions },
+    false,
+  );
+  assertStatus(unsigned.response, 401, "unsigned delegation with signatures required");
+
+  const nonce = "e2e-" + Math.random().toString(36).slice(2);
+  const timestamp = Date.now();
+  const message = [
+    "BRIDGE Oracle Delegation",
+    "Action: create",
+    `Delegator: ${owner.address.toLowerCase()}`,
+    "Delegate: risk-agent",
+    `Conditions: ${JSON.stringify(
+      conditions.map((c) => ({ field: c.field, operator: c.operator, value: c.value })),
+    )}`,
+    "ExpiresAt: none",
+    `Nonce: ${nonce}`,
+    `Timestamp: ${timestamp}`,
+  ].join("\n");
+  const signature = await owner.signMessage({ message });
+
+  const signed = await post(
+    "/api/delegations",
+    { delegator: owner.address, delegate: "risk-agent", conditions, signature, nonce, timestamp },
+    false,
+  );
+  assertStatus(signed.response, 201, "correctly signed delegation");
+
+  // A lowercase lookup must find a policy stored under the checksummed form.
+  const lookup = await get(`/api/delegations?delegator=${owner.address.toLowerCase()}`);
+  assertStatus(lookup.response, 200, "lowercase delegator lookup");
+  assert(
+    lookup.data.policies.some((p: any) => p.id === signed.data.policy.id),
+    "a policy must be findable by the lowercase spelling of its delegator",
+  );
+
+  // Replaying the same signature is refused.
+  const replay = await post(
+    "/api/delegations",
+    { delegator: owner.address, delegate: "risk-agent", conditions, signature, nonce, timestamp },
+    false,
+  );
+  assertStatus(replay.response, 401, "replayed delegation signature");
+
+  stopServer(true);
+  await sleep(500);
+  await startServer();
+}
+
 async function testStats() {
   const { response, data } = await get("/api/stats");
   assertStatus(response, 200, "stats");
@@ -607,6 +745,8 @@ async function main() {
     await runTest("Deliberation contract", testDeliberationContract);
     await runTest("Debate rounds are bounded", testDebateRoundsAreBounded);
     await runTest("Delegation authorization", testDelegationAuthorization);
+    await runTest("Delegation requires a signature", testDelegationRequiresSignature);
+    await runTest("Restart restores governance state", testRestartRestoresState);
     await runTest("Stats", testStats);
     await runTest("Unknown ids return 404", testNotFoundPaths);
   } finally {

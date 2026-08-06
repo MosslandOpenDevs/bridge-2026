@@ -10,11 +10,15 @@ module.exports = {
       // crash-looping the API on every commit that added a dependency.
       // Production never hot-reloads: a deploy restart is the only reload.
       script: './dist/index.js',
+      interpreter: 'node',
+      // NODE_ENV lives in `env`, not only in `env_production`. PM2 applies
+      // `env` unless it is started with `--env production`, and deploy.sh
+      // restarts without that flag -- so an env_production block alone never
+      // takes effect here, and every production-only guard in the API (the
+      // ADMIN_API_KEY requirement, the execution timelock, the minimum voting
+      // period, error sanitization) would stay switched off on the deployed
+      // process.
       env: {
-        PORT: 3101,
-        NODE_ENV: 'development',
-      },
-      env_production: {
         PORT: 3101,
         NODE_ENV: 'production',
       },

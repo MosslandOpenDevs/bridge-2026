@@ -61,8 +61,13 @@ jobs:
       - name: Shell syntax
         run: bash -n oracle/scripts/deploy.sh
 
+      # Warning and above. ShellCheck exits non-zero on info-level notes too,
+      # and deploy.sh carries two by design (a deliberately single-quoted node
+      # program, and an `ls` over filenames this script itself creates). With
+      # the deploy gate fail-closed, a job that can never go green would block
+      # every deploy.
       - name: ShellCheck
-        run: shellcheck oracle/scripts/deploy.sh
+        run: shellcheck --severity=warning oracle/scripts/deploy.sh oracle/scripts/test-deploy-classifier.sh
 
       # Guards the change classifier: a file landing in the wrong bucket means a
       # deploy that skips the build, or one that rebuilds for a README edit.

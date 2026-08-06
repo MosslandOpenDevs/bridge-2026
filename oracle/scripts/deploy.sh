@@ -125,7 +125,9 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1 ;;
     --check) CHECK_ONLY=1 ;;
     --classify) CLASSIFY_ONLY=1 ;;
-    -h|--help) sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Prints the whole header block rather than a fixed line range, which
+    # silently truncated the options list as the header grew.
+    -h|--help) sed -n '2,/^$/p' "${SELF}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
   shift
