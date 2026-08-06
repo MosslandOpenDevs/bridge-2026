@@ -211,10 +211,16 @@ class APIClient {
     return this.fetch<{ policies: any[]; count: number }>(`/api/delegations${query}`);
   }
 
-  async createDelegation(delegator: string, delegate: string, conditions?: any[], expiresAt?: string) {
+  async createDelegation(
+    delegator: string,
+    delegate: string,
+    conditions?: any[],
+    expiresAt?: string,
+    auth?: { signature: string; nonce: string; timestamp: number },
+  ) {
     return this.fetch<{ policy: any }>("/api/delegations", {
       method: "POST",
-      body: JSON.stringify({ delegator, delegate, conditions, expiresAt }),
+      body: JSON.stringify({ delegator, delegate, conditions, expiresAt, ...auth }),
     });
   }
 
@@ -222,9 +228,13 @@ class APIClient {
     return this.fetch<{ policy: any }>(`/api/delegations/${id}`);
   }
 
-  async revokeDelegation(id: string) {
+  async revokeDelegation(
+    id: string,
+    auth?: { signature: string; nonce: string; timestamp: number },
+  ) {
     return this.fetch<{ message: string; policy: any }>(`/api/delegations/${id}`, {
       method: "DELETE",
+      body: JSON.stringify(auth ?? {}),
     });
   }
 

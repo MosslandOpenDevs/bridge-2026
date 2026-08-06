@@ -8,6 +8,8 @@ import { cn, timeAgo } from "@/lib/utils";
 import { useVotingPower, useAccount } from "@/hooks/useMOC";
 import { useToast } from "@/contexts/ToastContext";
 import { api } from "@/lib/api";
+import { useSignMessage } from "wagmi";
+import { signDelegationCreate, signDelegationRevoke } from "@/lib/delegationSignature";
 
 const agents = [
   { id: "risk-agent", nameKey: "security", icon: Shield, reputation: 87, totalDelegated: 1250000, recentAccuracy: 92 },
@@ -21,7 +23,7 @@ function DelegationForm({ onClose, t, address, onSuccess }: { onClose: () => voi
   const tToast = useTranslations("toast");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
-  const [maxBudget, setMaxBudget] = useState<number>(0);
+  const { signMessageAsync } = useSignMessage();
   const [expiresInDays, setExpiresInDays] = useState<number>(30);
 
   const categories = [
@@ -34,12 +36,22 @@ function DelegationForm({ onClose, t, address, onSuccess }: { onClose: () => voi
 
   const createMutation = useMutation({
     mutationFn: async () => {
+      // Only conditions the server can actually evaluate. A previous
+      // "decisionPacket.budget" condition referred to a field that does not
+      // exist on a decision packet, so it never matched and quietly disabled
+      // the whole policy.
       const conditions = [
         { field: "decisionPacket.issue.category", operator: "in" as const, value: selectedCategories },
-        ...(maxBudget > 0 ? [{ field: "decisionPacket.budget", operator: "lte" as const, value: maxBudget }] : []),
       ];
       const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
-      return api.createDelegation(address, selectedAgent!, conditions, expiresAt);
+      const auth = await signDelegationCreate({
+        signMessageAsync,
+        delegator: address,
+        delegate: selectedAgent!,
+        conditions,
+        expiresAt,
+      });
+      return api.createDelegation(address, selectedAgent!, conditions, expiresAt, auth);
     },
     onSuccess: () => {
       toast.success(tToast("delegationCreated.title"), tToast("delegationCreated.message"), {
@@ -108,17 +120,6 @@ function DelegationForm({ onClose, t, address, onSuccess }: { onClose: () => voi
           </div>
         </div>
 
-        <div className="mb-6">
-          <label className="block text-sm font-medium text-gray-700 mb-2">{t("delegation.maxAmount")} (MOC)</label>
-          <input
-            type="number"
-            value={maxBudget}
-            onChange={(e) => setMaxBudget(Number(e.target.value))}
-            className="w-full border border-gray-300 rounded-lg p-2"
-            placeholder="0 = unlimited"
-          />
-        </div>
-
         <div className="mb-6 p-3 bg-yellow-50 rounded-lg flex items-start space-x-2">
           <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
           <p className="text-sm text-yellow-700">{t("delegation.conditions")}</p>
@@ -152,6 +153,7 @@ export default function DelegationPage() {
   const queryClient = useQueryClient();
   const { isConnected, address } = useAccount();
   const { formatted: votingPower } = useVotingPower();
+  const { signMessageAsync } = useSignMessage();
   const [showForm, setShowForm] = useState(false);
 
   const { data: delegationsData, isLoading } = useQuery({
@@ -162,7 +164,15 @@ export default function DelegationPage() {
   });
 
   const revokeMutation = useMutation({
-    mutationFn: (id: string) => api.revokeDelegation(id),
+    mutationFn: async (id: string) => {
+      const policy = delegations.find((d: any) => d.id === id);
+      const auth = await signDelegationRevoke({
+        signMessageAsync,
+        delegator: policy?.delegator ?? address,
+        policyId: id,
+      });
+      return api.revokeDelegation(id, auth);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["delegations"] });
       toast.success(tToast("delegationRemoved.title"), tToast("delegationRemoved.message"), {

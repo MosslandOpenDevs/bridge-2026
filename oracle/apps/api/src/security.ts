@@ -124,6 +124,95 @@ export async function verifyVoteSignature(
   return { ok: true };
 }
 
+/* ------------------------------------------------------------------ *
+ * Delegation authorization
+ *
+ * A delegation policy hands someone else the delegator's voting influence,
+ * so creating or revoking one must be proven by the delegator's wallet.
+ * ------------------------------------------------------------------ */
+
+export interface DelegationMessageParams {
+  action: "create" | "revoke";
+  delegator: string;
+  /** Agent id or address receiving the delegation; absent when revoking. */
+  delegate?: string;
+  /** Canonical JSON of the normalized conditions; absent when revoking. */
+  conditions?: string;
+  expiresAt?: string;
+  /** Policy being revoked; absent when creating. */
+  policyId?: string;
+  nonce: string;
+  timestamp: number;
+}
+
+export function buildDelegationMessage(params: DelegationMessageParams): string {
+  const lines = [
+    "BRIDGE Oracle Delegation",
+    `Action: ${params.action}`,
+    `Delegator: ${params.delegator.toLowerCase()}`,
+  ];
+  if (params.action === "create") {
+    lines.push(
+      `Delegate: ${(params.delegate || "").trim()}`,
+      `Conditions: ${params.conditions ?? "[]"}`,
+      `ExpiresAt: ${params.expiresAt ?? "none"}`,
+    );
+  } else {
+    lines.push(`PolicyId: ${params.policyId ?? ""}`);
+  }
+  lines.push(`Nonce: ${params.nonce}`, `Timestamp: ${params.timestamp}`);
+  return lines.join("\n");
+}
+
+/**
+ * Whether delegation changes must carry a delegator signature.
+ * Always required in production; "never" is honoured only outside it.
+ */
+export function isDelegationSignatureRequired(): boolean {
+  const mode = (process.env.REQUIRE_DELEGATION_SIGNATURE || "always").toLowerCase();
+  if (mode === "never" && !IS_PROD) return false;
+  return true;
+}
+
+export async function verifyDelegationSignature(input: {
+  message: string;
+  delegator: Address;
+  signature?: Hex;
+  nonce?: string;
+  timestamp?: number;
+}): Promise<VoteSignatureResult> {
+  const { message, delegator, signature, nonce, timestamp } = input;
+
+  if (!signature || !nonce || !timestamp) {
+    return { ok: false, reason: "signature, nonce, and timestamp are required" };
+  }
+  if (!/^0x[0-9a-fA-F]+$/.test(signature)) {
+    return { ok: false, reason: "invalid signature format" };
+  }
+  if (Math.abs(Date.now() - timestamp) > SIGNATURE_TTL_MS) {
+    return { ok: false, reason: "signature expired or timestamp out of range" };
+  }
+
+  const nonceKey = `delegation:${delegator.toLowerCase()}:${nonce}`;
+  if (seenNonces.has(nonceKey)) {
+    return { ok: false, reason: "nonce already used (replay detected)" };
+  }
+
+  let valid = false;
+  try {
+    valid = await verifyMessage({ address: delegator, message, signature });
+  } catch {
+    return { ok: false, reason: "signature verification failed" };
+  }
+  if (!valid) {
+    return { ok: false, reason: "signature does not match the delegator address" };
+  }
+
+  seenNonces.set(nonceKey, Date.now() + SIGNATURE_TTL_MS);
+  pruneNonces();
+  return { ok: true };
+}
+
 /**
  * Decide whether vote signatures are required.
  * - "always": always require

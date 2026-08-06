@@ -42,6 +42,9 @@ import {
 import {
   verifyVoteSignature,
   isVoteSignatureRequired,
+  buildDelegationMessage,
+  verifyDelegationSignature,
+  isDelegationSignatureRequired,
   requireAdminKey,
   isAdminAuthEnabled,
   adminAuthMode,
@@ -1293,23 +1296,154 @@ app.get("/api/delegations", (req, res) => {
   }
 });
 
-app.post("/api/delegations", (req, res) => {
+/**
+ * Delegation conditions are evaluated against a proposal by path lookup, so
+ * the set of paths is fixed here rather than accepting arbitrary strings. An
+ * unknown path silently evaluates to undefined, which either never matches or
+ * — for an empty condition list — matches everything.
+ */
+const DELEGATION_CONDITION_FIELDS = {
+  "decisionPacket.issue.category": ["eq", "ne", "in", "contains"],
+  "decisionPacket.issue.priority": ["eq", "ne", "in"],
+  "decisionPacket.consensusScore": ["gt", "lt", "gte", "lte"],
+  "decisionPacket.recommendedProposalType": ["eq", "ne", "in"],
+  "proposer": ["eq", "ne", "in"],
+  "quorum": ["gt", "lt", "gte", "lte"],
+  "threshold": ["gt", "lt", "gte", "lte"],
+} as const;
+
+const delegationConditionSchema = z
+  .object({
+    field: z.enum(
+      Object.keys(DELEGATION_CONDITION_FIELDS) as [string, ...string[]],
+    ),
+    operator: z.enum(["eq", "ne", "gt", "lt", "gte", "lte", "in", "contains"]),
+    value: z.union([
+      z.string().max(200),
+      z.number(),
+      z.boolean(),
+      z.array(z.union([z.string().max(200), z.number()])).max(50),
+    ]),
+  })
+  .strict()
+  .superRefine((condition, ctx) => {
+    const allowed =
+      DELEGATION_CONDITION_FIELDS[
+        condition.field as keyof typeof DELEGATION_CONDITION_FIELDS
+      ];
+    if (!allowed.includes(condition.operator as never)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `operator '${condition.operator}' is not allowed for field '${condition.field}' (allowed: ${allowed.join(", ")})`,
+      });
+    }
+    if (condition.operator === "in" && !Array.isArray(condition.value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "operator 'in' requires an array value",
+      });
+    }
+    if (
+      ["gt", "lt", "gte", "lte"].includes(condition.operator) &&
+      typeof condition.value !== "number"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `operator '${condition.operator}' requires a numeric value`,
+      });
+    }
+  });
+
+const createDelegationSchema = z
+  .object({
+    delegator: z.string(),
+    delegate: z.string().min(1).max(200),
+    conditions: z.array(delegationConditionSchema).max(20).optional(),
+    /**
+     * Required to create a policy with no conditions. Without it an empty list
+     * quietly became a blanket delegation, because every([]) is true.
+     */
+    delegateAll: z.boolean().optional(),
+    expiresAt: z.string().datetime().optional(),
+    signature: z.string().optional(),
+    nonce: z.string().max(200).optional(),
+    timestamp: z.number().optional(),
+  })
+  .strict();
+
+app.post("/api/delegations", async (req, res) => {
   try {
-    const { delegator, delegate, conditions, expiresAt } = req.body;
-    if (!delegator || !delegate) {
-      return res.status(400).json({ error: "delegator and delegate are required" });
+    const parsed = createDelegationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: "Invalid delegation",
+        details: parsed.error.issues.map((i) => ({
+          path: i.path.join("."),
+          message: i.message,
+        })),
+      });
+    }
+    const { delegate, conditions, delegateAll, expiresAt, signature, nonce, timestamp } =
+      parsed.data;
+
+    let delegator: `0x${string}`;
+    try {
+      delegator = getAddress(parsed.data.delegator);
+    } catch {
+      return res.status(400).json({ error: "delegator must be a valid 0x address" });
+    }
+
+    const normalizedConditions = conditions ?? [];
+    if (normalizedConditions.length === 0 && delegateAll !== true) {
+      return res.status(400).json({
+        error:
+          "A delegation with no conditions applies to every proposal. Send " +
+          "delegateAll: true to confirm, or provide conditions.",
+        code: "UNCONDITIONAL_DELEGATION",
+      });
+    }
+
+    if (expiresAt && new Date(expiresAt).getTime() <= Date.now()) {
+      return res.status(400).json({ error: "expiresAt must be in the future" });
+    }
+
+    // Prove the delegator's wallet authorized handing over its influence.
+    if (isDelegationSignatureRequired()) {
+      const message = buildDelegationMessage({
+        action: "create",
+        delegator,
+        delegate,
+        conditions: canonicalJson(normalizedConditions),
+        expiresAt,
+        nonce: nonce || "",
+        timestamp: timestamp || 0,
+      });
+      const sig = await verifyDelegationSignature({
+        message,
+        delegator,
+        signature: signature as `0x${string}` | undefined,
+        nonce,
+        timestamp,
+      });
+      if (!sig.ok) {
+        return res.status(401).json({
+          error: sig.reason || "Delegation signature verification failed",
+          code: "INVALID_SIGNATURE",
+        });
+      }
     }
 
     const policy = delegationManager.createPolicy(
       delegator,
-      delegate,
-      conditions || [],
+      delegate.trim(),
+      normalizedConditions as any,
       expiresAt ? new Date(expiresAt) : undefined
     );
 
     res.status(201).json({ policy });
   } catch (error) {
-    res.status(500).json({ error: "Failed to create delegation" });
+    console.error("Failed to create delegation:", error);
+    res.status(400).json({ error: sanitizeError(error, "Failed to create delegation") });
   }
 });
 
@@ -1353,16 +1487,56 @@ app.get("/api/delegations/:id", (req, res) => {
   }
 });
 
-app.delete("/api/delegations/:id", (req, res) => {
+app.delete("/api/delegations/:id", async (req, res) => {
   try {
     const policy = delegationManager.getPolicy(req.params.id);
     if (!policy) {
       return res.status(404).json({ error: "Delegation not found" });
     }
+
+    // Revocation is as sensitive as creation: without proof of ownership
+    // anyone could strip another holder's delegation.
+    if (isDelegationSignatureRequired()) {
+      const { signature, nonce, timestamp } = (req.body ?? {}) as {
+        signature?: string;
+        nonce?: string;
+        timestamp?: number;
+      };
+      let delegator: `0x${string}`;
+      try {
+        delegator = getAddress(policy.delegator);
+      } catch {
+        return res.status(409).json({
+          error: "This policy's delegator is not a valid address and cannot be verified",
+        });
+      }
+      const message = buildDelegationMessage({
+        action: "revoke",
+        delegator,
+        policyId: policy.id,
+        nonce: nonce || "",
+        timestamp: timestamp || 0,
+      });
+      const sig = await verifyDelegationSignature({
+        message,
+        delegator,
+        signature: signature as `0x${string}` | undefined,
+        nonce,
+        timestamp,
+      });
+      if (!sig.ok) {
+        return res.status(401).json({
+          error: sig.reason || "Delegation signature verification failed",
+          code: "INVALID_SIGNATURE",
+        });
+      }
+    }
+
     delegationManager.revokePolicy(req.params.id);
     res.json({ message: "Delegation revoked", policy: { ...policy, active: false } });
   } catch (error) {
-    res.status(500).json({ error: "Failed to revoke delegation" });
+    console.error("Failed to revoke delegation:", error);
+    res.status(400).json({ error: sanitizeError(error, "Failed to revoke delegation") });
   }
 });
 
