@@ -202,15 +202,42 @@ acquire_lock() {
 # successful; extra checks beyond those are ignored, so adding an unrelated
 # workflow cannot silently block deploys.
 ci_conclusion() {
-  local sha="$1" url auth
+  local sha="$1" url auth body status reset
   url="https://api.github.com/repos/${DEPLOY_GITHUB_REPO}/commits/${sha}/check-runs?per_page=100"
   if [ -n "${GITHUB_TOKEN:-}" ]; then
     auth="Authorization: Bearer ${GITHUB_TOKEN}"
   else
     auth="X-No-Auth: 1"
   fi
-  curl -fsS -m 20 -H 'Accept: application/vnd.github+json' -H "${auth}" "${url}" 2>/dev/null \
-    | REQUIRED_CHECKS="${DEPLOY_REQUIRED_CHECKS}" node -e '
+
+  # Separate the rate limit from every other failure before parsing. Without
+  # this, an exhausted quota arrives as an empty body and is reported as a
+  # generic network error -- which sends whoever reads the log looking for a
+  # connectivity problem that is not there. Unauthenticated GitHub allows 60
+  # requests an hour *per IP*, and this box runs several deploy pollers behind
+  # one address, so exhaustion is routine rather than exceptional. It clears
+  # itself at the reset, so the answer stays "defer", but it should say so.
+  body=$(curl -sS -m 20 -o /tmp/bridge-ci-body.$$ -w '%{http_code}' \
+    -H 'Accept: application/vnd.github+json' -H "${auth}" "${url}" 2>/dev/null) || body="000"
+  status="${body}"
+  if [ "${status}" = "403" ] || [ "${status}" = "429" ]; then
+    if grep -q 'rate limit' /tmp/bridge-ci-body.$$ 2>/dev/null; then
+      reset=$(curl -sS -m 10 -D - -o /dev/null \
+        -H 'Accept: application/vnd.github+json' -H "${auth}" \
+        'https://api.github.com/rate_limit' 2>/dev/null \
+        | awk 'tolower($1) == "x-ratelimit-reset:" { gsub(/\r/, "", $2); print $2 }')
+      rm -f /tmp/bridge-ci-body.$$
+      echo "ratelimited:${reset:-unknown}"
+      return 0
+    fi
+  fi
+  if [ "${status}" != "200" ]; then
+    rm -f /tmp/bridge-ci-body.$$
+    echo "unknown"
+    return 0
+  fi
+
+  REQUIRED_CHECKS="${DEPLOY_REQUIRED_CHECKS}" node -e '
 let raw = "";
 process.stdin.on("data", d => (raw += d));
 process.stdin.on("end", () => {
@@ -245,7 +272,8 @@ process.stdin.on("end", () => {
   }
   console.log("success");
 });
-' 2>/dev/null || echo "unknown"
+' < /tmp/bridge-ci-body.$$ 2>/dev/null || echo "unknown"
+  rm -f /tmp/bridge-ci-body.$$
 }
 
 # Build + restart for whatever the current checkout is. Used for the deploy and,
@@ -564,6 +592,16 @@ EOF
         exit 0 ;;
       misconfigured)
         log "CI: DEPLOY_REQUIRED_CHECKS is empty -- refusing to deploy"; exit 0 ;;
+      ratelimited:*)
+        CI_RESET="${CI_STATUS#ratelimited:}"
+        if [ "${CI_RESET}" != "unknown" ] && [ -n "${CI_RESET}" ]; then
+          log "CI: GitHub API rate limit exhausted; resets $(date -d "@${CI_RESET}" '+%H:%M' 2>/dev/null || echo "at ${CI_RESET}") -- deferring"
+        else
+          log "CI: GitHub API rate limit exhausted -- deferring to next tick"
+        fi
+        log "    unauthenticated GitHub allows 60 requests/hour per IP and this"
+        log "    box shares one. Set GITHUB_TOKEN in the deploy environment for 5000/hour."
+        exit 0 ;;
       *)
         log "CI: status unavailable (network/API) -- deferring to next tick"; exit 0 ;;
     esac
