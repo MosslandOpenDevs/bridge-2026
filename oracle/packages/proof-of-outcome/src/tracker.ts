@@ -157,6 +157,21 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
     return proof;
   }
 
+  /** Load persisted execution/KPI/proof state at boot. */
+  restoreExecution(record: ExecutionRecord, kpiResults?: KPIResult[]): void {
+    this.executions.set(record.id, record);
+    if (kpiResults && kpiResults.length > 0) {
+      this.kpiResults.set(record.id, kpiResults);
+    }
+  }
+
+  restoreProof(proof: OutcomeProof): void {
+    this.proofs.set(proof.id, proof);
+    if (proof.kpiResults.length > 0 && !this.kpiResults.has(proof.executionId)) {
+      this.kpiResults.set(proof.executionId, proof.kpiResults);
+    }
+  }
+
   getExecution(executionId: string): ExecutionRecord | undefined {
     return this.executions.get(executionId);
   }

@@ -66,6 +66,18 @@ export class TrustManager {
     return score;
   }
 
+  /**
+   * Load a persisted score and its supporting proofs at boot. The score is
+   * restored as recorded rather than recomputed, so history that has been
+   * pruned cannot silently change an entity's standing.
+   */
+  restoreScore(score: TrustScore, history: OutcomeProof[] = []): void {
+    this.scores.set(score.entityId, score);
+    if (history.length > 0) {
+      this.history.set(score.entityId, history);
+    }
+  }
+
   // Get current trust score
   getScore(entityId: string): TrustScore | undefined {
     return this.scores.get(entityId);

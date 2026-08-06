@@ -10,6 +10,16 @@ import rateLimit from "express-rate-limit";
 
 // Import database
 import {
+  saveProposal,
+  saveVoteWithProposal,
+  saveDelegation,
+  setDelegationActive,
+  saveExecutionOutcome,
+  saveExecution,
+  saveProof,
+  hydrate,
+} from "./governance-store.js";
+import {
   signalDb,
   issueDb,
   proposalDb,
@@ -858,7 +868,8 @@ app.post("/api/proposals", requireAdminKey, async (req, res) => {
     });
     // Auto-activate the proposal for immediate voting
     votingSystem.activateProposal(proposal.id);
-    const activatedProposal = votingSystem.getProposal(proposal.id);
+    const activatedProposal = votingSystem.getProposal(proposal.id)!;
+    saveProposal(activatedProposal);
 
     // Emit real-time event
     const allProposals = votingSystem.listProposals();
@@ -1022,6 +1033,21 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
       reason
     );
 
+    // Persist immediately; the UNIQUE (proposal_id, voter_key) constraint is
+    // the last line of defence against a double vote.
+    try {
+      saveVoteWithProposal(
+        vote,
+        VotingSystem.voterKey(canonicalVoter),
+        votingSystem.getProposal(req.params.id)!,
+      );
+    } catch (persistError) {
+      // Keep memory and storage consistent rather than acknowledging a vote
+      // that would vanish on the next restart.
+      votingSystem.removeVote(req.params.id, canonicalVoter);
+      throw persistError;
+    }
+
     // No per-vote on-chain relay. The contract keys duplicate detection on
     // msg.sender, and every relayed vote would share this server's single
     // signer, so the relayer's first vote would make every later voter revert
@@ -1082,6 +1108,7 @@ app.post("/api/proposals/:id/tally", (req, res) => {
 app.post("/api/proposals/:id/finalize", requireAdminKey, (req, res) => {
   try {
     const proposal = votingSystem.finalizeProposal(req.params.id);
+    saveProposal(proposal);
     res.json({ proposal });
   } catch (error: any) {
     res.status(400).json({ error: sanitizeError(error, "Failed to finalize proposal") });
@@ -1141,15 +1168,20 @@ app.post("/api/proposals/:id/execute", requireAdminKey, async (req, res) => {
     // Generate proof and update trust scores
     const proof = await outcomeTracker.generateProof(execution.id);
 
-    // Update trust score for the proposer
-    trustManager.recordOutcome(proposal.proposer, "proposer", proof);
+    const updatedTrust = [
+      trustManager.recordOutcome(proposal.proposer, "proposer", proof),
+      ...Array.from(
+        new Set((dp?.agentOpinions ?? []).map((op) => op.agentId)),
+      ).map((agentId) => trustManager.recordOutcome(agentId, "agent", proof)),
+    ];
 
-    // Update trust score for agents involved in deliberation
-    if ((dp as any)?.agents) {
-      for (const agentId of Object.keys((dp as any).agents)) {
-        trustManager.recordOutcome(agentId, "agent", proof);
-      }
-    }
+    // Execution, proof and the trust scores it moved are written as one unit.
+    saveExecutionOutcome({
+      proposal: executedProposal,
+      execution,
+      proof,
+      trustScores: updatedTrust,
+    });
 
     // Record outcome for agent learning feedback loop
     // Find the decision by issue_id and update with outcome
@@ -1229,6 +1261,7 @@ app.post("/api/outcomes", requireAdminKey, async (req, res) => {
       return res.status(400).json({ error: "actions must be an array" });
     }
     const execution = await outcomeTracker.recordExecution(proposalId, actions);
+    saveExecution(execution);
     res.status(201).json({ execution });
   } catch (error) {
     res.status(500).json({ error: "Failed to record outcome" });
@@ -1250,6 +1283,7 @@ app.get("/api/outcomes/:executionId", async (req, res) => {
 app.get("/api/outcomes/:executionId/proof", async (req, res) => {
   try {
     const proof = await outcomeTracker.generateProof(req.params.executionId);
+    saveProof(proof);
     res.json({ proof });
   } catch (error: any) {
     res.status(400).json({ error: sanitizeError(error, "Failed to generate proof") });
@@ -1439,6 +1473,7 @@ app.post("/api/delegations", async (req, res) => {
       normalizedConditions as any,
       expiresAt ? new Date(expiresAt) : undefined
     );
+    saveDelegation(policy);
 
     res.status(201).json({ policy });
   } catch (error) {
@@ -1533,6 +1568,7 @@ app.delete("/api/delegations/:id", async (req, res) => {
     }
 
     delegationManager.revokePolicy(req.params.id);
+    setDelegationActive(req.params.id, false);
     res.json({ message: "Delegation revoked", policy: { ...policy, active: false } });
   } catch (error) {
     console.error("Failed to revoke delegation:", error);
@@ -1773,22 +1809,11 @@ async function detectAndSaveIssues() {
                 { snapshotBlock: await currentSnapshotBlock() },
               );
               votingSystem.activateProposal(proposal.id);
-              const activated = votingSystem.getProposal(proposal.id);
-              proposalDb.insert.run({
-                id: proposal.id,
-                title: issue.title || `Proposal for ${issue.category}`,
-                description:
-                  decisionPacket.recommendation?.action ||
-                  decisionPacket.recommendation?.rationale ||
-                  issue.description ||
-                  "Auto-generated proposal",
-                proposer: AUTO_PROPOSAL_PROPOSER,
-                status: activated?.status || "active",
-                votingStarts: (activated?.votingStartsAt ?? proposal.votingStartsAt).toISOString(),
-                votingEnds: (activated?.votingEndsAt ?? proposal.votingEndsAt).toISOString(),
-                issueId: issue.id,
-                decisionPacket: JSON.stringify(decisionPacket),
-              });
+              const activated = votingSystem.getProposal(proposal.id)!;
+              // Same write path as a manual proposal, so an auto-promoted one
+              // is restored on the next boot instead of leaving a row that
+              // only blocks the issue from being proposed again.
+              saveProposal(activated, issue.id);
               promotedCount++;
               io.emit("proposals:created", {
                 proposal: activated,
@@ -1855,6 +1880,28 @@ async function evaluatePendingOutcomes() {
   }
 
   return { pending: pending.length, evaluated };
+}
+
+// Rebuild governance state from storage BEFORE accepting traffic. Serving
+// requests first would briefly report zero proposals and let a holder vote
+// again on a proposal they had already voted on.
+const hydration = hydrate({
+  votingSystem,
+  delegationManager,
+  outcomeTracker,
+  trustManager,
+});
+console.log(
+  `♻️  Restored governance state: ${hydration.proposals} proposals, ` +
+    `${hydration.votes} votes, ${hydration.delegations} delegations, ` +
+    `${hydration.executions} executions, ${hydration.proofs} proofs, ` +
+    `${hydration.trustScores} trust scores`,
+);
+if (hydration.skipped.length > 0) {
+  console.warn(`⚠️  ${hydration.skipped.length} record(s) could not be restored:`);
+  for (const reason of hydration.skipped.slice(0, 10)) {
+    console.warn(`     - ${reason}`);
+  }
 }
 
 // Start server

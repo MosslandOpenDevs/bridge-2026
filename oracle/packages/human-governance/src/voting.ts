@@ -364,6 +364,41 @@ export class VotingSystem {
     return proposal;
   }
 
+  /**
+   * Drop a vote from memory. Used to roll back when persisting it failed, so
+   * the in-memory tally never counts a vote that storage rejected.
+   */
+  removeVote(proposalId: string, voter: string): void {
+    const key = VotingSystem.voterKey(voter);
+    const votes = this.votes.get(proposalId);
+    if (!votes) return;
+    this.votes.set(
+      proposalId,
+      votes.filter((v) => VotingSystem.voterKey(v.voter) !== key),
+    );
+  }
+
+  /**
+   * Load a proposal that was already agreed — from storage at boot — without
+   * re-running creation rules. Restoring must reproduce the recorded state
+   * exactly, including proposals whose settings predate current validation.
+   */
+  restoreProposal(proposal: Proposal): void {
+    this.proposals.set(proposal.id, proposal);
+    if (!this.votes.has(proposal.id)) {
+      this.votes.set(proposal.id, []);
+    }
+  }
+
+  /** Load a persisted vote. Duplicates are ignored, keyed like castVote. */
+  restoreVote(vote: Vote): void {
+    const existing = this.votes.get(vote.proposalId) || [];
+    const key = VotingSystem.voterKey(vote.voter);
+    if (existing.some((v) => VotingSystem.voterKey(v.voter) === key)) return;
+    existing.push(vote);
+    this.votes.set(vote.proposalId, existing);
+  }
+
   getProposal(proposalId: string): Proposal | undefined {
     return this.proposals.get(proposalId);
   }

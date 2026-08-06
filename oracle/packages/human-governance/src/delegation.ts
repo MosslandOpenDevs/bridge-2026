@@ -45,6 +45,15 @@ export class DelegationManager {
     return policy;
   }
 
+  /** Load a persisted policy at boot, indexes included. */
+  restorePolicy(policy: DelegationPolicy): void {
+    this.policies.set(policy.id, policy);
+    const delegatorPolicies =
+      this.delegatorIndex.get(policy.delegator) || new Set<string>();
+    delegatorPolicies.add(policy.id);
+    this.delegatorIndex.set(policy.delegator, delegatorPolicies);
+  }
+
   revokePolicy(policyId: string): void {
     const policy = this.policies.get(policyId);
     if (policy) {
