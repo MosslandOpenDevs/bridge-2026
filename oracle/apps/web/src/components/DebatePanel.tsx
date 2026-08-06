@@ -102,7 +102,7 @@ interface DebatePanelProps {
   onComplete?: () => void;
 }
 
-export function DebatePanel({ session, isLoading, onComplete }: DebatePanelProps) {
+export function DebatePanel({ session, isLoading }: DebatePanelProps) {
   const t = useTranslations();
   const [expandedRounds, setExpandedRounds] = useState<number[]>([]);
 

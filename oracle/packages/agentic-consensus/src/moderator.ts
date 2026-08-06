@@ -14,7 +14,7 @@ import {
 import { BaseAgent } from "./agents/base.js";
 import { LLMClient, LLMConfig } from "./llm/index.js";
 
-export interface ModeratorConfig extends LLMConfig {}
+export type ModeratorConfig = LLMConfig;
 
 export class Moderator {
   /** Hard bounds on debate length, independent of what a caller asks for. */
@@ -155,7 +155,7 @@ Be objective, thorough, and actionable.`;
     }
 
     // Conduct debate rounds
-    let currentOpinions = [...initialOpinions];
+    const currentOpinions = [...initialOpinions];
     let allMessages: DiscussionMessage[] = [];
     let previousConsensusScore = initialConsensus.consensusScore;
 
@@ -440,7 +440,7 @@ Be objective, thorough, and actionable.`;
    * score >= 0.5 → action (clear consensus, ready for execution)
    * score < 0.5 → investigation (unclear, needs more research)
    */
-  private determineProposalType(consensusScore: number, averageScore: number): ProposalType {
+  private determineProposalType(consensusScore: number, _averageScore: number): ProposalType {
     // High consensus with clear direction → action
     if (consensusScore >= 0.5) {
       return "action";
@@ -454,7 +454,7 @@ Be objective, thorough, and actionable.`;
     opinions: AgentOpinion[]
   ): DecisionPacket {
     // Calculate consensus metrics
-    const { consensusScore, averageScore, avgConfidence } = this.calculateConsensusScore(opinions);
+    const { consensusScore, averageScore } = this.calculateConsensusScore(opinions);
     const recommendedProposalType = this.determineProposalType(consensusScore, averageScore);
 
     // Collect all concerns and recommendations from agents

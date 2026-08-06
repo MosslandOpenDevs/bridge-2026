@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
-import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Play, Zap } from "lucide-react";
+import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Zap } from "lucide-react";
 import { cn, getStatusColor, timeAgo, formatNumber } from "@/lib/utils";
 import { useSignMessage } from "wagmi";
 import { useVotingPower, useAccount } from "@/hooks/useMOC";
@@ -233,13 +233,6 @@ export default function ProposalsPage() {
     },
   });
 
-  // Finalize mutation (for ending voting period)
-  const finalizeMutation = useMutation({
-    mutationFn: (proposalId: string) => api.finalizeProposal(proposalId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["proposals"] });
-    },
-  });
 
   return (
     <div className="space-y-6">

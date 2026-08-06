@@ -1,0 +1,70 @@
+name: CI
+
+# The deploy poller (oracle/scripts/deploy.sh) can be configured to refuse any
+# commit these checks have not gone green on. The job names below are what
+# DEPLOY_REQUIRED_CHECKS matches against, so renaming one means updating the
+# server's configuration too.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    name: oracle
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oracle
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: oracle/pnpm-lock.yaml
+
+      # --frozen-lockfile also verifies the lockfile matches every package.json.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      # Boots the API against a temporary database and exercises the governance
+      # lifecycle end to end; also runs the contract test suite.
+      - name: Test
+        run: pnpm test
+
+  deploy-script:
+    name: deploy-script
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: bash -n oracle/scripts/deploy.sh
+
+      - name: ShellCheck
+        run: shellcheck oracle/scripts/deploy.sh
+
+      # Guards the change classifier: a file landing in the wrong bucket means a
+      # deploy that skips the build, or one that rebuilds for a README edit.
+      - name: Change classifier
+        run: oracle/scripts/test-deploy-classifier.sh

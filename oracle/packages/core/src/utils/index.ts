@@ -1,4 +1,6 @@
-import { randomUUID } from "crypto";
+// Plain "crypto", not "node:crypto": this package is bundled into the web app
+// via transpilePackages, and webpack cannot resolve the node: scheme.
+import { createHash, randomUUID } from "crypto";
 
 export function generateId(): string {
   return randomUUID();
@@ -9,11 +11,13 @@ export function now(): Date {
 }
 
 export function hashData(data: unknown): string {
-  const crypto = require("crypto");
+  // Uses the module-level import rather than require(): this file already
+  // imports from node:crypto, and the require() form would throw the moment
+  // this package is built as ESM — taking proof hashing down with it.
   const json = JSON.stringify(data, (_, value) =>
     typeof value === "bigint" ? value.toString() : value
   );
-  return crypto.createHash("sha256").update(json).digest("hex");
+  return createHash("sha256").update(json).digest("hex");
 }
 
 export function sleep(ms: number): Promise<void> {

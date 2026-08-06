@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
-import { CheckCircle, XCircle, TrendingUp, TrendingDown, BarChart3, ExternalLink, Loader2 } from "lucide-react";
+import { CheckCircle, XCircle, BarChart3, ExternalLink, Loader2 } from "lucide-react";
 import { cn, timeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
 

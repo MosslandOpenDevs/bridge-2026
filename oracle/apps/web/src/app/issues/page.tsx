@@ -16,7 +16,6 @@ import { DebatePanel } from "@/components/DebatePanel";
 function DeliberationProgress({ isActive }: { isActive: boolean }) {
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState(0);
-  const t = useTranslations();
 
   const stages = [
     { label: "Risk Agent 분석 중...", duration: 3000 },

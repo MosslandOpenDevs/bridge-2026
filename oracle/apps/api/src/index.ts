@@ -40,15 +40,10 @@ import {
   recordDecision,
   recordOutcome,
   recordOutcomeByIssueId,
-  getAgentTrustScores,
 } from "./learning.js";
 
 // Import blockchain service
-import {
-  blockchainService,
-  parseVoteChoice,
-  VoteChoice,
-} from "./blockchain.js";
+import { blockchainService } from "./blockchain.js";
 
 // Import security utilities
 import {
@@ -58,7 +53,6 @@ import {
   verifyDelegationSignature,
   isDelegationSignatureRequired,
   requireAdminKey,
-  isAdminAuthEnabled,
   adminAuthMode,
   adminAuthStartupError,
   sanitizeError,
@@ -78,7 +72,6 @@ import {
   AnomalyDetector,
   ThresholdDetector,
   TrendDetector,
-  ProposalGenerator,
 } from "@oracle/inference-mining";
 import {
   RiskAgent,
@@ -241,7 +234,6 @@ const thresholdDetector = new ThresholdDetector({
   ],
 });
 const trendDetector = new TrendDetector();
-const proposalGenerator = new ProposalGenerator();
 
 // LLM Configuration from environment
 const LLM_API_KEY = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;

@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 // Imported by name so declaration emit can reference these types (TS4023).
-import type { Database as SqliteDatabase, Statement } from "better-sqlite3";
+import type { Database as SqliteDatabase } from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
 

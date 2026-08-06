@@ -24,7 +24,7 @@ function DelegationForm({ onClose, t, address, onSuccess }: { onClose: () => voi
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const { signMessageAsync } = useSignMessage();
-  const [expiresInDays, setExpiresInDays] = useState<number>(30);
+  const [expiresInDays] = useState<number>(30);
 
   const categories = [
     { id: "governance", label: "Governance" },

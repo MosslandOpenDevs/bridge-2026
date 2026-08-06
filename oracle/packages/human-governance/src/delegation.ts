@@ -1,7 +1,6 @@
 import {
   DelegationPolicy,
   Proposal,
-  VoteChoice,
   generateId,
   now,
 } from "@oracle/core";
@@ -146,28 +145,26 @@ export class DelegationManager {
   }
 }
 
-// Pre-defined delegation policy templates
+/**
+ * Ready-made condition sets. Each returns conditions only — the delegate is
+ * chosen when the policy is created, so these no longer take one (the
+ * parameter was accepted and ignored). Every field and operator here is one
+ * the API accepts; the previous "high consensus" template compared an array
+ * with `eq`, which can never match, against a field the API does not allow.
+ */
 export const DELEGATION_TEMPLATES = {
-  // Delegate all low-priority proposals
-  lowPriorityOnly: (delegate: string): DelegationCondition[] => [
+  /** Only low-priority proposals. */
+  lowPriorityOnly: (): DelegationCondition[] => [
     { field: "decisionPacket.issue.priority", operator: "eq", value: "low" },
   ],
 
-  // Delegate proposals in specific categories
-  categoryBased: (
-    delegate: string,
-    categories: string[]
-  ): DelegationCondition[] => [
+  /** Proposals in the given categories. */
+  categoryBased: (categories: string[]): DelegationCondition[] => [
     { field: "decisionPacket.issue.category", operator: "in", value: categories },
   ],
 
-  // Delegate proposals with high agent consensus
-  highConsensus: (delegate: string): DelegationCondition[] => [
-    // This would need more complex evaluation in practice
-    {
-      field: "decisionPacket.dissent",
-      operator: "eq",
-      value: [], // No dissenting opinions
-    },
+  /** Proposals the agents broadly agreed on. */
+  highConsensus: (minimumScore = 0.8): DelegationCondition[] => [
+    { field: "decisionPacket.consensusScore", operator: "gte", value: minimumScore },
   ],
 };

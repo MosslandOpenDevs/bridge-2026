@@ -1,11 +1,34 @@
 /**
- * ORACLE API E2E Test Suite
+ * ORACLE API end-to-end suite.
  *
- * Run with: npx tsx tests/e2e.test.ts
- * Make sure the API server is running on localhost:4000
+ * Self-contained: it builds nothing, starts its own API process on a free port
+ * against a throwaway SQLite file, and shuts it down afterwards. Run with
+ * `pnpm test` from apps/api — no server needs to be running first.
+ *
+ * The previous version required an externally started server (so it scored
+ * 0/16 on a clean checkout), sent malformed addresses in loops without
+ * checking the responses, and declared a "full workflow" pass while every vote
+ * in it had been rejected. Every request here is asserted on.
  */
 
-const API_BASE = process.env.API_BASE || "http://localhost:4000";
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createServer } from "node:net";
+import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const API_ROOT = join(__dirname, "..");
+const ADMIN_KEY = "e2e-admin-key-0123456789";
+
+let baseUrl = "";
+let server: ChildProcess | undefined;
+let dataDir = "";
+const serverLog: string[] = [];
+
+/* ------------------------------ harness ------------------------------ */
 
 interface TestResult {
   name: string;
@@ -13,7 +36,6 @@ interface TestResult {
   error?: string;
   duration: number;
 }
-
 const results: TestResult[] = [];
 
 async function runTest(name: string, testFn: () => Promise<void>) {
@@ -23,481 +45,594 @@ async function runTest(name: string, testFn: () => Promise<void>) {
     results.push({ name, passed: true, duration: Date.now() - start });
     console.log(`✅ ${name}`);
   } catch (error: any) {
-    results.push({ name, passed: false, error: error.message, duration: Date.now() - start });
-    console.log(`❌ ${name}: ${error.message}`);
+    results.push({
+      name,
+      passed: false,
+      error: error?.message ?? String(error),
+      duration: Date.now() - start,
+    });
+    console.log(`❌ ${name}: ${error?.message ?? error}`);
   }
 }
 
-function assert(condition: boolean, message: string) {
-  if (!condition) {
-    throw new Error(message);
-  }
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
 }
 
-async function fetchJson(path: string, options?: RequestInit) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    ...options,
+function assertStatus(response: Response, expected: number, context: string) {
+  assert(
+    response.status === expected,
+    `${context}: expected HTTP ${expected}, got ${response.status}`,
+  );
+}
+
+async function request(
+  path: string,
+  options: RequestInit & { admin?: boolean } = {},
+): Promise<{ response: Response; data: any }> {
+  const { admin, ...init } = options;
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(admin ? { "x-admin-api-key": ADMIN_KEY } : {}),
+      ...init.headers,
+    },
   });
-  const data = await response.json();
+  const text = await response.text();
+  let data: any = undefined;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
   return { response, data };
 }
 
-// ==================== TESTS ====================
+const get = (path: string, admin = false) => request(path, { admin });
+const post = (path: string, body?: unknown, admin = true) =>
+  request(path, {
+    method: "POST",
+    admin,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+const del = (path: string, body?: unknown, admin = true) =>
+  request(path, {
+    method: "DELETE",
+    admin,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, () => {
+      const address = srv.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function startServer(): Promise<void> {
+  const port = await freePort();
+  baseUrl = `http://127.0.0.1:${port}`;
+  dataDir = mkdtempSync(join(tmpdir(), "oracle-e2e-"));
+
+  server = spawn(process.execPath, [join(API_ROOT, "dist", "index.js")], {
+    cwd: API_ROOT,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DB_PATH: join(dataDir, "e2e.db"),
+      ADMIN_API_KEY: ADMIN_KEY,
+      NODE_ENV: "test",
+      // Background jobs off so the suite observes only what it triggers.
+      SIGNAL_COLLECT_INTERVAL: "0",
+      ISSUE_DETECT_INTERVAL: "0",
+      OUTCOME_EVAL_ENABLED: "0",
+      AUTO_FINALIZE_INTERVAL: "0",
+      // No chain access: demo weights, no signature requirement.
+      MAINNET_RPC_URL: "off",
+      REQUIRE_VOTE_SIGNATURE: "never",
+      REQUIRE_DELEGATION_SIGNATURE: "never",
+      // Real lifecycle timings, compressed so the suite can exercise them.
+      MIN_VOTING_PERIOD_MS: "500",
+      EXECUTION_DELAY_MS: "0",
+      KPI_MEASUREMENT_DELAY_MS: "0",
+      // Rate limits out of the way of a fast test run.
+      RATE_LIMIT_GLOBAL: "100000",
+      RATE_LIMIT_VOTE: "100000",
+      RATE_LIMIT_LLM: "100000",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  server.stdout?.on("data", (chunk) => serverLog.push(String(chunk)));
+  server.stderr?.on("data", (chunk) => serverLog.push(String(chunk)));
+
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (server.exitCode !== null) {
+      throw new Error(
+        `API exited with code ${server.exitCode}:\n${serverLog.join("")}`,
+      );
+    }
+    try {
+      const response = await fetch(`${baseUrl}/api/health`);
+      if (response.ok) return;
+    } catch {
+      // not up yet
+    }
+    await sleep(250);
+  }
+  throw new Error(`API did not become healthy:\n${serverLog.join("")}`);
+}
+
+function stopServer() {
+  server?.kill("SIGTERM");
+  if (dataDir) rmSync(dataDir, { recursive: true, force: true });
+}
+
+/* ------------------------------ fixtures ----------------------------- */
+
+let issueCounter = 0;
+function decisionPacket(overrides: Record<string, any> = {}) {
+  issueCounter++;
+  const issueId = `00000000-0000-4000-8000-${String(issueCounter).padStart(12, "0")}`;
+  return {
+    id: `10000000-0000-4000-8000-${String(issueCounter).padStart(12, "0")}`,
+    issueId,
+    issue: {
+      id: issueId,
+      title: `E2E issue ${issueCounter}`,
+      description: "Created by the end-to-end suite",
+      category: "governance",
+      priority: "high",
+      status: "detected",
+      detectedAt: new Date().toISOString(),
+      signals: [],
+      evidence: [],
+    },
+    consensusScore: 0.9,
+    recommendedProposalType: "action",
+    recommendation: {
+      action: "Take the recommended action",
+      rationale: "Because the agents agreed",
+      expectedOutcome: "The issue is resolved",
+    },
+    alternatives: [],
+    risks: [],
+    kpis: [
+      { name: "Resolution time", target: 24, unit: "hours", measurementMethod: "manual" },
+      { name: "Recurrence", target: 0, unit: "occurrences", measurementMethod: "manual" },
+    ],
+    agentOpinions: [],
+    dissent: [],
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/** Distinct, well-formed 20-byte addresses. */
+function voterAddress(index: number): string {
+  return `0x${index.toString(16).padStart(40, "0")}`;
+}
+
+async function createProposal(options: Record<string, unknown> = {}) {
+  const { response, data } = await post("/api/proposals", {
+    decisionPacket: decisionPacket(),
+    proposer: voterAddress(0xbeef),
+    options: { quorum: 1, threshold: 50, votingPeriod: 800, ...options },
+  });
+  assertStatus(response, 201, "create proposal");
+  assert(data.proposal?.id, "create proposal: no proposal id in response");
+  return data.proposal;
+}
+
+/* -------------------------------- tests ------------------------------- */
 
 async function testHealthCheck() {
-  const { response, data } = await fetchJson("/health");
-  assert(response.ok, "Health check should return 200");
-  assert(data.status === "ok", "Status should be 'ok'");
-  assert(typeof data.version === "string", "Version should be a string");
-  assert(typeof data.timestamp === "string", "Timestamp should be a string");
+  const { response, data } = await get("/health");
+  assertStatus(response, 200, "health");
+  assert(data.status === "ok", "health: status should be ok");
+  assert(typeof data.version === "string", "health: version should be a string");
 }
 
-async function testGetSignals() {
-  const { response, data } = await fetchJson("/api/signals");
-  assert(response.ok, "Get signals should return 200");
-  assert(Array.isArray(data.signals), "Signals should be an array");
-  assert(typeof data.count === "number", "Count should be a number");
-}
+async function testAdminAuthRequired() {
+  const anonymous = await post("/api/signals/collect", undefined, false);
+  assertStatus(anonymous.response, 401, "anonymous admin call");
 
-async function testCollectSignals() {
-  const { response, data } = await fetchJson("/api/signals/collect", {
+  const wrongKey = await request("/api/signals/collect", {
     method: "POST",
+    headers: { "x-admin-api-key": "wrong" },
   });
-  assert(response.ok, "Collect signals should return 200");
-  assert(typeof data.collected === "number", "Collected should be a number");
-  assert(Array.isArray(data.signals), "Signals should be an array");
+  assertStatus(wrongKey.response, 401, "admin call with the wrong key");
+
+  const authorized = await post("/api/signals/collect");
+  assertStatus(authorized.response, 200, "authorized admin call");
 }
 
-async function testGetIssues() {
-  const { response, data } = await fetchJson("/api/issues");
-  assert(response.ok, "Get issues should return 200");
-  assert(Array.isArray(data.issues), "Issues should be an array");
-  assert(typeof data.count === "number", "Count should be a number");
-}
+async function testSignalsAndIssues() {
+  const collected = await post("/api/signals/collect");
+  assertStatus(collected.response, 200, "collect signals");
+  assert(Array.isArray(collected.data.signals), "collect: signals should be an array");
 
-async function testDetectIssues() {
-  const { response, data } = await fetchJson("/api/issues/detect", {
-    method: "POST",
-  });
-  assert(response.ok, "Detect issues should return 200");
-  assert(typeof data.detected === "number", "Detected should be a number");
-  assert(typeof data.saved === "number", "Saved should be a number");
-}
-
-async function testDeliberate() {
-  const issue = {
-    id: "test-issue-e2e",
-    title: "E2E Test Issue",
-    description: "This is a test issue for E2E testing",
-    category: "governance",
-    priority: "high",
-  };
-
-  const { response, data } = await fetchJson("/api/deliberate", {
-    method: "POST",
-    body: JSON.stringify({ issue }),
-  });
-
-  assert(response.ok, "Deliberate should return 200");
-  assert(data.decisionPacket, "Should return a decision packet");
-  assert(data.decisionPacket.recommendation, "Should have recommendation");
-  assert(typeof data.decisionPacket.recommendation === "object", "Recommendation should be an object");
-  assert(data.decisionPacket.recommendation.action, "Recommendation should have action");
-  assert(data.decisionPacket.recommendation.rationale, "Recommendation should have rationale");
-  assert(Array.isArray(data.decisionPacket.risks), "Should have risks array");
-}
-
-async function testGetProposals() {
-  const { response, data } = await fetchJson("/api/proposals");
-  assert(response.ok, "Get proposals should return 200");
-  assert(Array.isArray(data.proposals), "Proposals should be an array");
-  assert(typeof data.count === "number", "Count should be a number");
-}
-
-async function testCreateProposal() {
-  const decisionPacket = {
-    id: `e2e-test-${Date.now()}`,
-    issueId: "test-issue",
-    recommendation: {
-      action: "E2E Test Action",
-      rationale: "E2E Test Rationale",
-      expectedOutcome: "E2E Test Outcome",
-    },
-    risks: [],
-  };
-
-  const { response, data } = await fetchJson("/api/proposals", {
-    method: "POST",
-    body: JSON.stringify({
-      decisionPacket,
-      proposer: "0xE2E_TEST",
-    }),
-  });
-
-  assert(response.ok, "Create proposal should return 201");
-  assert(data.proposal, "Should return a proposal");
-  assert(data.proposal.id, "Proposal should have an ID");
-  assert(data.proposal.status === "active", "Proposal should be active");
-
-  return data.proposal.id;
-}
-
-async function testCastVote(proposalId: string) {
-  // Address validation requires a real 20-byte hex address; pad a deterministic test address.
-  const suffix = Date.now().toString(16).padStart(16, "0").slice(-16);
-  const voter = ("0x" + "e2eA".repeat(6) + suffix).toLowerCase();
-  const { response, data } = await fetchJson(`/api/proposals/${proposalId}/vote`, {
-    method: "POST",
-    body: JSON.stringify({
-      voter,
-      choice: "for",
-      weight: "1000",
-      reason: "E2E test vote",
-    }),
-  });
-
-  assert(response.ok, "Cast vote should return 201");
-  assert(data.vote, "Should return a vote");
-  assert(data.vote.choice === "for", "Vote choice should be 'for'");
-  assert(data.vote.weight === "1000", "Vote weight should be '1000'");
-}
-
-async function testTallyVotes(proposalId: string) {
-  const { response, data } = await fetchJson(`/api/proposals/${proposalId}/tally`, {
-    method: "POST",
-  });
-
-  assert(response.ok, "Tally votes should return 200");
-  assert(data.tally, "Should return a tally");
-  assert(typeof data.tally.forVotes === "string", "forVotes should be a string (BigInt)");
-  assert(typeof data.tally.participationRate === "number", "participationRate should be a number");
-}
-
-async function testFinalizeProposal(proposalId: string) {
-  const { response, data } = await fetchJson(`/api/proposals/${proposalId}/finalize`, {
-    method: "POST",
-  });
-
-  assert(response.ok, "Finalize should return 200");
-  assert(data.proposal, "Should return a proposal");
-  assert(["passed", "rejected"].includes(data.proposal.status), "Proposal should be passed or rejected");
-  return data.proposal.status;
-}
-
-async function testExecuteProposal(proposalId: string) {
-  const { response, data } = await fetchJson(`/api/proposals/${proposalId}/execute`, {
-    method: "POST",
-  });
-
-  assert(response.ok, `Execute should return 200, got ${response.status}`);
-  assert(data.proposal, "Should return a proposal");
-  assert(data.proposal.status === "executed", "Proposal should be executed");
-  assert(data.execution, "Should return an execution record");
-  assert(data.message === "Proposal executed successfully", "Should return success message");
-}
-
-async function testGetStats() {
-  const { response, data } = await fetchJson("/api/stats");
-  assert(response.ok, "Get stats should return 200");
-  assert(data.signals, "Should have signals stats");
-  assert(data.proposals, "Should have proposals stats");
-  assert(data.outcomes, "Should have outcomes stats");
-}
-
-async function testUpdateIssue() {
-  // First get an issue
-  const { data: issuesData } = await fetchJson("/api/issues");
-  if (issuesData.issues.length === 0) {
-    console.log("⏭️  Skipping testUpdateIssue - no issues available");
-    return;
-  }
-
-  const issueId = issuesData.issues[0].id;
-  const { response, data } = await fetchJson(`/api/issues/${issueId}`, {
-    method: "PATCH",
-    body: JSON.stringify({ status: "deliberating" }),
-  });
-
-  assert(response.ok, "Update issue should return 200");
-  assert(data.issue, "Should return updated issue");
-  assert(data.issue.status === "deliberating", "Issue status should be updated");
-}
-
-async function testGetTrustScore() {
-  const { response, data } = await fetchJson("/api/trust/test-entity");
-  // Trust score returns 404 for non-existent entities, 200 for existing ones
-  if (response.status === 404) {
-    assert(data.error === "Entity not found", "Should return 'Entity not found' for non-existent entity");
-  } else {
-    assert(response.ok, "Get trust score should return 200 for existing entity");
-    assert(data.score, "Should return a score object");
-    assert(typeof data.score.overall === "number", "Should have overall score");
-  }
-}
-
-// ==================== FLOW TESTS ====================
-
-async function testFullWorkflow() {
-  console.log("\n--- Full Workflow Test ---");
-
-  // 1. Collect signals
-  const { data: signalsData } = await fetchJson("/api/signals/collect", { method: "POST" });
-  assert(signalsData.collected >= 0, "Should collect some signals");
-  console.log(`   Collected ${signalsData.collected} signals`);
-
-  // 2. Detect issues
-  const { data: issuesData } = await fetchJson("/api/issues/detect", { method: "POST" });
-  console.log(`   Detected ${issuesData.detected} issues, saved ${issuesData.saved} new`);
-
-  // 3. Get an issue and deliberate
-  const { data: allIssues } = await fetchJson("/api/issues");
-  if (allIssues.issues.length > 0) {
-    const issue = allIssues.issues[0];
-    const { data: deliberation } = await fetchJson("/api/deliberate", {
-      method: "POST",
-      body: JSON.stringify({ issue }),
-    });
-    assert(deliberation.decisionPacket, "Deliberation should return decision packet");
-    console.log(`   Deliberated on issue: ${issue.title.substring(0, 50)}...`);
-
-    // 4. Create proposal from decision
-    const { data: proposalData } = await fetchJson("/api/proposals", {
-      method: "POST",
-      body: JSON.stringify({
-        decisionPacket: deliberation.decisionPacket,
-        proposer: "0xE2E_WORKFLOW",
-      }),
-    });
-    assert(proposalData.proposal.status === "active", "Proposal should be active");
-    console.log(`   Created proposal: ${proposalData.proposal.id}`);
-
-    // 5. Cast votes — addresses must be valid 20-byte hex per security validation.
-    for (let i = 0; i < 3; i++) {
-      const voter = "0x" + "deadbeef".repeat(5) + i.toString().padStart(2, "0");
-      await fetchJson(`/api/proposals/${proposalData.proposal.id}/vote`, {
-        method: "POST",
-        body: JSON.stringify({
-          voter,
-          choice: i < 2 ? "for" : "against",
-          weight: "100",
-        }),
-      });
-    }
-    console.log("   Cast 3 votes (2 for, 1 against)");
-
-    // 6. Tally votes
-    const { data: tallyData } = await fetchJson(`/api/proposals/${proposalData.proposal.id}/tally`, {
-      method: "POST",
-    });
-    console.log(`   Tally: ${tallyData.tally.forVotes} for, ${tallyData.tally.againstVotes} against`);
-  }
-
-  console.log("--- Full Workflow Complete ---\n");
-}
-
-// ==================== DELEGATION TESTS ====================
-
-async function testGetDelegations() {
-  const { response, data } = await fetchJson("/api/delegations");
-  assert(response.ok, "Get delegations should return 200");
-  assert(Array.isArray(data.policies), "Policies should be an array");
-  assert(typeof data.count === "number", "Count should be a number");
-}
-
-async function testCreateDelegation() {
-  const { response, data } = await fetchJson("/api/delegations", {
-    method: "POST",
-    body: JSON.stringify({
-      delegator: `0xDELEGATOR_${Date.now()}`,
-      delegate: "risk-agent",
-      conditions: [
-        { field: "decisionPacket.issue.category", operator: "in", value: ["governance", "security"] },
-        { field: "decisionPacket.budget", operator: "lte", value: 10000 },
-      ],
-      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-    }),
-  });
-
-  assert(response.ok, "Create delegation should return 201");
-  assert(data.policy, "Should return a policy");
-  assert(data.policy.id, "Policy should have an ID");
-  assert(data.policy.active === true, "Policy should be active");
-
-  return data.policy.id;
-}
-
-async function testGetDelegation(policyId: string) {
-  const { response, data } = await fetchJson(`/api/delegations/${policyId}`);
-  assert(response.ok, "Get delegation should return 200");
-  assert(data.policy, "Should return a policy");
-  assert(data.policy.id === policyId, "Policy ID should match");
-}
-
-async function testRevokeDelegation(policyId: string) {
-  const { response, data } = await fetchJson(`/api/delegations/${policyId}`, {
-    method: "DELETE",
-  });
-
-  assert(response.ok, "Revoke delegation should return 200");
-  assert(data.message === "Delegation revoked", "Should return revoke message");
-  assert(data.policy.active === false, "Policy should be inactive");
-}
-
-async function testCheckDelegation() {
-  // First create a delegation
-  const { data: createData } = await fetchJson("/api/delegations", {
-    method: "POST",
-    body: JSON.stringify({
-      delegator: `0xCHECK_DELEGATOR_${Date.now()}`,
-      delegate: "community-agent",
-      conditions: [{ field: "decisionPacket.issue.category", operator: "in", value: ["governance"] }],
-    }),
-  });
-
-  // Create a proposal to check against
-  const { data: proposalData } = await fetchJson("/api/proposals", {
-    method: "POST",
-    body: JSON.stringify({
-      decisionPacket: {
-        id: `e2e-check-${Date.now()}`,
-        issueId: "test-issue",
-        recommendation: { action: "Test", rationale: "Testing", expectedOutcome: "Success" },
-        risks: [],
-      },
-      proposer: "0xE2E_CHECK_TEST",
-    }),
-  });
-
-  // Check delegation
-  const { response, data } = await fetchJson(
-    `/api/delegations/check/${proposalData.proposal.id}?delegator=${createData.policy.delegator}`
+  const signals = await get("/api/signals");
+  assertStatus(signals.response, 200, "list signals");
+  assert(Array.isArray(signals.data.signals), "list signals: should be an array");
+  assert(
+    signals.data.signals.length > 0,
+    "list signals: collection should have stored something",
   );
 
-  assert(response.ok, "Check delegation should return 200");
-  assert(typeof data.shouldDelegate === "boolean", "Should return shouldDelegate boolean");
+  const detected = await post("/api/issues/detect");
+  assertStatus(detected.response, 200, "detect issues");
+  assert(typeof detected.data.detected === "number", "detect: count should be a number");
+
+  const issues = await get("/api/issues");
+  assertStatus(issues.response, 200, "list issues");
+  assert(Array.isArray(issues.data.issues), "list issues: should be an array");
 }
 
-// ==================== RUN TESTS ====================
+async function testProposalValidation() {
+  const packet = decisionPacket();
+  const proposer = voterAddress(0xbeef);
+
+  for (const [label, options] of [
+    ["negative quorum", { quorum: -1 }],
+    ["negative threshold", { threshold: -1 }],
+    ["zero quorum", { quorum: 0 }],
+    ["threshold above 100", { threshold: 101 }],
+    ["voting period below the floor", { votingPeriod: 1 }],
+    ["unknown option", { nonsense: true }],
+  ] as const) {
+    const { response } = await post("/api/proposals", {
+      decisionPacket: packet,
+      proposer,
+      options,
+    });
+    assertStatus(response, 400, `proposal with ${label} should be rejected`);
+  }
+}
+
+async function testVotingIntegrity() {
+  const proposal = await createProposal({ votingPeriod: 60_000 });
+
+  const first = await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter: voterAddress(1), choice: "for", weight: "100" },
+    false,
+  );
+  assertStatus(first.response, 201, "first vote");
+  assert(first.data.vote.choice === "for", "vote: choice should be stored canonically");
+
+  // Same address, different casing: one holder, one vote.
+  const checksummed = voterAddress(1).toUpperCase().replace("0X", "0x");
+  const duplicate = await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter: checksummed, choice: "against", weight: "100" },
+    false,
+  );
+  assertStatus(duplicate.response, 400, "duplicate vote in a different casing");
+
+  // Upper-case choice must be normalized, not silently uncounted.
+  const upper = await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter: voterAddress(2), choice: "FOR", weight: "50" },
+    false,
+  );
+  assertStatus(upper.response, 201, "upper-case choice");
+  assert(
+    upper.data.vote.choice === "for",
+    `vote: "FOR" should be stored as "for", got ${upper.data.vote.choice}`,
+  );
+
+  for (const [label, body] of [
+    ["a malformed address", { voter: "0xNOT_AN_ADDRESS", choice: "for", weight: "1" }],
+    ["an unknown choice", { voter: voterAddress(3), choice: "maybe", weight: "1" }],
+    ["zero weight", { voter: voterAddress(4), choice: "for", weight: "0" }],
+    ["negative weight", { voter: voterAddress(5), choice: "for", weight: "-5" }],
+  ] as const) {
+    const { response } = await post(`/api/proposals/${proposal.id}/vote`, body, false);
+    assertStatus(response, 400, `vote with ${label} should be rejected`);
+  }
+
+  const tally = await post(`/api/proposals/${proposal.id}/tally`);
+  assertStatus(tally.response, 200, "tally");
+  assert(
+    tally.data.tally.forVotes === "150",
+    `tally: expected 150 for-votes, got ${tally.data.tally.forVotes}`,
+  );
+  assert(tally.data.tally.voteCount === 2, "tally: expected 2 ballots");
+}
+
+async function testProposalListIncludesTally() {
+  const proposal = await createProposal({ votingPeriod: 60_000 });
+  await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter: voterAddress(11), choice: "for", weight: "7" },
+    false,
+  );
+
+  const { response, data } = await get(`/api/proposals/${proposal.id}`);
+  assertStatus(response, 200, "get proposal");
+  assert(data.proposal.tally, "proposal detail should carry a tally");
+  assert(
+    data.proposal.tally.forVotes === "7",
+    `proposal detail tally: expected 7, got ${data.proposal.tally.forVotes}`,
+  );
+
+  const list = await get("/api/proposals");
+  assertStatus(list.response, 200, "list proposals");
+  const listed = list.data.proposals.find((p: any) => p.id === proposal.id);
+  assert(listed?.tally?.forVotes === "7", "listed proposal should carry the same tally");
+  assert(typeof listed.title === "string" && listed.title.length > 0, "listed proposal needs a title");
+}
+
+async function testVotingTimeline() {
+  const proposal = await createProposal({ votingPeriod: 800 });
+  await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter: voterAddress(21), choice: "for", weight: "10" },
+    false,
+  );
+
+  const early = await post(`/api/proposals/${proposal.id}/finalize`);
+  assertStatus(early.response, 400, "finalizing before voting ends");
+
+  await sleep(1000);
+
+  const finalized = await post(`/api/proposals/${proposal.id}/finalize`);
+  assertStatus(finalized.response, 200, "finalize after voting ends");
+  assert(
+    finalized.data.proposal.status === "passed",
+    `finalize: expected passed, got ${finalized.data.proposal.status}`,
+  );
+
+  const late = await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter: voterAddress(22), choice: "for", weight: "10" },
+    false,
+  );
+  assertStatus(late.response, 400, "voting after finalization");
+}
+
+async function testExecutionAndMeasuredOutcome() {
+  const proposal = await createProposal({ votingPeriod: 800 });
+  await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter: voterAddress(31), choice: "for", weight: "10" },
+    false,
+  );
+  await sleep(1000);
+  await post(`/api/proposals/${proposal.id}/finalize`);
+
+  const executed = await post(`/api/proposals/${proposal.id}/execute`);
+  assertStatus(executed.response, 200, "execute");
+  assert(
+    executed.data.proof === undefined,
+    "execution must not mint an outcome proof before anything is measured",
+  );
+  assert(
+    executed.data.measurement?.status === "pending_measurement",
+    "execution should report a pending measurement",
+  );
+  const executionId = executed.data.execution.id;
+
+  const pending = await get("/api/outcomes");
+  const pendingRow = pending.data.outcomes.find((o: any) => o.executionId === executionId);
+  assert(pendingRow, "outcomes should list the pending execution");
+  assert(
+    pendingRow.status === "pending_measurement" && pendingRow.successRate === null,
+    "a pending outcome must not claim a success rate",
+  );
+
+  const undeclared = await post(`/api/outcomes/${executionId}/measurements`, {
+    measurements: [{ name: "Invented metric", actual: 1 }],
+  });
+  assertStatus(undeclared.response, 400, "measurement for an undeclared KPI");
+
+  const measured = await post(`/api/outcomes/${executionId}/measurements`, {
+    measurements: [
+      { name: "Resolution time", actual: 12 },
+      { name: "Recurrence", actual: 3 },
+    ],
+  });
+  assertStatus(measured.response, 201, "submit measurements");
+  assert(
+    measured.data.proof.successRate === 0.5,
+    `success rate should be the 0-1 fraction 0.5, got ${measured.data.proof.successRate}`,
+  );
+  assert(
+    measured.data.proof.overallSuccess === false,
+    "half the KPIs met is not an overall success",
+  );
+
+  const outcomes = await get("/api/outcomes");
+  const row = outcomes.data.outcomes.find((o: any) => o.executionId === executionId);
+  assert(row?.status === "measured", "outcome should now be measured");
+  assert(row.successRate === 0.5, "listed outcome keeps the fraction");
+}
+
+async function testDeliberationContract() {
+  const missing = await post("/api/deliberate", {});
+  assertStatus(missing.response, 400, "deliberate without an issue");
+
+  const unknown = await post("/api/deliberate", { issueId: "no-such-issue" });
+  assertStatus(unknown.response, 404, "deliberate on an unknown issue id");
+
+  // An inline issue is stored first, so recording the decision cannot fail on
+  // a foreign key.
+  const inline = await post("/api/deliberate", {
+    issue: {
+      id: "40000000-0000-4000-8000-000000000001",
+      title: "Inline issue",
+      description: "supplied by the caller",
+      category: "governance",
+      priority: "high",
+    },
+  });
+  assertStatus(inline.response, 200, "deliberate on an inline issue");
+  assert(inline.data.decisionPacket, "deliberate should return a decision packet");
+
+  const stored = await get("/api/issues");
+  assert(
+    stored.data.issues.some((i: any) => i.id === "40000000-0000-4000-8000-000000000001"),
+    "the inline issue should have been stored",
+  );
+}
+
+async function testDebateRoundsAreBounded() {
+  const { response, data } = await post("/api/debate", {
+    issue: {
+      id: "40000000-0000-4000-8000-000000000002",
+      title: "Debate issue",
+      description: "for the debate test",
+      category: "governance",
+      priority: "high",
+    },
+    maxRounds: 9999,
+  });
+  assertStatus(response, 200, "debate");
+  assert(
+    data.debateSession.maxRounds <= 5,
+    `debate rounds should be clamped, got ${data.debateSession.maxRounds}`,
+  );
+  assert(
+    data.debateSession.rounds.length <= 5,
+    `debate should run at most 5 rounds, ran ${data.debateSession.rounds.length}`,
+  );
+}
+
+async function testDelegationAuthorization() {
+  const owner = privateKeyToAccount(generatePrivateKey());
+
+  const blanket = await post(
+    "/api/delegations",
+    { delegator: owner.address, delegate: "risk-agent", conditions: [] },
+    false,
+  );
+  assertStatus(blanket.response, 400, "delegation with no conditions and no confirmation");
+
+  const badField = await post(
+    "/api/delegations",
+    {
+      delegator: owner.address,
+      delegate: "risk-agent",
+      conditions: [{ field: "decisionPacket.constructor", operator: "ne", value: null }],
+    },
+    false,
+  );
+  assertStatus(badField.response, 400, "delegation on an unknown condition field");
+
+  const created = await post(
+    "/api/delegations",
+    {
+      delegator: owner.address,
+      delegate: "risk-agent",
+      conditions: [
+        {
+          field: "decisionPacket.issue.category",
+          operator: "in",
+          value: ["governance"],
+        },
+      ],
+    },
+    false,
+  );
+  assertStatus(created.response, 201, "create delegation");
+  const policyId = created.data.policy.id;
+
+  const listed = await get(`/api/delegations?delegator=${owner.address}`);
+  assertStatus(listed.response, 200, "list delegations");
+  assert(
+    listed.data.policies.some((p: any) => p.id === policyId),
+    "the new policy should be listed for its delegator",
+  );
+
+  const revoked = await del(`/api/delegations/${policyId}`);
+  assertStatus(revoked.response, 200, "revoke delegation");
+
+  const afterRevoke = await get(`/api/delegations?delegator=${owner.address}`);
+  assert(
+    !afterRevoke.data.policies.some((p: any) => p.id === policyId),
+    "a revoked policy should no longer be active",
+  );
+}
+
+async function testStats() {
+  const { response, data } = await get("/api/stats");
+  assertStatus(response, 200, "stats");
+  assert(typeof data.signals.total === "number", "stats: signal total");
+  assert(typeof data.proposals.total === "number", "stats: proposal total");
+  assert(
+    data.outcomes.successRate >= 0 && data.outcomes.successRate <= 1,
+    `stats: success rate should be a 0-1 fraction, got ${data.outcomes.successRate}`,
+  );
+}
+
+async function testNotFoundPaths() {
+  const proposal = await get("/api/proposals/does-not-exist");
+  assertStatus(proposal.response, 404, "unknown proposal");
+
+  const execution = await get("/api/outcomes/does-not-exist");
+  assertStatus(execution.response, 404, "unknown execution");
+
+  const delegation = await get("/api/delegations/does-not-exist");
+  assertStatus(delegation.response, 404, "unknown delegation");
+}
+
+/* --------------------------------- run -------------------------------- */
 
 async function main() {
-  console.log("\n🧪 ORACLE API E2E Tests\n");
-  console.log(`Testing against: ${API_BASE}\n`);
-  console.log("=".repeat(50) + "\n");
+  console.log("\n🧪 ORACLE API E2E suite\n");
+  await startServer();
+  console.log(`   server ready at ${baseUrl}\n`);
 
-  // Health & Basic Tests
-  await runTest("Health Check", testHealthCheck);
-  await runTest("Get Signals", testGetSignals);
-  await runTest("Collect Signals", testCollectSignals);
-  await runTest("Get Issues", testGetIssues);
-  await runTest("Detect Issues", testDetectIssues);
-  await runTest("Deliberate", testDeliberate);
-  await runTest("Get Proposals", testGetProposals);
-  await runTest("Get Stats", testGetStats);
-  await runTest("Get Trust Score", testGetTrustScore);
-  await runTest("Update Issue", testUpdateIssue);
-
-  // Proposal & Voting Tests
-  let proposalId: string | undefined;
-  await runTest("Create Proposal", async () => {
-    proposalId = await testCreateProposal();
-  });
-
-  if (proposalId) {
-    await runTest("Cast Vote", async () => {
-      await testCastVote(proposalId!);
-    });
-    await runTest("Tally Votes", async () => {
-      await testTallyVotes(proposalId!);
-    });
-    await runTest("Finalize Proposal", async () => {
-      await testFinalizeProposal(proposalId!);
-    });
+  try {
+    await runTest("Health check", testHealthCheck);
+    await runTest("Admin endpoints require the key", testAdminAuthRequired);
+    await runTest("Signals and issues", testSignalsAndIssues);
+    await runTest("Proposal settings are validated", testProposalValidation);
+    await runTest("Voting integrity", testVotingIntegrity);
+    await runTest("Proposal responses carry a tally", testProposalListIncludesTally);
+    await runTest("Voting timeline is enforced", testVotingTimeline);
+    await runTest("Execution and measured outcome", testExecutionAndMeasuredOutcome);
+    await runTest("Deliberation contract", testDeliberationContract);
+    await runTest("Debate rounds are bounded", testDebateRoundsAreBounded);
+    await runTest("Delegation authorization", testDelegationAuthorization);
+    await runTest("Stats", testStats);
+    await runTest("Unknown ids return 404", testNotFoundPaths);
+  } finally {
+    stopServer();
   }
-
-  // Execute test - need to create a new proposal that passes (separate from above)
-  await runTest("Execute Proposal", async () => {
-    // Create a fresh proposal for execution test
-    const decisionPacket = {
-      id: `e2e-exec-${Date.now()}`,
-      issueId: "test-issue",
-      recommendation: {
-        action: "E2E Execute Test Action",
-        rationale: "Testing execution flow",
-        expectedOutcome: "Successful execution",
-      },
-      risks: [],
-    };
-    const { data: proposalData } = await fetchJson("/api/proposals", {
-      method: "POST",
-      body: JSON.stringify({ decisionPacket, proposer: "0xE2E_EXEC_TEST" }),
-    });
-    const execProposalId = proposalData.proposal.id;
-
-    // Cast enough votes to pass (need 100 votes for quorum)
-    for (let i = 0; i < 101; i++) {
-      await fetchJson(`/api/proposals/${execProposalId}/vote`, {
-        method: "POST",
-        body: JSON.stringify({
-          voter: `0xVOTER_EXEC_${i}_${Date.now()}`,
-          choice: "for",
-          weight: "1",
-        }),
-      });
-    }
-
-    // Finalize to pass
-    const { data: finalizeData } = await fetchJson(`/api/proposals/${execProposalId}/finalize`, { method: "POST" });
-    assert(finalizeData.proposal.status === "passed", `Proposal should pass after finalize, got: ${finalizeData.proposal?.status}`);
-
-    // Execute
-    await testExecuteProposal(execProposalId);
-  });
-
-  // Delegation Tests
-  let policyId: string | undefined;
-  await runTest("Get Delegations", testGetDelegations);
-  await runTest("Create Delegation", async () => {
-    policyId = await testCreateDelegation();
-  });
-  if (policyId) {
-    await runTest("Get Delegation", async () => {
-      await testGetDelegation(policyId!);
-    });
-    await runTest("Revoke Delegation", async () => {
-      await testRevokeDelegation(policyId!);
-    });
-  }
-  await runTest("Check Delegation", testCheckDelegation);
-
-  // Full Workflow Test
-  await runTest("Full Workflow", testFullWorkflow);
-
-  // Summary
-  console.log("\n" + "=".repeat(50));
-  console.log("\n📊 Test Summary\n");
 
   const passed = results.filter((r) => r.passed).length;
-  const failed = results.filter((r) => !r.passed).length;
-  const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+  const failed = results.length - passed;
 
-  console.log(`Total: ${results.length} tests`);
-  console.log(`✅ Passed: ${passed}`);
-  console.log(`❌ Failed: ${failed}`);
-  console.log(`⏱️  Duration: ${totalDuration}ms\n`);
-
+  console.log("\n────────────────────────────────");
+  console.log(`   ${passed}/${results.length} passed`);
   if (failed > 0) {
-    console.log("Failed Tests:");
-    results
-      .filter((r) => !r.passed)
-      .forEach((r) => {
-        console.log(`  - ${r.name}: ${r.error}`);
-      });
+    console.log("\n   Failures:");
+    for (const result of results.filter((r) => !r.passed)) {
+      console.log(`   - ${result.name}: ${result.error}`);
+    }
+    console.log("\n   Server output:");
+    console.log(serverLog.join("").split("\n").slice(-30).join("\n"));
   }
-
-  console.log("\n" + "=".repeat(50) + "\n");
+  console.log("────────────────────────────────\n");
 
   process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error("E2E suite crashed:", error);
+  stopServer();
+  process.exit(1);
+});

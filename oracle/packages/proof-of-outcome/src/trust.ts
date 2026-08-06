@@ -1,4 +1,4 @@
-import { TrustScore, OutcomeProof, generateId, now } from "@oracle/core";
+import { TrustScore, OutcomeProof, now } from "@oracle/core";
 
 export interface TrustManagerConfig {
   initialScore?: number;
