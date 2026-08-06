@@ -21,6 +21,12 @@ export interface ProposalOptions {
   quorum?: number;
   threshold?: number;
   votingPeriod?: number;
+  /**
+   * Block height that fixes voting power for this proposal. Set by the server
+   * from chain state — never accepted from a client, which could otherwise
+   * pick a block where it happened to hold tokens.
+   */
+  snapshotBlock?: number;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -128,6 +134,7 @@ export class VotingSystem {
       votingPeriodMs,
       quorum,
       threshold,
+      snapshotBlock: options?.snapshotBlock,
       createdAt: now(),
     };
 
@@ -158,10 +165,32 @@ export class VotingSystem {
     return proposal;
   }
 
+  /**
+   * Identity used for duplicate detection. Ethereum addresses are
+   * case-insensitive, so the checksummed and lowercase spellings of one
+   * address are the same voter and must not each get a vote.
+   */
+  static voterKey(voter: string): string {
+    return voter.trim().toLowerCase();
+  }
+
+  /**
+   * Accept only the three real choices, in canonical form. Storing the raw
+   * string meant "FOR" was accepted, matched no branch of the tally, and
+   * still consumed that address's one vote.
+   */
+  static normalizeChoice(choice: string): VoteChoice {
+    const normalized = String(choice).trim().toLowerCase();
+    if (normalized !== "for" && normalized !== "against" && normalized !== "abstain") {
+      throw new Error(`choice must be one of: for, against, abstain`);
+    }
+    return normalized;
+  }
+
   castVote(
     proposalId: string,
     voter: string,
-    choice: VoteChoice,
+    choice: VoteChoice | string,
     weight: bigint,
     reason?: string
   ): Vote {
@@ -179,9 +208,17 @@ export class VotingSystem {
       throw new Error(`Voting period for proposal ${proposalId} has ended`);
     }
 
-    // Check for duplicate vote
+    const normalizedChoice = VotingSystem.normalizeChoice(choice);
+    if (weight <= 0n) {
+      throw new Error("weight must be a positive integer");
+    }
+
+    // Check for duplicate vote, comparing addresses case-insensitively.
+    const voterKey = VotingSystem.voterKey(voter);
     const existingVotes = this.votes.get(proposalId) || [];
-    const existingVote = existingVotes.find((v) => v.voter === voter);
+    const existingVote = existingVotes.find(
+      (v) => VotingSystem.voterKey(v.voter) === voterKey,
+    );
     if (existingVote) {
       throw new Error(`Voter ${voter} has already voted on this proposal`);
     }
@@ -190,7 +227,7 @@ export class VotingSystem {
       id: generateId(),
       proposalId,
       voter,
-      choice,
+      choice: normalizedChoice,
       weight,
       reason,
       timestamp: currentTime,

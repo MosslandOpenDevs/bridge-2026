@@ -348,6 +348,51 @@ export class BlockchainService {
   }
 
   /**
+   * Current mainnet block height, used to pin a proposal's voting snapshot.
+   */
+  async getCurrentBlockNumber(): Promise<number> {
+    if (!this.mocEnabled || !this.mainnetClient) {
+      throw new Error("MOC token service not enabled");
+    }
+    const block = await this.mainnetClient.getBlockNumber();
+    return Number(block);
+  }
+
+  /**
+   * MOC balance as of a specific block.
+   *
+   * Voting power must come from a fixed point in the past: reading the balance
+   * at vote time lets one holder vote, forward the tokens to another wallet,
+   * and vote again with the same coins.
+   *
+   * Historical state requires an archive-capable RPC. Failures are propagated
+   * rather than falling back to the live balance — a silently "current"
+   * weight is exactly the bug this exists to prevent.
+   */
+  async getMocBalanceAt(address: Address, blockNumber: number): Promise<bigint> {
+    if (!this.mocEnabled || !this.mainnetClient) {
+      throw new Error("MOC token service not enabled");
+    }
+
+    try {
+      return await this.mainnetClient.readContract({
+        address: MOC_TOKEN_ADDRESS,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [address],
+        blockNumber: BigInt(blockNumber),
+      });
+    } catch (error: any) {
+      throw new Error(
+        `Could not read the MOC balance of ${address} at block ${blockNumber}: ` +
+          `${error?.shortMessage || error?.message || "unknown error"}. ` +
+          "Snapshot voting needs an archive-capable RPC (set MAINNET_RPC_URL), " +
+          "or set VOTE_WEIGHT_MODE=current to accept live balances.",
+      );
+    }
+  }
+
+  /**
    * Get MOC token balance formatted (human-readable)
    */
   async getMocBalanceFormatted(address: Address): Promise<string> {

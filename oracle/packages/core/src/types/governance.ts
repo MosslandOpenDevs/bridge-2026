@@ -38,6 +38,12 @@ export const ProposalSchema = z.object({
    * finalized as passed; the timelock gives holders a window to react.
    */
   executionEta: z.date().optional(),
+  /**
+   * Block height whose balances decide voting power for this proposal. Fixed
+   * when the proposal is created so moving tokens between wallets during the
+   * vote cannot mint extra voting power.
+   */
+  snapshotBlock: z.number().int().nonnegative().optional(),
   createdAt: z.date(),
   executedAt: z.date().optional(),
 });

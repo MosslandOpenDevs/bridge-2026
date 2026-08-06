@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { z } from "zod";
+import { getAddress } from "viem";
 import express, { Express } from "express";
 import { createServer } from "http";
 import { Server as SocketIOServer } from "socket.io";
@@ -808,7 +809,29 @@ const proposalOptionsSchema = z
   })
   .strict();
 
-app.post("/api/proposals", requireAdminKey, (req, res) => {
+/**
+ * Block height that fixes voting power for a new proposal. Taken from chain
+ * state, never from the request. Returns undefined when MOC verification is
+ * off (demo weights) or the chain is unreachable, in which case voting falls
+ * back to live balances and says so in the log.
+ */
+async function currentSnapshotBlock(): Promise<number | undefined> {
+  if (!blockchainService.isMocEnabled() || VOTE_WEIGHT_MODE !== "snapshot") {
+    return undefined;
+  }
+  try {
+    return await blockchainService.getCurrentBlockNumber();
+  } catch (error) {
+    console.warn(
+      "⚠️  Could not read the current block for the voting snapshot; this " +
+        "proposal will fall back to live balances:",
+      error,
+    );
+    return undefined;
+  }
+}
+
+app.post("/api/proposals", requireAdminKey, async (req, res) => {
   try {
     const { decisionPacket, proposer, options } = req.body;
     if (!decisionPacket || !proposer) {
@@ -826,11 +849,10 @@ app.post("/api/proposals", requireAdminKey, (req, res) => {
       });
     }
 
-    const proposal = votingSystem.createProposal(
-      decisionPacket,
-      proposer,
-      parsedOptions.data,
-    );
+    const proposal = votingSystem.createProposal(decisionPacket, proposer, {
+      ...parsedOptions.data,
+      snapshotBlock: await currentSnapshotBlock(),
+    });
     // Auto-activate the proposal for immediate voting
     votingSystem.activateProposal(proposal.id);
     const activatedProposal = votingSystem.getProposal(proposal.id);
@@ -863,6 +885,41 @@ app.get("/api/proposals/:id", (req, res) => {
   }
 });
 
+/**
+ * Where voting power comes from.
+ * - "snapshot" (default): balance at the proposal's snapshot block, so tokens
+ *   moved during the vote cannot be counted twice.
+ * - "current": live balance. Not sybil-resistant across wallets; only for
+ *   deployments whose RPC cannot serve historical state.
+ */
+const VOTE_WEIGHT_MODE = (process.env.VOTE_WEIGHT_MODE || "snapshot").toLowerCase();
+if (!["snapshot", "current"].includes(VOTE_WEIGHT_MODE)) {
+  console.error("❌ Refusing to start: VOTE_WEIGHT_MODE must be 'snapshot' or 'current'");
+  process.exit(1);
+}
+
+/** Voting weight for a MOC-verified voter, per VOTE_WEIGHT_MODE. */
+async function resolveVotingWeight(
+  voter: `0x${string}`,
+  proposal: { snapshotBlock?: number },
+): Promise<bigint> {
+  if (VOTE_WEIGHT_MODE === "current" || proposal.snapshotBlock === undefined) {
+    const balance = await blockchainService.verifyVoterEligibility(voter);
+    if (balance === 0n) {
+      throw new Error(`Address ${voter} is not a MOC holder.`);
+    }
+    return balance;
+  }
+
+  const balance = await blockchainService.getMocBalanceAt(voter, proposal.snapshotBlock);
+  if (balance === 0n) {
+    throw new Error(
+      `Address ${voter} held no MOC at block ${proposal.snapshotBlock}, the snapshot for this proposal.`,
+    );
+  }
+  return balance;
+}
+
 app.post("/api/proposals/:id/vote", async (req, res) => {
   try {
     const { voter, choice, weight, reason, signature, nonce, timestamp } = req.body;
@@ -872,8 +929,25 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
     if (!/^0x[0-9a-fA-F]{40}$/.test(voter)) {
       return res.status(400).json({ error: "voter must be a valid 0x address" });
     }
-    if (!["for", "against", "abstain"].includes(String(choice).toLowerCase())) {
-      return res.status(400).json({ error: "choice must be for, against, or abstain" });
+
+    // Canonicalize before anything else looks at these values. The duplicate
+    // check, the signed message, the stored vote and the tally must all agree
+    // on one spelling, or the same holder can vote twice under different
+    // casings and an upper-case choice can be accepted yet counted nowhere.
+    let canonicalVoter: `0x${string}`;
+    let canonicalChoice: "for" | "against" | "abstain";
+    try {
+      canonicalVoter = getAddress(voter);
+      canonicalChoice = VotingSystem.normalizeChoice(choice);
+    } catch (normalizeError: any) {
+      return res.status(400).json({
+        error: sanitizeError(normalizeError, "voter or choice is not valid"),
+      });
+    }
+
+    const proposalForVote = votingSystem.getProposal(req.params.id);
+    if (!proposalForVote) {
+      return res.status(404).json({ error: "Proposal not found" });
     }
 
     // Verify the voter actually authorized this vote (anti-spoofing).
@@ -881,9 +955,9 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
     const sigRequired = isVoteSignatureRequired(blockchainService.isMocEnabled());
     if (sigRequired) {
       const sig = await verifyVoteSignature({
-        voter: voter as `0x${string}`,
+        voter: canonicalVoter,
         proposalId: req.params.id,
-        choice: String(choice),
+        choice: canonicalChoice,
         signature: signature as `0x${string}` | undefined,
         nonce: nonce as string | undefined,
         timestamp: typeof timestamp === "number" ? timestamp : Number(timestamp),
@@ -900,9 +974,13 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
     let votingWeight: bigint;
     try {
       if (blockchainService.isMocEnabled()) {
-        // Use actual MOC balance as voting weight
-        votingWeight = await blockchainService.verifyVoterEligibility(voter as `0x${string}`);
-        console.log(`✅ Voter ${voter} verified: ${Number(votingWeight) / 1e18} MOC`);
+        votingWeight = await resolveVotingWeight(canonicalVoter, proposalForVote);
+        console.log(
+          `✅ Voter ${canonicalVoter} verified: ${Number(votingWeight) / 1e18} MOC` +
+            (proposalForVote.snapshotBlock !== undefined
+              ? ` @ block ${proposalForVote.snapshotBlock}`
+              : ""),
+        );
       } else {
         // Demo mode: MOC verification disabled, so weight is client-supplied.
         // Validate it is a positive integer within a sane bound so a caller
@@ -932,31 +1010,20 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
       });
     }
 
-    // Cast the vote with verified weight
+    // Cast the vote with the canonical identity, choice and verified weight
     const vote = votingSystem.castVote(
       req.params.id,
-      voter,
-      choice,
+      canonicalVoter,
+      canonicalChoice,
       votingWeight,
       reason
     );
 
-    // Try to record vote on-chain (non-blocking)
-    let txHash: string | undefined;
-    if (blockchainService.isEnabled()) {
-      const proposal = votingSystem.getProposal(req.params.id);
-      if (proposal?.onchainId) {
-        const voteChoice = parseVoteChoice(choice);
-        const txResult = await blockchainService.castVote(
-          proposal.onchainId,
-          voteChoice,
-          votingWeight
-        );
-        if (txResult.success) {
-          txHash = txResult.txHash;
-        }
-      }
-    }
+    // No per-vote on-chain relay. The contract keys duplicate detection on
+    // msg.sender, and every relayed vote would share this server's single
+    // signer, so the relayer's first vote would make every later voter revert
+    // with "Already voted". Off-chain state is authoritative; see O-05.
+    const txHash: string | undefined = undefined;
 
     // Emit real-time event
     const tally = votingSystem.tallyVotes(req.params.id);
@@ -1526,7 +1593,11 @@ async function detectAndSaveIssues() {
             !proposalDb.existsByIssueId.get(issue.id)
           ) {
             try {
-              const proposal = votingSystem.createProposal(decisionPacket, AUTO_PROPOSAL_PROPOSER);
+              const proposal = votingSystem.createProposal(
+                decisionPacket,
+                AUTO_PROPOSAL_PROPOSER,
+                { snapshotBlock: await currentSnapshotBlock() },
+              );
               votingSystem.activateProposal(proposal.id);
               const activated = votingSystem.getProposal(proposal.id);
               proposalDb.insert.run({
