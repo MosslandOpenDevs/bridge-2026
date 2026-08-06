@@ -94,6 +94,9 @@ db.exec(`
     recommendation_type TEXT,
     agent_opinions TEXT,
     outcome_status TEXT DEFAULT 'pending',
+    -- Fraction in [0,1], same unit as outcome_proofs.success_rate. Averaged by
+    -- getCategorySuccessRate and compared against 0.7 in learning.ts, so a
+    -- 0-100 value here would silently mark every past decision a success.
     outcome_success_rate REAL,
     kpi_results TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,

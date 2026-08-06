@@ -242,6 +242,8 @@ export function recordDecision(
 /**
  * Record outcome for a decision by issue ID (feedback loop)
  * Looks up the most recent decision for the given issue and records outcome
+ *
+ * @param successRate Fraction of declared KPIs met, in [0,1]; forwarded verbatim.
  */
 export function recordOutcomeByIssueId(
   issueId: string,
@@ -261,6 +263,10 @@ export function recordOutcomeByIssueId(
 
 /**
  * Record outcome for a decision (feedback loop)
+ *
+ * @param successRate Fraction of declared KPIs met, in [0,1]. Compared against
+ *   0.7 to decide whether the decision was correct, and subtracted from agent
+ *   confidence — which is also [0,1] — to score each agent's accuracy.
  */
 export function recordOutcome(
   decisionId: string,
