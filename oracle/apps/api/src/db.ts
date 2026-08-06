@@ -1,4 +1,6 @@
 import Database from "better-sqlite3";
+// Imported by name so declaration emit can reference these types (TS4023).
+import type { Database as SqliteDatabase, Statement } from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -13,7 +15,7 @@ if (!fs.existsSync(dataDir)) {
 }
 
 // Initialize database
-const db = new Database(DB_PATH);
+const db: SqliteDatabase = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 
 // Create tables
@@ -134,6 +136,26 @@ db.exec(`
 `);
 
 console.log(`📦 Database initialized at ${DB_PATH}`);
+
+/** Shape of a row in the `issues` table, as returned by better-sqlite3. */
+export interface IssueRow {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  priority: string;
+  status: string;
+  kind: string | null;
+  direction: string | null;
+  detected_at: string;
+  resolved_at: string | null;
+  signal_ids: string | null;
+  evidence: string | null;
+  suggested_actions: string | null;
+  decision_packet: string | null;
+  created_at: string;
+  updated_at: string;
+}
 
 // Signal operations
 export const signalDb = {

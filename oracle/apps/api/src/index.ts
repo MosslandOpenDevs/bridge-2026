@@ -13,6 +13,7 @@ import {
   proposalDb,
   decisionHistoryDb,
   issueFollowupDb,
+  type IssueRow,
   serializeSignal,
   deserializeSignal,
   serializeIssue,
@@ -539,7 +540,7 @@ app.patch("/api/issues/:id", requireAdminKey, async (req, res) => {
       });
     }
 
-    const issue = issueDb.getById.get(req.params.id) as any;
+    const issue = issueDb.getById.get(req.params.id) as IssueRow | undefined;
 
     if (!issue) {
       return res.status(404).json({ error: "Issue not found" });
