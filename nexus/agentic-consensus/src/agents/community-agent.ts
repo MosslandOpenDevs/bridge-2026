@@ -5,11 +5,19 @@
  */
 
 import { BaseAgent } from './base-agent';
-import type { AgentType, AgentReasoning, Issue } from '../../../shared/types';
+import { AgentType } from '@bridge-2026/shared';
+import type { AgentReasoning, Issue } from '@bridge-2026/shared';
+
+/** `analyze` 가 각 평가 메서드의 결과를 묶어 넘기는 구조. */
+interface CommunityAssessments {
+  communityImpact: { level: string; affectedGroups: string[] };
+  participationImpact: { level: string; details: string[] };
+  sentimentImpact: { level: string; direction: 'positive' | 'negative' | 'neutral' };
+}
 
 export class CommunityAgent extends BaseAgent {
   constructor() {
-    super('community' as AgentType, 'Community Impact Agent');
+    super(AgentType.COMMUNITY, 'Community Impact Agent');
   }
   
   async analyze(issue: Issue, context?: Record<string, unknown>): Promise<AgentReasoning> {
@@ -153,7 +161,7 @@ export class CommunityAgent extends BaseAgent {
   
   private calculateConfidence(
     issue: Issue,
-    assessments: Record<string, any>
+    assessments: CommunityAssessments
   ): number {
     let confidence = 0.65; // 기본 신뢰도
     
@@ -171,7 +179,7 @@ export class CommunityAgent extends BaseAgent {
   
   private generateRecommendation(
     issue: Issue,
-    assessments: Record<string, any>
+    assessments: CommunityAssessments
   ): string {
     if (assessments.sentimentImpact.direction === 'negative') {
       return '부정적 감정 영향이 예상되므로 투명한 커뮤니케이션과 신중한 접근이 필요합니다.';
@@ -190,7 +198,7 @@ export class CommunityAgent extends BaseAgent {
   
   private generateAnalysis(
     issue: Issue,
-    assessments: Record<string, any>
+    assessments: CommunityAssessments
   ): string {
     return `커뮤니티 영향 관점 분석:
 

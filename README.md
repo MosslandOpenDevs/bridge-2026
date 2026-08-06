@@ -120,7 +120,9 @@ Each sub-package carries its own `README.md`. The **`oracle/`** tree is the acti
 
 ## Quick start
 
-> Requires **Node.js ≥ 18**. `oracle` uses **pnpm + Turborepo**; `nexus` sub-apps use **npm**.
+> Requires **Node.js ≥ 18**. Both trees use **pnpm**: `oracle` with Turborepo,
+> `nexus` as a plain pnpm workspace. npm cannot install `nexus` — its packages
+> depend on each other with `workspace:*`, which npm rejects outright.
 
 ### Oracle (production stack)
 
@@ -151,13 +153,24 @@ deployment. Blockchain wiring is documented in
 
 ### Nexus (reference stack)
 
+One install at the workspace root wires every package together and builds the
+shared types the others compile against.
+
 ```bash
-# Frontend
-cd nexus/frontend && npm install && npm run dev
+cd nexus
+pnpm install
+
+# Frontend (Next.js)
+pnpm --filter @bridge-2026/frontend dev
 
 # Backend (NestJS)
-cd nexus/backend && npm install && npm run start:dev
+pnpm --filter @bridge-2026/backend start:dev
 ```
+
+Nexus is a reference decomposition of every governance layer, not the deployed
+system — `oracle/` is what runs in production, and the deploy script treats
+`nexus/**` as documentation. Its per-layer packages do not all compile yet; see
+[`nexus/README.md`](nexus/README.md) for what is buildable today.
 
 ---
 

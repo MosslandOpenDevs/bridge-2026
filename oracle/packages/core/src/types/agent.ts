@@ -74,6 +74,13 @@ export const DecisionPacketSchema = z.object({
     z.object({
       name: z.string(),
       target: z.number(),
+      /**
+       * Which side of the target counts as meeting it. Without this a metric
+       * like uptime (target 99.9, higher is better) is judged by the same rule
+       * as error count (target 0, lower is better), and one of the two is
+       * always scored backwards.
+       */
+      direction: z.enum(["at_most", "at_least"]).default("at_most"),
       unit: z.string(),
       measurementMethod: z.string(),
     })

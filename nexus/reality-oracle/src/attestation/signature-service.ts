@@ -4,7 +4,7 @@
  * 신호에 대한 암호화 서명을 생성하고 검증합니다.
  */
 
-import type { Signal, Attestation } from '../../../shared/types';
+import type { Signal, Attestation } from '@bridge-2026/shared';
 import crypto from 'crypto';
 
 /**

@@ -430,10 +430,12 @@ export class MosslandAdapter extends BaseAdapter {
                    Math.abs(data.changeRate || 0) > 5 ? "medium" : "low";
         value = data.price || 0;
         unit = t.unit.krw;
-        const changeStr = `${(data.changeRate || 0) >= 0 ? "+" : ""}${(data.changeRate || 0).toFixed(2)}`;
-        description = t.mocPrice
-          .replace("{price}", this.formatKrw(data.price || 0))
-          .replace("{change}", changeStr);
+        {
+          const changeStr = `${(data.changeRate || 0) >= 0 ? "+" : ""}${(data.changeRate || 0).toFixed(2)}`;
+          description = t.mocPrice
+            .replace("{price}", this.formatKrw(data.price || 0))
+            .replace("{change}", changeStr);
+        }
         break;
 
       case "price_alert":

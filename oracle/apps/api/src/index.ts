@@ -1,4 +1,7 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import { getAddress } from "viem";
 import express, { Express } from "express";
 import { createServer } from "http";
 import { Server as SocketIOServer } from "socket.io";
@@ -8,11 +11,23 @@ import rateLimit from "express-rate-limit";
 
 // Import database
 import {
+  proposalTitle,
+  saveProposal,
+  saveVoteWithProposal,
+  saveDelegation,
+  setDelegationActive,
+  saveExecutionOutcome,
+  saveExecution,
+  saveProof,
+  hydrate,
+} from "./governance-store.js";
+import {
   signalDb,
   issueDb,
   proposalDb,
   decisionHistoryDb,
   issueFollowupDb,
+  type IssueRow,
   serializeSignal,
   deserializeSignal,
   serializeIssue,
@@ -25,22 +40,21 @@ import {
   recordDecision,
   recordOutcome,
   recordOutcomeByIssueId,
-  getAgentTrustScores,
 } from "./learning.js";
 
 // Import blockchain service
-import {
-  blockchainService,
-  parseVoteChoice,
-  VoteChoice,
-} from "./blockchain.js";
+import { blockchainService } from "./blockchain.js";
 
 // Import security utilities
 import {
   verifyVoteSignature,
   isVoteSignatureRequired,
+  buildDelegationMessage,
+  verifyDelegationSignature,
+  isDelegationSignatureRequired,
   requireAdminKey,
-  isAdminAuthEnabled,
+  adminAuthMode,
+  adminAuthStartupError,
   sanitizeError,
   canonicalJson,
 } from "./security.js";
@@ -58,7 +72,6 @@ import {
   AnomalyDetector,
   ThresholdDetector,
   TrendDetector,
-  ProposalGenerator,
 } from "@oracle/inference-mining";
 import {
   RiskAgent,
@@ -69,6 +82,20 @@ import {
 } from "@oracle/agentic-consensus";
 import { VotingSystem, DelegationManager } from "@oracle/human-governance";
 import { OutcomeTrackerImpl, TrustManager } from "@oracle/proof-of-outcome";
+import {
+  SOCKET_EVENTS,
+  type Proposal,
+  type VoteTally,
+  type TallyPayload,
+} from "@oracle/core";
+
+// Refuse to start on an unsafe auth configuration rather than discovering it
+// when an anonymous caller executes a proposal.
+const adminAuthError = adminAuthStartupError();
+if (adminAuthError) {
+  console.error(`❌ Refusing to start: ${adminAuthError}`);
+  process.exit(1);
+}
 
 // Initialize services
 const signalRegistry = new SignalRegistry();
@@ -207,7 +234,6 @@ const thresholdDetector = new ThresholdDetector({
   ],
 });
 const trendDetector = new TrendDetector();
-const proposalGenerator = new ProposalGenerator();
 
 // LLM Configuration from environment
 const LLM_API_KEY = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;
@@ -250,9 +276,42 @@ moderator.registerAgent(treasuryAgent);
 moderator.registerAgent(communityAgent);
 moderator.registerAgent(productAgent);
 
-const votingSystem = new VotingSystem();
+// Governance parameters. The voting-period floor and the execution timelock
+// are relaxed outside production so tests can exercise the full lifecycle
+// without waiting; production keeps real windows.
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const DAY_MS = 24 * 60 * 60 * 1000;
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    console.error(`❌ Refusing to start: ${name} must be a non-negative integer`);
+    process.exit(1);
+  }
+  return n;
+}
+
+const MIN_VOTING_PERIOD_MS = envInt(
+  "MIN_VOTING_PERIOD_MS",
+  IS_PRODUCTION ? 60 * 60 * 1000 : 1000,
+);
+const EXECUTION_DELAY_MS = envInt(
+  "EXECUTION_DELAY_MS",
+  IS_PRODUCTION ? 2 * DAY_MS : 0,
+);
+
+const votingSystem = new VotingSystem({
+  votingPeriod: envInt("DEFAULT_VOTING_PERIOD_MS", 7 * DAY_MS),
+  minVotingPeriod: MIN_VOTING_PERIOD_MS,
+  executionDelay: EXECUTION_DELAY_MS,
+});
 const delegationManager = new DelegationManager();
-const outcomeTracker = new OutcomeTrackerImpl();
+// Observation window before an execution's KPIs may be measured. Configurable
+// so tests can exercise the measurement path without waiting a day.
+const outcomeTracker = new OutcomeTrackerImpl({
+  kpiMeasurementDelay: envInt("KPI_MEASUREMENT_DELAY_MS", 24 * 60 * 60 * 1000),
+});
 const trustManager = new TrustManager();
 
 // Create Express app with Socket.IO
@@ -496,7 +555,12 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
     const savedIssues = [];
     for (const issue of detectedIssues) {
       // Check if similar issue already exists
-      const existing = issueDb.findSimilar.get(issue.category);
+      const existing = issueDb.findSimilar.get({
+        category: issue.category,
+        kind: issue.kind ?? "issue",
+        direction: issue.direction ?? "",
+        window: ISSUE_DEDUPE_WINDOW,
+      });
       if (!existing) {
         issueDb.insert.run(serializeIssue(issue));
         savedIssues.push(issue);
@@ -529,6 +593,9 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
 
 const VALID_ISSUE_STATUSES = ["detected", "deliberating", "proposed", "resolved"];
 
+// How far back a detection counts as a repeat of one already recorded.
+const ISSUE_DEDUPE_WINDOW = `-${envInt("ISSUE_DEDUPE_MINUTES", 15)} minutes`;
+
 app.patch("/api/issues/:id", requireAdminKey, async (req, res) => {
   try {
     const { status, decisionPacket } = req.body;
@@ -539,7 +606,7 @@ app.patch("/api/issues/:id", requireAdminKey, async (req, res) => {
       });
     }
 
-    const issue = issueDb.getById.get(req.params.id) as any;
+    const issue = issueDb.getById.get(req.params.id) as IssueRow | undefined;
 
     if (!issue) {
       return res.status(404).json({ error: "Issue not found" });
@@ -585,13 +652,107 @@ class LRUMap<K, V> extends Map<K, V> {
 }
 const debateSessions = new LRUMap<string, any>(DEBATE_SESSION_LIMIT);
 
-// Deliberation endpoints
-app.post("/api/deliberate", async (req, res) => {
-  try {
-    const { issue, context } = req.body;
-    if (!issue) {
-      return res.status(400).json({ error: "Issue is required" });
+/**
+ * Resolve the issue a deliberation is about.
+ *
+ * Decision history references issues by foreign key, so deliberating over an
+ * issue the database has never seen used to fail the insert and return a 500
+ * after the LLM work had already been paid for. The caller may now either name
+ * a stored issue by id, or supply a full issue which is validated and stored
+ * first, so the later decision record has something to point at.
+ */
+const inlineIssueSchema = z
+  .object({
+    id: z.string().min(1).max(200).optional(),
+    title: z.string().min(1).max(500),
+    description: z.string().max(5000).default(""),
+    category: z.string().min(1).max(100),
+    priority: z.enum(["low", "medium", "high", "urgent"]).default("medium"),
+    status: z.enum(["detected", "deliberating", "proposed", "resolved"]).default("detected"),
+    kind: z.string().max(50).optional(),
+    direction: z.string().max(50).optional(),
+    detectedAt: z.string().datetime().optional(),
+    signals: z.array(z.any()).max(500).optional(),
+    evidence: z.array(z.any()).max(500).optional(),
+    suggestedActions: z.array(z.string().max(1000)).max(100).optional(),
+  })
+  .passthrough();
+
+type ResolvedIssue =
+  | { ok: true; issue: any }
+  | { ok: false; status: number; body: Record<string, unknown> };
+
+function resolveDeliberationIssue(body: any): ResolvedIssue {
+  const issueId: unknown = body?.issueId;
+  if (typeof issueId === "string" && issueId.length > 0) {
+    const row = issueDb.getById.get(issueId) as IssueRow | undefined;
+    if (!row) {
+      return {
+        ok: false,
+        status: 404,
+        body: { error: `Issue ${issueId} not found` },
+      };
     }
+    return { ok: true, issue: deserializeIssue(row) };
+  }
+
+  if (!body?.issue) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: "issueId or issue is required" },
+    };
+  }
+
+  const parsed = inlineIssueSchema.safeParse(body.issue);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: "Invalid issue",
+        details: parsed.error.issues.map((i) => ({
+          path: i.path.join("."),
+          message: i.message,
+        })),
+      },
+    };
+  }
+
+  const candidate = {
+    ...parsed.data,
+    id: parsed.data.id || randomUUID(),
+    detectedAt: parsed.data.detectedAt || new Date().toISOString(),
+  };
+
+  const existing = issueDb.getById.get(candidate.id) as IssueRow | undefined;
+  if (existing) {
+    return { ok: true, issue: deserializeIssue(existing) };
+  }
+
+  try {
+    issueDb.insert.run(serializeIssue(candidate));
+  } catch (error) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: sanitizeError(error, "Could not store the supplied issue") },
+    };
+  }
+  const stored = issueDb.getById.get(candidate.id) as IssueRow | undefined;
+  return { ok: true, issue: stored ? deserializeIssue(stored) : candidate };
+}
+
+// Deliberation endpoints.
+// Admin-gated: each call spends LLM credits on behalf of the operator.
+app.post("/api/deliberate", requireAdminKey, async (req, res) => {
+  try {
+    const resolved = resolveDeliberationIssue(req.body);
+    if (!resolved.ok) {
+      return res.status(resolved.status).json(resolved.body);
+    }
+    const issue = resolved.issue;
+    const { context } = req.body;
 
     // Enrich context with historical data for agent learning
     const enrichedContext = enrichContextWithHistory(
@@ -613,7 +774,7 @@ app.post("/api/deliberate", async (req, res) => {
       );
 
       recordDecision(
-        issue.id || `issue-${Date.now()}`,
+        issue.id,
         issue.category || "general",
         issue.priority || "medium",
         decisionPacket.consensusScore || 0,
@@ -629,13 +790,18 @@ app.post("/api/deliberate", async (req, res) => {
   }
 });
 
-// Debate endpoints - multi-round agent discussion
-app.post("/api/debate", async (req, res) => {
+// Debate endpoints - multi-round agent discussion.
+// Admin-gated: a debate fans out to every agent for several rounds.
+app.post("/api/debate", requireAdminKey, async (req, res) => {
   try {
-    const { issue, context, maxRounds = 3 } = req.body;
-    if (!issue) {
-      return res.status(400).json({ error: "Issue is required" });
+    const resolved = resolveDeliberationIssue(req.body);
+    if (!resolved.ok) {
+      return res.status(resolved.status).json(resolved.body);
     }
+    const issue = resolved.issue;
+    const { context } = req.body;
+    // Never pass the client's number straight through as a loop bound.
+    const maxRounds = Moderator.clampRounds(req.body?.maxRounds ?? 3);
 
     // Enrich context with historical data for agent learning
     const enrichedContext = enrichContextWithHistory(
@@ -650,20 +816,15 @@ app.post("/api/debate", async (req, res) => {
       enrichedContext,
       maxRounds,
       (round, session) => {
-        // Emit real-time updates for each round
-        io.emit("debate:round_completed", {
+        // Emit real-time updates for each round, in the shared event shape.
+        io.emit(SOCKET_EVENTS.debateRoundCompleted, {
           sessionId: session.id,
-          round: {
-            roundNumber: round.roundNumber,
-            topic: round.topic,
-            messages: round.messages,
-            consensusShift: round.consensusShift,
-            keyInsights: round.keyInsights,
-            unresolvedPoints: round.unresolvedPoints,
-          },
-          currentRound: session.currentRound,
-          maxRounds: session.maxRounds,
-          positionChanges: session.positionChanges,
+          round: round.roundNumber,
+          totalRounds: session.maxRounds,
+          consensusShift: round.consensusShift,
+          keyInsights: round.keyInsights,
+          unresolvedPoints: round.unresolvedPoints,
+          positionChanges: session.positionChanges.length,
         });
       }
     );
@@ -694,10 +855,11 @@ app.post("/api/debate", async (req, res) => {
       );
     }
 
-    // Emit completion event
-    io.emit("debate:completed", {
+    // Emit completion event. The client reads `consensusScore`; sending
+    // `finalConsensusScore` made it render NaN.
+    io.emit(SOCKET_EVENTS.debateCompleted, {
       sessionId: debateSession.id,
-      finalConsensusScore: debateSession.finalConsensusScore,
+      consensusScore: debateSession.finalConsensusScore ?? 0,
       positionChanges: debateSession.positionChanges.length,
       totalRounds: debateSession.rounds.length,
     });
@@ -735,39 +897,156 @@ app.get("/api/debates", (req, res) => {
   }
 });
 
+/**
+ * JSON-safe tally. Weights are bigint internally and must not be handed to
+ * JSON.stringify directly.
+ */
+function serializeTally(tally: VoteTally): TallyPayload {
+  return {
+    forVotes: tally.forVotes.toString(),
+    againstVotes: tally.againstVotes.toString(),
+    abstainVotes: tally.abstainVotes.toString(),
+    totalVotes: tally.totalVotes.toString(),
+    voteCount: tally.voteCount,
+    forPercentage: tally.forPercentage,
+    participationRate: tally.participationRate,
+    quorumReached: tally.quorumReached,
+    passed: tally.passed,
+  };
+}
+
+/**
+ * A proposal as clients consume it, with its authoritative tally attached.
+ * Listing proposals without one made the UI read vote totals that were never
+ * on the object, so every proposal displayed as 0 votes no matter what had
+ * been cast.
+ */
+function withTally(proposal: Proposal) {
+  return {
+    ...proposal,
+    title: proposalTitle(proposal),
+    tally: serializeTally(votingSystem.tallyVotes(proposal.id)),
+  };
+}
+
 // Proposal endpoints
 app.get("/api/proposals", (req, res) => {
   try {
     const status = req.query.status as string | undefined;
-    const proposals = votingSystem.listProposals(status as any);
+    const proposals = votingSystem.listProposals(status as any).map(withTally);
     res.json({ proposals, count: proposals.length });
   } catch (error) {
+    console.error("Failed to fetch proposals:", error);
     res.status(500).json({ error: "Failed to fetch proposals" });
   }
 });
 
-app.post("/api/proposals", requireAdminKey, (req, res) => {
+// Proposal settings are attacker-controlled input, so they are validated
+// before they reach the voting system: a negative quorum or threshold makes
+// both the quorum and threshold checks vacuously true, passing a proposal
+// with no votes at all.
+const proposalOptionsSchema = z
+  .object({
+    quorum: z.number().int().positive().max(1_000_000_000).optional(),
+    threshold: z.number().min(1).max(100).optional(),
+    votingPeriod: z
+      .number()
+      .int()
+      .min(MIN_VOTING_PERIOD_MS)
+      .max(90 * DAY_MS)
+      .optional(),
+  })
+  .strict();
+
+/** A proposal cannot be created because its balance snapshot cannot be pinned. */
+class SnapshotUnavailableError extends Error {
+  readonly code = "SNAPSHOT_UNAVAILABLE";
+}
+
+/**
+ * Block height that fixes voting power for a new proposal. Taken from chain
+ * state, never from the request.
+ *
+ * Returns undefined only when snapshots do not apply — MOC verification off
+ * (demo weights), or VOTE_WEIGHT_MODE=current. When they do apply and the
+ * height cannot be read, creation fails: a proposal with no snapshot cannot be
+ * voted on safely, and quietly creating one would move the failure to vote
+ * time, where it looks like a voter problem.
+ */
+async function currentSnapshotBlock(): Promise<number | undefined> {
+  if (!blockchainService.isMocEnabled() || VOTE_WEIGHT_MODE !== "snapshot") {
+    return undefined;
+  }
+  try {
+    return await blockchainService.getCurrentBlockNumber();
+  } catch (error) {
+    throw new SnapshotUnavailableError(
+      "Could not read the current block to pin this proposal's balance " +
+        `snapshot: ${sanitizeError(error, "chain unreachable")}. Retry once the ` +
+        "RPC is reachable, or set VOTE_WEIGHT_MODE=current to accept live " +
+        "balances (not sybil-resistant across wallets).",
+    );
+  }
+}
+
+app.post("/api/proposals", requireAdminKey, async (req, res) => {
   try {
     const { decisionPacket, proposer, options } = req.body;
     if (!decisionPacket || !proposer) {
       return res.status(400).json({ error: "decisionPacket and proposer are required" });
     }
-    const proposal = votingSystem.createProposal(decisionPacket, proposer, options);
+
+    const parsedOptions = proposalOptionsSchema.safeParse(options ?? {});
+    if (!parsedOptions.success) {
+      return res.status(400).json({
+        error: "Invalid proposal options",
+        details: parsedOptions.error.issues.map((i) => ({
+          path: i.path.join("."),
+          message: i.message,
+        })),
+      });
+    }
+
+    // Pin the snapshot before creating anything, so a chain outage cannot
+    // leave a proposal behind that no one can vote on.
+    const snapshotBlock = await currentSnapshotBlock();
+
+    const proposal = votingSystem.createProposal(decisionPacket, proposer, {
+      ...parsedOptions.data,
+      snapshotBlock,
+    });
     // Auto-activate the proposal for immediate voting
     votingSystem.activateProposal(proposal.id);
-    const activatedProposal = votingSystem.getProposal(proposal.id);
+    const activatedProposal = votingSystem.getProposal(proposal.id)!;
+
+    try {
+      saveProposal(activatedProposal);
+    } catch (persistError) {
+      // Without this the proposal would live in memory only: visible, votable,
+      // and gone at the next restart, while its votes were written against a
+      // proposal id that storage has never heard of.
+      votingSystem.removeProposal(activatedProposal.id);
+      throw persistError;
+    }
 
     // Emit real-time event
     const allProposals = votingSystem.listProposals();
-    io.emit("proposals:created", {
-      proposal: activatedProposal,
+    io.emit(SOCKET_EVENTS.proposalCreated, {
+      proposal: withTally(activatedProposal),
       totalCount: allProposals.length,
       activeCount: allProposals.filter(p => p.status === "active").length,
+      source: "manual",
     });
 
-    res.status(201).json({ proposal: activatedProposal });
+    res.status(201).json({ proposal: withTally(activatedProposal) });
   } catch (error) {
-    res.status(500).json({ error: "Failed to create proposal" });
+    console.error("Failed to create proposal:", error);
+    if (error instanceof SnapshotUnavailableError) {
+      // Not the caller's mistake: the chain is unreachable right now.
+      return res.status(503).json({ error: error.message, code: error.code });
+    }
+    // Rejected settings are a client mistake, not a server fault.
+    res.status(400).json({ error: sanitizeError(error, "Failed to create proposal") });
   }
 });
 
@@ -777,11 +1056,63 @@ app.get("/api/proposals/:id", (req, res) => {
     if (!proposal) {
       return res.status(404).json({ error: "Proposal not found" });
     }
-    res.json({ proposal });
+    res.json({ proposal: withTally(proposal) });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch proposal" });
   }
 });
+
+/**
+ * Where voting power comes from.
+ * - "snapshot" (default): balance at the proposal's snapshot block, so tokens
+ *   moved during the vote cannot be counted twice.
+ * - "current": live balance. Not sybil-resistant across wallets; only for
+ *   deployments whose RPC cannot serve historical state.
+ */
+const VOTE_WEIGHT_MODE = (process.env.VOTE_WEIGHT_MODE || "snapshot").toLowerCase();
+if (!["snapshot", "current"].includes(VOTE_WEIGHT_MODE)) {
+  console.error("❌ Refusing to start: VOTE_WEIGHT_MODE must be 'snapshot' or 'current'");
+  process.exit(1);
+}
+
+/**
+ * Voting weight for a MOC-verified voter, per VOTE_WEIGHT_MODE.
+ *
+ * In snapshot mode a proposal without a snapshot block is refused rather than
+ * weighted from the live balance. Falling back would silently return the
+ * system to the behaviour snapshots exist to prevent — vote, forward the
+ * tokens, vote again — and it would do so for exactly the proposals created
+ * while the chain was unreachable, with nothing in the response to say so.
+ */
+async function resolveVotingWeight(
+  voter: `0x${string}`,
+  proposal: { id: string; snapshotBlock?: number },
+): Promise<bigint> {
+  if (VOTE_WEIGHT_MODE === "current") {
+    const balance = await blockchainService.verifyVoterEligibility(voter);
+    if (balance === 0n) {
+      throw new Error(`Address ${voter} is not a MOC holder.`);
+    }
+    return balance;
+  }
+
+  if (proposal.snapshotBlock === undefined) {
+    throw new Error(
+      `Proposal ${proposal.id} has no balance snapshot, so voting power cannot ` +
+        "be established. It was created while the chain was unreachable; " +
+        "create a replacement proposal, or set VOTE_WEIGHT_MODE=current to " +
+        "accept live balances (not sybil-resistant across wallets).",
+    );
+  }
+
+  const balance = await blockchainService.getMocBalanceAt(voter, proposal.snapshotBlock);
+  if (balance === 0n) {
+    throw new Error(
+      `Address ${voter} held no MOC at block ${proposal.snapshotBlock}, the snapshot for this proposal.`,
+    );
+  }
+  return balance;
+}
 
 app.post("/api/proposals/:id/vote", async (req, res) => {
   try {
@@ -792,8 +1123,25 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
     if (!/^0x[0-9a-fA-F]{40}$/.test(voter)) {
       return res.status(400).json({ error: "voter must be a valid 0x address" });
     }
-    if (!["for", "against", "abstain"].includes(String(choice).toLowerCase())) {
-      return res.status(400).json({ error: "choice must be for, against, or abstain" });
+
+    // Canonicalize before anything else looks at these values. The duplicate
+    // check, the signed message, the stored vote and the tally must all agree
+    // on one spelling, or the same holder can vote twice under different
+    // casings and an upper-case choice can be accepted yet counted nowhere.
+    let canonicalVoter: `0x${string}`;
+    let canonicalChoice: "for" | "against" | "abstain";
+    try {
+      canonicalVoter = getAddress(voter);
+      canonicalChoice = VotingSystem.normalizeChoice(choice);
+    } catch (normalizeError: any) {
+      return res.status(400).json({
+        error: sanitizeError(normalizeError, "voter or choice is not valid"),
+      });
+    }
+
+    const proposalForVote = votingSystem.getProposal(req.params.id);
+    if (!proposalForVote) {
+      return res.status(404).json({ error: "Proposal not found" });
     }
 
     // Verify the voter actually authorized this vote (anti-spoofing).
@@ -801,9 +1149,9 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
     const sigRequired = isVoteSignatureRequired(blockchainService.isMocEnabled());
     if (sigRequired) {
       const sig = await verifyVoteSignature({
-        voter: voter as `0x${string}`,
+        voter: canonicalVoter,
         proposalId: req.params.id,
-        choice: String(choice),
+        choice: canonicalChoice,
         signature: signature as `0x${string}` | undefined,
         nonce: nonce as string | undefined,
         timestamp: typeof timestamp === "number" ? timestamp : Number(timestamp),
@@ -820,9 +1168,13 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
     let votingWeight: bigint;
     try {
       if (blockchainService.isMocEnabled()) {
-        // Use actual MOC balance as voting weight
-        votingWeight = await blockchainService.verifyVoterEligibility(voter as `0x${string}`);
-        console.log(`✅ Voter ${voter} verified: ${Number(votingWeight) / 1e18} MOC`);
+        votingWeight = await resolveVotingWeight(canonicalVoter, proposalForVote);
+        console.log(
+          `✅ Voter ${canonicalVoter} verified: ${Number(votingWeight) / 1e18} MOC` +
+            (proposalForVote.snapshotBlock !== undefined
+              ? ` @ block ${proposalForVote.snapshotBlock}`
+              : ""),
+        );
       } else {
         // Demo mode: MOC verification disabled, so weight is client-supplied.
         // Validate it is a positive integer within a sane bound so a caller
@@ -852,47 +1204,45 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
       });
     }
 
-    // Cast the vote with verified weight
+    // Cast the vote with the canonical identity, choice and verified weight
     const vote = votingSystem.castVote(
       req.params.id,
-      voter,
-      choice,
+      canonicalVoter,
+      canonicalChoice,
       votingWeight,
       reason
     );
 
-    // Try to record vote on-chain (non-blocking)
-    let txHash: string | undefined;
-    if (blockchainService.isEnabled()) {
-      const proposal = votingSystem.getProposal(req.params.id);
-      if (proposal?.onchainId) {
-        const voteChoice = parseVoteChoice(choice);
-        const txResult = await blockchainService.castVote(
-          proposal.onchainId,
-          voteChoice,
-          votingWeight
-        );
-        if (txResult.success) {
-          txHash = txResult.txHash;
-        }
-      }
+    // Persist immediately; the UNIQUE (proposal_id, voter_key) constraint is
+    // the last line of defence against a double vote.
+    try {
+      saveVoteWithProposal(
+        vote,
+        VotingSystem.voterKey(canonicalVoter),
+        votingSystem.getProposal(req.params.id)!,
+      );
+    } catch (persistError) {
+      // Keep memory and storage consistent rather than acknowledging a vote
+      // that would vanish on the next restart.
+      votingSystem.removeVote(req.params.id, canonicalVoter);
+      throw persistError;
     }
+
+    // No per-vote on-chain relay. The contract keys duplicate detection on
+    // msg.sender, and every relayed vote would share this server's single
+    // signer, so the relayer's first vote would make every later voter revert
+    // with "Already voted". Off-chain state is authoritative; see O-05.
+    const txHash: string | undefined = undefined;
 
     // Emit real-time event
     const tally = votingSystem.tallyVotes(req.params.id);
-    io.emit("proposals:voted", {
+    io.emit(SOCKET_EVENTS.proposalVoted, {
       proposalId: req.params.id,
       vote: {
         ...vote,
         weight: vote.weight.toString(),
       },
-      tally: {
-        forVotes: tally.forVotes.toString(),
-        againstVotes: tally.againstVotes.toString(),
-        abstainVotes: tally.abstainVotes.toString(),
-        totalVotes: tally.totalVotes.toString(),
-        participationRate: tally.participationRate,
-      },
+      tally: serializeTally(tally),
       txHash,
     });
 
@@ -932,6 +1282,7 @@ app.post("/api/proposals/:id/tally", (req, res) => {
 app.post("/api/proposals/:id/finalize", requireAdminKey, (req, res) => {
   try {
     const proposal = votingSystem.finalizeProposal(req.params.id);
+    saveProposal(proposal);
     res.json({ proposal });
   } catch (error: any) {
     res.status(400).json({ error: sanitizeError(error, "Failed to finalize proposal") });
@@ -985,70 +1336,202 @@ app.post("/api/proposals/:id/execute", requireAdminKey, async (req, res) => {
       });
     }
 
-    // Record the execution as an outcome
+    // Record the execution. No proof is produced here: a proof asserts that
+    // the proposal's KPIs were met, and nothing has been observed yet. It is
+    // issued only once measurements are submitted after the observation
+    // window, via POST /api/outcomes/:executionId/measurements.
     const execution = await outcomeTracker.recordExecution(proposalId, actions);
+    const measurement = outcomeTracker.measurementStatus(execution.id);
 
-    // Generate proof and update trust scores
-    const proof = await outcomeTracker.generateProof(execution.id);
+    saveExecutionOutcome({ proposal: executedProposal, execution });
 
-    // Update trust score for the proposer
-    trustManager.recordOutcome(proposal.proposer, "proposer", proof);
-
-    // Update trust score for agents involved in deliberation
-    if ((dp as any)?.agents) {
-      for (const agentId of Object.keys((dp as any).agents)) {
-        trustManager.recordOutcome(agentId, "agent", proof);
-      }
-    }
-
-    // Record outcome for agent learning feedback loop
-    // Find the decision by issue_id and update with outcome
-    const issueId = dp?.issue?.id;
-    if (issueId && proof) {
-      try {
-        const recorded = recordOutcomeByIssueId(
-          issueId,
-          proof.successRate,
-          proof.kpiResults
-        );
-        if (recorded) {
-          console.log(`📊 Recorded learning outcome for issue ${issueId}: ${(proof.successRate * 100).toFixed(0)}% success`);
-        }
-      } catch (err) {
-        console.warn("Could not record learning outcome:", err);
-      }
-    }
+    // The learning feedback loop is fed when the outcome is actually measured,
+    // not here — recording a result now would teach the agents from a number
+    // nobody observed.
 
     res.json({
-      proposal: executedProposal,
+      proposal: withTally(executedProposal),
       execution,
-      proof,
-      message: "Proposal executed successfully",
+      measurement: {
+        status: "pending_measurement",
+        dueAt: measurement.dueAt.toISOString(),
+        declaredKpis: dp?.kpis ?? [],
+        submitTo: `/api/outcomes/${execution.id}/measurements`,
+      },
+      message:
+        "Proposal executed. Submit measured KPI values after the observation " +
+        "window to produce an outcome proof.",
     });
   } catch (error: any) {
     res.status(400).json({ error: sanitizeError(error, "Failed to execute proposal") });
   }
 });
 
+const measurementsSchema = z
+  .object({
+    measurements: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1).max(200),
+            actual: z.number().finite(),
+            target: z.number().finite().optional(),
+            unit: z.string().max(50).optional(),
+            success: z.boolean().optional(),
+            source: z.string().max(500).optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50),
+  })
+  .strict();
+
+/**
+ * Submit observed KPI values for an execution and issue its outcome proof.
+ *
+ * This is the only path that produces a proof. Execution used to mint one
+ * immediately from two fabricated KPIs, so every proposal was recorded as a
+ * 100% success milliseconds after execution, before anything could have
+ * happened.
+ */
+app.post("/api/outcomes/:executionId/measurements", requireAdminKey, async (req, res) => {
+  try {
+    const parsed = measurementsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: "Invalid measurements",
+        details: parsed.error.issues.map((i) => ({
+          path: i.path.join("."),
+          message: i.message,
+        })),
+      });
+    }
+
+    const execution = outcomeTracker.getExecution(req.params.executionId);
+    if (!execution) {
+      return res.status(404).json({ error: "Execution not found" });
+    }
+
+    // Already measured: report the existing proof rather than issuing a
+    // second one. Re-running would re-apply the trust adjustment and could
+    // amend a recorded failure into a success.
+    const alreadyMeasured = outcomeTracker.getProofByExecution(execution.id);
+    if (alreadyMeasured) {
+      return res.status(409).json({
+        error:
+          `Execution ${execution.id} was already measured at ` +
+          `${alreadyMeasured.recordedAt.toISOString()}; outcomes are recorded once.`,
+        code: "ALREADY_MEASURED",
+        proof: alreadyMeasured,
+      });
+    }
+
+    const proposal = votingSystem.getProposal(execution.proposalId);
+    const declaredKpis = (proposal?.decisionPacket?.kpis ?? []).map((k) => ({
+      name: k.name,
+      target: k.target,
+      unit: k.unit,
+      direction: k.direction,
+    }));
+
+    const kpiResults = outcomeTracker.submitMeasurements(
+      execution.id,
+      declaredKpis,
+      parsed.data.measurements,
+    );
+    const proof = await outcomeTracker.generateProof(execution.id);
+
+    // Trust only moves on measured outcomes.
+    const dp = proposal?.decisionPacket;
+    const updatedTrust = proposal
+      ? [
+          trustManager.recordOutcome(proposal.proposer, "proposer", proof),
+          ...Array.from(
+            new Set((dp?.agentOpinions ?? []).map((op) => op.agentId)),
+          ).map((agentId) => trustManager.recordOutcome(agentId, "agent", proof)),
+        ]
+      : [];
+
+    if (proposal) {
+      saveExecutionOutcome({
+        proposal,
+        execution,
+        kpiResults,
+        proof,
+        trustScores: updatedTrust,
+      });
+    } else {
+      saveExecution(execution, kpiResults);
+      saveProof(proof);
+    }
+
+    // Now the learning loop has a real number to learn from.
+    const issueId = dp?.issue?.id;
+    if (issueId) {
+      try {
+        if (recordOutcomeByIssueId(issueId, proof.successRate, proof.kpiResults)) {
+          console.log(
+            `📊 Recorded learning outcome for issue ${issueId}: ` +
+              `${(proof.successRate * 100).toFixed(0)}% of KPIs met`,
+          );
+        }
+      } catch (err) {
+        console.warn("Could not record learning outcome:", err);
+      }
+    }
+
+    res.status(201).json({ proof, kpiResults });
+  } catch (error: any) {
+    console.error("Failed to record measurements:", error);
+    res.status(400).json({ error: sanitizeError(error, "Failed to record measurements") });
+  }
+});
+
+/** Whether an execution is still awaiting measurement. */
+app.get("/api/outcomes/:executionId/measurements", (req, res) => {
+  try {
+    const execution = outcomeTracker.getExecution(req.params.executionId);
+    if (!execution) {
+      return res.status(404).json({ error: "Execution not found" });
+    }
+    const status = outcomeTracker.measurementStatus(execution.id);
+    res.json({
+      executionId: status.executionId,
+      status: status.measured ? "measured" : "pending_measurement",
+      dueAt: status.dueAt.toISOString(),
+      measurable: Date.now() >= status.dueAt.getTime(),
+      proofId: status.proofId,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: sanitizeError(error, "Failed to read measurement status") });
+  }
+});
+
+/** Title for an outcome row, from the proposal it came from. */
+function outcomeTitle(proposalId: string): string {
+  const proposal = votingSystem.getProposal(proposalId);
+  return proposal
+    ? proposalTitle(proposal)
+    : `Proposal #${proposalId.slice(0, 8)}`;
+}
+
 // Outcome endpoints
 app.get("/api/outcomes", async (req, res) => {
   try {
     const proofs = outcomeTracker.listProofs();
-    const outcomes = proofs.map((proof) => {
-      const proposal = votingSystem.getProposal(proof.proposalId);
-      const dp = proposal?.decisionPacket;
-      const rec = dp?.recommendation;
-      const title = proposal?.decisionPacket?.issue?.title ||
-        (typeof rec?.action === "string" ? rec.action : (rec?.action as any)?.action) ||
-        `Proposal #${proof.proposalId.slice(0, 8)}`;
+    const measuredExecutions = new Set(proofs.map((p) => p.executionId));
 
+    const measured = proofs.map((proof) => {
+      const proposal = votingSystem.getProposal(proof.proposalId);
       return {
         id: proof.id,
         executionId: proof.executionId,
         proposalId: proof.proposalId,
-        proposalTitle: title,
-        status: "completed",
+        proposalTitle: outcomeTitle(proof.proposalId),
+        status: "measured" as const,
         overallSuccess: proof.overallSuccess,
+        /** Fraction of declared KPIs met, in [0,1]. */
         successRate: proof.successRate,
         kpis: proof.kpiResults.map((kpi) => ({
           name: kpi.kpiName,
@@ -1063,8 +1546,33 @@ app.get("/api/outcomes", async (req, res) => {
       };
     });
 
+    // Executions still inside their observation window are listed as pending
+    // rather than omitted, so an executed proposal with no measurable result
+    // yet is visible instead of looking like nothing happened.
+    const pending = outcomeTracker
+      .listExecutions()
+      .filter((execution) => !measuredExecutions.has(execution.id))
+      .map((execution) => {
+        const status = outcomeTracker.measurementStatus(execution.id);
+        return {
+          id: execution.id,
+          executionId: execution.id,
+          proposalId: execution.proposalId,
+          proposalTitle: outcomeTitle(execution.proposalId),
+          status: "pending_measurement" as const,
+          overallSuccess: null,
+          successRate: null,
+          kpis: [],
+          measurementDueAt: status.dueAt,
+          executedAt: execution.executedAt,
+          recordedAt: execution.executedAt,
+        };
+      });
+
+    const outcomes = [...measured, ...pending];
     res.json({ outcomes, count: outcomes.length });
   } catch (error) {
+    console.error("Failed to fetch outcomes:", error);
     res.status(500).json({ error: "Failed to fetch outcomes" });
   }
 });
@@ -1079,6 +1587,7 @@ app.post("/api/outcomes", requireAdminKey, async (req, res) => {
       return res.status(400).json({ error: "actions must be an array" });
     }
     const execution = await outcomeTracker.recordExecution(proposalId, actions);
+    saveExecution(execution);
     res.status(201).json({ execution });
   } catch (error) {
     res.status(500).json({ error: "Failed to record outcome" });
@@ -1097,12 +1606,35 @@ app.get("/api/outcomes/:executionId", async (req, res) => {
   }
 });
 
-app.get("/api/outcomes/:executionId/proof", async (req, res) => {
+/**
+ * Read the proof issued for an execution.
+ *
+ * Strictly a read. Generating the proof here would rewrite it: the hashed
+ * payload embeds the current time, so each call produced a different
+ * proofHash for the same measurements and persisted it over the stored row —
+ * an unauthenticated request could change an attestation the UI displays and
+ * the chain would anchor. Proofs are issued once, by
+ * POST /api/outcomes/:executionId/measurements.
+ */
+app.get("/api/outcomes/:executionId/proof", (req, res) => {
   try {
-    const proof = await outcomeTracker.generateProof(req.params.executionId);
+    const execution = outcomeTracker.getExecution(req.params.executionId);
+    if (!execution) {
+      return res.status(404).json({ error: "Execution not found" });
+    }
+    const proof = outcomeTracker.getProofByExecution(req.params.executionId);
+    if (!proof) {
+      const status = outcomeTracker.measurementStatus(req.params.executionId);
+      return res.status(409).json({
+        error:
+          "No outcome proof yet: this execution's KPIs have not been measured.",
+        code: "PENDING_MEASUREMENT",
+        measurementDueAt: status.dueAt.toISOString(),
+      });
+    }
     res.json({ proof });
   } catch (error: any) {
-    res.status(400).json({ error: sanitizeError(error, "Failed to generate proof") });
+    res.status(400).json({ error: sanitizeError(error, "Failed to read proof") });
   }
 });
 
@@ -1146,23 +1678,180 @@ app.get("/api/delegations", (req, res) => {
   }
 });
 
-app.post("/api/delegations", (req, res) => {
+/**
+ * Delegation conditions are evaluated against a proposal by path lookup, so
+ * the set of paths is fixed here rather than accepting arbitrary strings. An
+ * unknown path silently evaluates to undefined, which either never matches or
+ * — for an empty condition list — matches everything.
+ */
+const DELEGATION_CONDITION_FIELDS = {
+  "decisionPacket.issue.category": ["eq", "ne", "in", "contains"],
+  "decisionPacket.issue.priority": ["eq", "ne", "in"],
+  "decisionPacket.consensusScore": ["gt", "lt", "gte", "lte"],
+  "decisionPacket.recommendedProposalType": ["eq", "ne", "in"],
+  "proposer": ["eq", "ne", "in"],
+  "quorum": ["gt", "lt", "gte", "lte"],
+  "threshold": ["gt", "lt", "gte", "lte"],
+} as const;
+
+const delegationConditionSchema = z
+  .object({
+    field: z.enum(
+      Object.keys(DELEGATION_CONDITION_FIELDS) as [string, ...string[]],
+    ),
+    operator: z.enum(["eq", "ne", "gt", "lt", "gte", "lte", "in", "contains"]),
+    value: z.union([
+      z.string().max(200),
+      z.number(),
+      z.boolean(),
+      z.array(z.union([z.string().max(200), z.number()])).max(50),
+    ]),
+  })
+  .strict()
+  .superRefine((condition, ctx) => {
+    const allowed =
+      DELEGATION_CONDITION_FIELDS[
+        condition.field as keyof typeof DELEGATION_CONDITION_FIELDS
+      ];
+    if (!allowed.includes(condition.operator as never)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `operator '${condition.operator}' is not allowed for field '${condition.field}' (allowed: ${allowed.join(", ")})`,
+      });
+    }
+    if (condition.operator === "in" && !Array.isArray(condition.value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "operator 'in' requires an array value",
+      });
+    }
+    if (
+      ["gt", "lt", "gte", "lte"].includes(condition.operator) &&
+      typeof condition.value !== "number"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `operator '${condition.operator}' requires a numeric value`,
+      });
+    }
+    // Equality is by identity, so an array or object value can never match a
+    // scalar field: the policy would be accepted and then never fire. And an
+    // empty `contains` matches every string, which is a blanket delegation
+    // wearing a condition.
+    if (["eq", "ne"].includes(condition.operator) && Array.isArray(condition.value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `operator '${condition.operator}' compares by identity and can never match an array value`,
+      });
+    }
+    if (condition.operator === "contains") {
+      if (typeof condition.value !== "string") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "operator 'contains' requires a string value",
+        });
+      } else if (condition.value.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "operator 'contains' with an empty string matches every proposal; " +
+            "use delegateAll: true if that is the intent",
+        });
+      }
+    }
+  });
+
+const createDelegationSchema = z
+  .object({
+    delegator: z.string(),
+    delegate: z.string().min(1).max(200),
+    conditions: z.array(delegationConditionSchema).max(20).optional(),
+    /**
+     * Required to create a policy with no conditions. Without it an empty list
+     * quietly became a blanket delegation, because every([]) is true.
+     */
+    delegateAll: z.boolean().optional(),
+    expiresAt: z.string().datetime().optional(),
+    signature: z.string().optional(),
+    nonce: z.string().max(200).optional(),
+    timestamp: z.number().optional(),
+  })
+  .strict();
+
+app.post("/api/delegations", async (req, res) => {
   try {
-    const { delegator, delegate, conditions, expiresAt } = req.body;
-    if (!delegator || !delegate) {
-      return res.status(400).json({ error: "delegator and delegate are required" });
+    const parsed = createDelegationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: "Invalid delegation",
+        details: parsed.error.issues.map((i) => ({
+          path: i.path.join("."),
+          message: i.message,
+        })),
+      });
+    }
+    const { delegate, conditions, delegateAll, expiresAt, signature, nonce, timestamp } =
+      parsed.data;
+
+    let delegator: `0x${string}`;
+    try {
+      delegator = getAddress(parsed.data.delegator);
+    } catch {
+      return res.status(400).json({ error: "delegator must be a valid 0x address" });
+    }
+
+    const normalizedConditions = conditions ?? [];
+    if (normalizedConditions.length === 0 && delegateAll !== true) {
+      return res.status(400).json({
+        error:
+          "A delegation with no conditions applies to every proposal. Send " +
+          "delegateAll: true to confirm, or provide conditions.",
+        code: "UNCONDITIONAL_DELEGATION",
+      });
+    }
+
+    if (expiresAt && new Date(expiresAt).getTime() <= Date.now()) {
+      return res.status(400).json({ error: "expiresAt must be in the future" });
+    }
+
+    // Prove the delegator's wallet authorized handing over its influence.
+    if (isDelegationSignatureRequired()) {
+      const message = buildDelegationMessage({
+        action: "create",
+        delegator,
+        delegate,
+        conditions: canonicalJson(normalizedConditions),
+        expiresAt,
+        nonce: nonce || "",
+        timestamp: timestamp || 0,
+      });
+      const sig = await verifyDelegationSignature({
+        message,
+        delegator,
+        signature: signature as `0x${string}` | undefined,
+        nonce,
+        timestamp,
+      });
+      if (!sig.ok) {
+        return res.status(401).json({
+          error: sig.reason || "Delegation signature verification failed",
+          code: "INVALID_SIGNATURE",
+        });
+      }
     }
 
     const policy = delegationManager.createPolicy(
       delegator,
-      delegate,
-      conditions || [],
+      delegate.trim(),
+      normalizedConditions as any,
       expiresAt ? new Date(expiresAt) : undefined
     );
+    saveDelegation(policy);
 
     res.status(201).json({ policy });
   } catch (error) {
-    res.status(500).json({ error: "Failed to create delegation" });
+    console.error("Failed to create delegation:", error);
+    res.status(400).json({ error: sanitizeError(error, "Failed to create delegation") });
   }
 });
 
@@ -1206,16 +1895,57 @@ app.get("/api/delegations/:id", (req, res) => {
   }
 });
 
-app.delete("/api/delegations/:id", (req, res) => {
+app.delete("/api/delegations/:id", async (req, res) => {
   try {
     const policy = delegationManager.getPolicy(req.params.id);
     if (!policy) {
       return res.status(404).json({ error: "Delegation not found" });
     }
+
+    // Revocation is as sensitive as creation: without proof of ownership
+    // anyone could strip another holder's delegation.
+    if (isDelegationSignatureRequired()) {
+      const { signature, nonce, timestamp } = (req.body ?? {}) as {
+        signature?: string;
+        nonce?: string;
+        timestamp?: number;
+      };
+      let delegator: `0x${string}`;
+      try {
+        delegator = getAddress(policy.delegator);
+      } catch {
+        return res.status(409).json({
+          error: "This policy's delegator is not a valid address and cannot be verified",
+        });
+      }
+      const message = buildDelegationMessage({
+        action: "revoke",
+        delegator,
+        policyId: policy.id,
+        nonce: nonce || "",
+        timestamp: timestamp || 0,
+      });
+      const sig = await verifyDelegationSignature({
+        message,
+        delegator,
+        signature: signature as `0x${string}` | undefined,
+        nonce,
+        timestamp,
+      });
+      if (!sig.ok) {
+        return res.status(401).json({
+          error: sig.reason || "Delegation signature verification failed",
+          code: "INVALID_SIGNATURE",
+        });
+      }
+    }
+
     delegationManager.revokePolicy(req.params.id);
+    setDelegationActive(req.params.id, false);
     res.json({ message: "Delegation revoked", policy: { ...policy, active: false } });
   } catch (error) {
-    res.status(500).json({ error: "Failed to revoke delegation" });
+    console.error("Failed to revoke delegation:", error);
+    res.status(400).json({ error: sanitizeError(error, "Failed to revoke delegation") });
   }
 });
 
@@ -1346,6 +2076,9 @@ const OUTCOME_EVAL_INTERVAL = parseInt(process.env.OUTCOME_EVAL_INTERVAL || "180
 const OUTCOME_EVAL_AGE_HOURS = parseInt(process.env.OUTCOME_EVAL_AGE_HOURS || "6", 10);
 const OUTCOME_EVAL_BATCH = parseInt(process.env.OUTCOME_EVAL_BATCH || "20", 10);
 
+// How often to close out proposals whose voting period has ended (0 disables).
+const AUTO_FINALIZE_INTERVAL = envInt("AUTO_FINALIZE_INTERVAL", 60);
+
 const AUTO_PROPOSAL_ENABLED = process.env.AUTO_PROPOSAL_ENABLED !== "0";
 const AUTO_PROPOSAL_THRESHOLD = parseFloat(process.env.AUTO_PROPOSAL_THRESHOLD || "0.7");
 const AUTO_PROPOSAL_PROPOSER = process.env.AUTO_PROPOSAL_PROPOSER || "auto-system";
@@ -1384,7 +2117,12 @@ async function detectAndSaveIssues() {
   let savedCount = 0;
   const savedIssues = [];
   for (const issue of detectedIssues) {
-    const existing = issueDb.findSimilar.get(issue.category);
+    const existing = issueDb.findSimilar.get({
+        category: issue.category,
+        kind: issue.kind ?? "issue",
+        direction: issue.direction ?? "",
+        window: ISSUE_DEDUPE_WINDOW,
+      });
     if (!existing) {
       issueDb.insert.run(serializeIssue(issue));
       savedIssues.push(issue);
@@ -1446,27 +2184,33 @@ async function detectAndSaveIssues() {
             !proposalDb.existsByIssueId.get(issue.id)
           ) {
             try {
-              const proposal = votingSystem.createProposal(decisionPacket, AUTO_PROPOSAL_PROPOSER);
+              // Pin the snapshot first: if the chain is unreachable this
+              // throws and the issue stays un-promoted, to be retried on the
+              // next detection pass, rather than becoming a proposal nobody
+              // can vote on.
+              const snapshotBlock = await currentSnapshotBlock();
+              const proposal = votingSystem.createProposal(
+                decisionPacket,
+                AUTO_PROPOSAL_PROPOSER,
+                { snapshotBlock },
+              );
               votingSystem.activateProposal(proposal.id);
-              const activated = votingSystem.getProposal(proposal.id);
-              proposalDb.insert.run({
-                id: proposal.id,
-                title: issue.title || `Proposal for ${issue.category}`,
-                description:
-                  decisionPacket.recommendation?.action ||
-                  decisionPacket.recommendation?.rationale ||
-                  issue.description ||
-                  "Auto-generated proposal",
-                proposer: AUTO_PROPOSAL_PROPOSER,
-                status: activated?.status || "active",
-                votingStarts: (activated?.votingStartsAt ?? proposal.votingStartsAt).toISOString(),
-                votingEnds: (activated?.votingEndsAt ?? proposal.votingEndsAt).toISOString(),
-                issueId: issue.id,
-                decisionPacket: JSON.stringify(decisionPacket),
-              });
+              const activated = votingSystem.getProposal(proposal.id)!;
+              // Same write path as a manual proposal, so an auto-promoted one
+              // is restored on the next boot instead of leaving a row that
+              // only blocks the issue from being proposed again.
+              try {
+                saveProposal(activated, issue.id);
+              } catch (persistError) {
+                votingSystem.removeProposal(activated.id);
+                throw persistError;
+              }
               promotedCount++;
-              io.emit("proposals:created", {
-                proposal: activated,
+              const all = votingSystem.listProposals();
+              io.emit(SOCKET_EVENTS.proposalCreated, {
+                proposal: withTally(activated),
+                totalCount: all.length,
+                activeCount: all.filter((p) => p.status === "active").length,
                 source: "auto-promotion",
               });
             } catch (promoteError) {
@@ -1532,6 +2276,103 @@ async function evaluatePendingOutcomes() {
   return { pending: pending.length, evaluated };
 }
 
+/**
+ * Close out proposals whose voting period has ended.
+ *
+ * Nothing finalized a proposal before: the web declared a finalize mutation it
+ * never called, and there was no scheduler, so a proposal created from the UI
+ * stayed "active" forever and could never reach the execute step. Idempotent —
+ * it only touches active proposals that are actually past their end time.
+ */
+function finalizeDueProposals(): { finalized: number; failed: number } {
+  const nowMs = Date.now();
+  let finalized = 0;
+  let failed = 0;
+
+  for (const proposal of votingSystem.listProposals("active")) {
+    if (proposal.votingEndsAt.getTime() > nowMs) continue;
+    try {
+      const updated = votingSystem.finalizeProposal(proposal.id);
+      saveProposal(updated);
+      finalized++;
+
+      const all = votingSystem.listProposals();
+      io.emit(SOCKET_EVENTS.proposalFinalized, {
+        proposalId: updated.id,
+        status: updated.status,
+        tally: serializeTally(votingSystem.tallyVotes(updated.id)),
+        executionEta: updated.executionEta?.toISOString(),
+        totalCount: all.length,
+        activeCount: all.filter((p) => p.status === "active").length,
+      });
+      console.log(`🗳️  Finalized proposal ${proposal.id}: ${updated.status}`);
+    } catch (error) {
+      failed++;
+      console.error(`[auto-finalize] failed for proposal ${proposal.id}:`, error);
+    }
+  }
+
+  return { finalized, failed };
+}
+
+/**
+ * Snapshot voting reads a balance at the block a proposal pinned, which needs
+ * an archive-capable RPC. Most public endpoints keep only ~128 blocks of
+ * state, so the reads succeed for roughly 25 minutes after a proposal is
+ * created and fail for every voter after that — a failure that shows up long
+ * after the misconfiguration, on the voter's request. Probe once at boot and
+ * say so plainly instead.
+ */
+async function checkArchiveRpc(): Promise<void> {
+  if (!blockchainService.isMocEnabled() || VOTE_WEIGHT_MODE !== "snapshot") return;
+
+  const probeDepth = envInt("SNAPSHOT_PROBE_DEPTH", 1000);
+  try {
+    const head = await blockchainService.getCurrentBlockNumber();
+    const target = Math.max(1, head - probeDepth);
+    await blockchainService.getMocBalanceAt(
+      "0x0000000000000000000000000000000000000001",
+      target,
+    );
+    console.log(`🗄️  Archive RPC: ok (read state at block ${target})`);
+  } catch {
+    console.warn(
+      "🚨 Archive RPC: this endpoint cannot serve historical state " +
+        `(${probeDepth} blocks back).\n` +
+        "   Snapshot voting will start failing for every voter roughly\n" +
+        "   half an hour after a proposal is created. Point MAINNET_RPC_URL at\n" +
+        "   an archive-capable provider, or set VOTE_WEIGHT_MODE=current to\n" +
+        "   accept live balances (not sybil-resistant across wallets).",
+    );
+  }
+}
+
+// Rebuild governance state from storage BEFORE accepting traffic. Serving
+// requests first would briefly report zero proposals and let a holder vote
+// again on a proposal they had already voted on.
+const hydration = hydrate({
+  votingSystem,
+  delegationManager,
+  outcomeTracker,
+  trustManager,
+});
+console.log(
+  `♻️  Restored governance state: ${hydration.proposals} proposals, ` +
+    `${hydration.votes} votes, ${hydration.delegations} delegations, ` +
+    `${hydration.executions} executions, ${hydration.proofs} proofs, ` +
+    `${hydration.trustScores} trust scores`,
+);
+if (hydration.skipped.length > 0) {
+  console.warn(`⚠️  ${hydration.skipped.length} record(s) could not be restored:`);
+  for (const reason of hydration.skipped.slice(0, 10)) {
+    console.warn(`     - ${reason}`);
+  }
+}
+
+// Non-blocking: report an RPC that cannot serve snapshots rather than letting
+// it surface later as a voter-facing failure.
+void checkArchiveRpc();
+
 // Start server
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
@@ -1585,7 +2426,19 @@ httpServer.listen(PORT, () => {
   const signalCount = signalDb.count.get() as { count: number };
   const issueCount = issueDb.count.get() as { count: number };
   console.log(`📊 Database: ${signalCount.count} signals, ${issueCount.count} issues stored`);
-  console.log(`🔐 Admin auth: ${isAdminAuthEnabled() ? "enabled (ADMIN_API_KEY set)" : "DISABLED — set ADMIN_API_KEY to lock admin endpoints"}`);
+  if (adminAuthMode === "enforced") {
+    console.log("🔐 Admin auth: enforced (ADMIN_API_KEY set)");
+  } else if (adminAuthMode === "demo-open") {
+    console.warn(
+      "🚨 Admin auth: DISABLED via DEMO_MODE=1 — every admin endpoint is\n" +
+        "   anonymous. Never expose this process to an untrusted network.",
+    );
+  } else {
+    console.log(
+      "🔐 Admin auth: admin endpoints are BLOCKED (503) — set ADMIN_API_KEY to\n" +
+        "   enable them, or DEMO_MODE=1 for an anonymous local demo.",
+    );
+  }
 
   // Auto signal collection
   if (SIGNAL_COLLECT_INTERVAL > 0) {
@@ -1662,6 +2515,25 @@ httpServer.listen(PORT, () => {
     }, OUTCOME_EVAL_INTERVAL * 1000);
   } else {
     console.log(`📈 Outcome evaluation: DISABLED`);
+  }
+
+  // Close out proposals whose voting period ended, including any that expired
+  // while the process was down.
+  if (AUTO_FINALIZE_INTERVAL > 0) {
+    console.log(`🗳️  Auto finalize: every ${AUTO_FINALIZE_INTERVAL}s`);
+    const due = finalizeDueProposals();
+    if (due.finalized > 0) {
+      console.log(`   ✅ Finalized ${due.finalized} proposal(s) whose voting had ended`);
+    }
+    setInterval(() => {
+      try {
+        finalizeDueProposals();
+      } catch (error) {
+        console.error("❌ Auto finalize failed:", error);
+      }
+    }, AUTO_FINALIZE_INTERVAL * 1000);
+  } else {
+    console.log(`🗳️  Auto finalize: DISABLED`);
   }
 });
 

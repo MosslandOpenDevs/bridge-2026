@@ -2,7 +2,7 @@
 -- Inference Mining에서 추출된 이슈를 저장합니다.
 
 CREATE TABLE IF NOT EXISTS issues (
-    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     title TEXT NOT NULL,
     description TEXT NOT NULL,
     priority VARCHAR(20) NOT NULL CHECK (priority IN ('low', 'medium', 'high', 'critical')),
@@ -26,7 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_evidence_gin ON issues USING GIN(evidence)
 -- 그룹화된 이슈들을 저장합니다.
 
 CREATE TABLE IF NOT EXISTS issue_groups (
-    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     title TEXT NOT NULL,
     issue_ids UUID[] NOT NULL,
     priority_score FLOAT NOT NULL,

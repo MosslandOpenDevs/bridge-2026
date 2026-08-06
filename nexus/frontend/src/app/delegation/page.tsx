@@ -4,10 +4,12 @@ import { ConnectButton } from '@rainbow-me/rainbowkit';
 import Link from 'next/link';
 import { DelegationPolicyCard } from '@/components/delegation-policy-card';
 import { DelegationPolicyForm } from '@/components/delegation-policy-form';
+import { DemoModeBanner } from '@/components/demo-mode-banner';
 import { useState, useEffect } from 'react';
 import type { DelegationPolicy } from '@bridge-2026/shared';
 import { useAccount } from 'wagmi';
-import { api } from '@/lib/api';
+import { api, isAbortError } from '@/lib/api';
+import { DEMO_MODE, getDemoDelegationPolicies } from '@/lib/demo-data';
 
 export default function DelegationPage() {
   const { address, isConnected } = useAccount();
@@ -15,47 +17,52 @@ export default function DelegationPage() {
     Array<DelegationPolicy & { id: string; createdAt: number }>
   >([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
 
   useEffect(() => {
     if (!isConnected || !address) {
+      setPolicies([]);
+      setError(null);
       setLoading(false);
       return;
     }
 
-    // API 호출
-    api.getDelegationPolicies(address)
-      .then(setPolicies)
-      .catch(error => {
-        console.error('Error fetching delegation policies:', error);
-        // 에러 시 빈 배열
-        setPolicies([]);
-      })
-      .finally(() => setLoading(false));
-    
-    // 임시 데이터 (API 실패 시 fallback)
-    const mockPolicies: Array<DelegationPolicy & { id: string; createdAt: number }> = [
-      {
-        id: 'policy-1',
-        wallet: address,
-        agent_id: 'treasury',
-        scope: {
-          categories: ['treasury', 'governance'],
-        },
-        max_budget_per_month: 10000,
-        max_budget_per_proposal: 1000,
-        no_vote_on_emergency: true,
-        cooldown_window_hours: 24,
-        veto_enabled: true,
-        createdAt: Date.now() - 7 * 24 * 60 * 60 * 1000,
-      },
-    ];
-    
-    setTimeout(() => {
-      setPolicies(mockPolicies);
+    // 데모 모드에서는 백엔드를 호출하지 않습니다. 데모 데이터는 API 실패의
+    // 대체물이 아니므로, 실패는 아래 catch에서 실패로 드러나야 합니다.
+    if (DEMO_MODE) {
+      setPolicies(getDemoDelegationPolicies(address));
+      setError(null);
       setLoading(false);
-    }, 500);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    setLoading(true);
+    setError(null);
+
+    api.getDelegationPolicies(address, { signal: controller.signal })
+      .then(result => {
+        setPolicies(result);
+        setError(null);
+      })
+      .catch(err => {
+        if (isAbortError(err)) return;
+        console.error('Error fetching delegation policies:', err);
+        setPolicies([]);
+        setError('위임 정책을 불러오지 못했습니다.');
+      })
+      .finally(() => {
+        // The abort already discarded the result; leaving `loading` alone keeps
+        // the spinner up for the newer request that replaced this one.
+        if (controller.signal.aborted) return;
+        setLoading(false);
+      });
+
+    return () => controller.abort();
   }, [address, isConnected]);
+
 
   const handleDelete = async (policyId: string) => {
     try {
@@ -91,6 +98,8 @@ export default function DelegationPage() {
             <ConnectButton />
           </div>
         </header>
+
+        {DEMO_MODE && <DemoModeBanner />}
 
         {!isConnected ? (
           <div className="bg-white rounded-lg shadow-md p-12 text-center">
@@ -136,6 +145,15 @@ export default function DelegationPage() {
             {loading ? (
               <div className="text-center py-12">
                 <p className="text-gray-600">로딩 중...</p>
+              </div>
+            ) : error ? (
+              // 조회 실패를 "정책 없음"으로 보여주면 사용자가 이미 만들어 둔
+              // 위임 정책을 지워졌다고 오해할 수 있습니다.
+              <div className="bg-white rounded-lg shadow-md p-12 text-center border border-red-200">
+                <p className="text-red-700 mb-4">{error}</p>
+                <p className="text-sm text-gray-500">
+                  백엔드 API 연결을 확인한 뒤 다시 시도해주세요.
+                </p>
               </div>
             ) : policies.length === 0 ? (
               <div className="bg-white rounded-lg shadow-md p-12 text-center">

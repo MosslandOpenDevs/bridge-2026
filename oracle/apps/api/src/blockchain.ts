@@ -64,13 +64,26 @@ const ORACLE_GOVERNANCE_ABI = [
     outputs: [{ type: "uint256" }],
   },
   {
-    name: "castVote",
+    name: "castVoteFor",
     type: "function",
     stateMutability: "nonpayable",
     inputs: [
       { name: "proposalId", type: "uint256" },
+      { name: "voter", type: "address" },
       { name: "choice", type: "uint8" },
       { name: "weight", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    name: "castVotesFor",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "proposalId", type: "uint256" },
+      { name: "voters", type: "address[]" },
+      { name: "choices", type: "uint8[]" },
+      { name: "weights", type: "uint256[]" },
     ],
     outputs: [],
   },
@@ -348,6 +361,51 @@ export class BlockchainService {
   }
 
   /**
+   * Current mainnet block height, used to pin a proposal's voting snapshot.
+   */
+  async getCurrentBlockNumber(): Promise<number> {
+    if (!this.mocEnabled || !this.mainnetClient) {
+      throw new Error("MOC token service not enabled");
+    }
+    const block = await this.mainnetClient.getBlockNumber();
+    return Number(block);
+  }
+
+  /**
+   * MOC balance as of a specific block.
+   *
+   * Voting power must come from a fixed point in the past: reading the balance
+   * at vote time lets one holder vote, forward the tokens to another wallet,
+   * and vote again with the same coins.
+   *
+   * Historical state requires an archive-capable RPC. Failures are propagated
+   * rather than falling back to the live balance — a silently "current"
+   * weight is exactly the bug this exists to prevent.
+   */
+  async getMocBalanceAt(address: Address, blockNumber: number): Promise<bigint> {
+    if (!this.mocEnabled || !this.mainnetClient) {
+      throw new Error("MOC token service not enabled");
+    }
+
+    try {
+      return await this.mainnetClient.readContract({
+        address: MOC_TOKEN_ADDRESS,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [address],
+        blockNumber: BigInt(blockNumber),
+      });
+    } catch (error: any) {
+      throw new Error(
+        `Could not read the MOC balance of ${address} at block ${blockNumber}: ` +
+          `${error?.shortMessage || error?.message || "unknown error"}. ` +
+          "Snapshot voting needs an archive-capable RPC (set MAINNET_RPC_URL), " +
+          "or set VOTE_WEIGHT_MODE=current to accept live balances.",
+      );
+    }
+  }
+
+  /**
    * Get MOC token balance formatted (human-readable)
    */
   async getMocBalanceFormatted(address: Address): Promise<string> {
@@ -454,10 +512,16 @@ export class BlockchainService {
   }
 
   /**
-   * Cast a vote on-chain
+   * Mirror one holder's vote on-chain.
+   *
+   * The voter is passed explicitly: the contract keys duplicate detection on
+   * that address, not on the relaying account. Every relayed vote is sent by
+   * this service's single signer, so keying it on the sender let only the
+   * first vote through and reverted the rest with "Already voted".
    */
-  async castVote(
+  async castVoteFor(
     proposalId: number,
+    voter: Address,
     choice: VoteChoice,
     weight: bigint
   ): Promise<TxResult> {
@@ -470,8 +534,8 @@ export class BlockchainService {
       const { request } = await this.publicClient.simulateContract({
         address: this.contractAddress,
         abi: ORACLE_GOVERNANCE_ABI,
-        functionName: "castVote",
-        args: [BigInt(proposalId), choice, weight],
+        functionName: "castVoteFor",
+        args: [BigInt(proposalId), voter, choice, weight],
         account: this.account,
       });
 
@@ -560,6 +624,11 @@ export class BlockchainService {
   /**
    * Record outcome proof on-chain
    */
+  /**
+   * @param successRate Fraction of KPIs met, in [0,1]. The contract stores an
+   * integer percentage, so it is converted once, here — the only place the
+   * unit changes.
+   */
   async recordOutcome(
     proposalId: number,
     proofHash: `0x${string}`,
@@ -575,7 +644,12 @@ export class BlockchainService {
         address: this.contractAddress,
         abi: ORACLE_GOVERNANCE_ABI,
         functionName: "recordOutcome",
-        args: [BigInt(proposalId), proofHash, BigInt(Math.round(successRate * 100)), overallSuccess],
+        args: [
+          BigInt(proposalId),
+          proofHash,
+          BigInt(Math.round(Math.min(1, Math.max(0, successRate)) * 100)),
+          overallSuccess,
+        ],
         account: this.account,
       });
 

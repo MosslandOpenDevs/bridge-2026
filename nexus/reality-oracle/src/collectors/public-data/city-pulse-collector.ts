@@ -6,7 +6,7 @@
  */
 
 import { BaseCollector } from '../base-collector';
-import type { Signal, SignalSource } from '../../../../shared/types';
+import type { Signal, SignalSource } from '@bridge-2026/shared';
 
 /**
  * 도시 데이터 소스 타입

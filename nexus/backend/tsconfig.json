@@ -16,18 +16,7 @@
     "noImplicitAny": false,
     "strictBindCallApply": false,
     "forceConsistentCasingInFileNames": false,
-    "noFallthroughCasesInSwitch": false,
-    "paths": {
-      "@bridge-2026/shared": ["../shared"]
-    }
-  }
+    "noFallthroughCasesInSwitch": false
+  },
+  "include": ["src/**/*"]
 }
-
-
-
-
-
-
-
-
-

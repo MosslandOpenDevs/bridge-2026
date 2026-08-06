@@ -10,10 +10,52 @@ import {
 } from "@oracle/core";
 
 export interface OutcomeTrackerConfig {
-  kpiMeasurementDelay?: number; // ms to wait before measuring KPIs
+  /**
+   * Observation window: how long after execution KPIs may be measured. A
+   * proof produced before this has elapsed describes nothing that happened.
+   */
+  kpiMeasurementDelay?: number;
+}
+
+/** A measured KPI value supplied by whoever observed the real metric. */
+export interface KPIMeasurement {
+  /** Must match a KPI name declared on the proposal's decision packet. */
+  name: string;
+  actual: number;
+  /** Optional override; defaults to the declared target. */
+  target?: number;
+  unit?: string;
+  /**
+   * Whether the measurement met the goal. Normally left unset and derived from
+   * the KPI's declared direction; set it only when the caller genuinely knows
+   * better than the declaration.
+   */
+  success?: boolean;
+  source?: string;
+}
+
+/** Which side of its target a KPI has to land on. */
+export type KPIDirection = "at_most" | "at_least";
+
+export interface DeclaredKPI {
+  name: string;
+  target: number;
+  unit: string;
+  direction?: KPIDirection;
+}
+
+export interface MeasurementStatus {
+  executionId: string;
+  /** Earliest time measurements may be accepted. */
+  dueAt: Date;
+  measured: boolean;
+  proofId?: string;
 }
 
 export class OutcomeTrackerImpl implements OutcomeTracker {
+  /** Fraction of KPIs that must pass for an outcome to count as a success. */
+  static readonly SUCCESS_THRESHOLD = 0.8;
+
   private executions: Map<string, ExecutionRecord> = new Map();
   private kpiResults: Map<string, KPIResult[]> = new Map();
   private proofs: Map<string, OutcomeProof> = new Map();
@@ -21,9 +63,13 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
   private config: OutcomeTrackerConfig;
 
   constructor(config: OutcomeTrackerConfig = {}) {
-    this.config = {
-      kpiMeasurementDelay: config.kpiMeasurementDelay || 24 * 60 * 60 * 1000, // 24 hours
-    };
+    // `??` not `||`: an explicit 0 (measure immediately, used by tests) must
+    // survive rather than being replaced by the 24-hour default.
+    const delay = config.kpiMeasurementDelay ?? 24 * 60 * 60 * 1000;
+    if (!Number.isInteger(delay) || delay < 0) {
+      throw new Error("kpiMeasurementDelay must be a non-negative integer");
+    }
+    this.config = { kpiMeasurementDelay: delay };
   }
 
   // Store decision packet for reference
@@ -63,72 +109,169 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
     return record;
   }
 
-  async measureKPIs(executionId: string): Promise<KPIResult[]> {
+  /** When measurements for this execution become acceptable. */
+  measurementDueAt(executionId: string): Date {
+    const execution = this.executions.get(executionId);
+    if (!execution) {
+      throw new Error(`Execution ${executionId} not found`);
+    }
+    return new Date(
+      execution.executedAt.getTime() + this.config.kpiMeasurementDelay!,
+    );
+  }
+
+  measurementStatus(executionId: string): MeasurementStatus {
+    const results = this.kpiResults.get(executionId);
+    const proof = this.getProofByExecution(executionId);
+    return {
+      executionId,
+      dueAt: this.measurementDueAt(executionId),
+      measured: Boolean(results && results.length > 0),
+      proofId: proof?.id,
+    };
+  }
+
+  /**
+   * Record observed KPI values against the KPIs the proposal committed to.
+   *
+   * Measurements are only accepted once the observation window has elapsed:
+   * a value read at the instant of execution says nothing about the outcome.
+   */
+  submitMeasurements(
+    executionId: string,
+    declaredKpis: DeclaredKPI[],
+    measurements: KPIMeasurement[],
+    options: { at?: Date } = {},
+  ): KPIResult[] {
     const execution = this.executions.get(executionId);
     if (!execution) {
       throw new Error(`Execution ${executionId} not found`);
     }
 
-    // Find the associated decision packet to get KPI definitions
-    // In a real implementation, this would query actual metrics
+    // Measurements are recorded once. Allowing a resubmission would let a
+    // recorded failure be amended into a success after trust scores had
+    // already moved on the first result.
+    const existing = this.kpiResults.get(executionId);
+    if (existing && existing.length > 0) {
+      throw new Error(
+        `Execution ${executionId} has already been measured at ` +
+          `${existing[0].measuredAt.toISOString()}; outcomes are recorded once.`,
+      );
+    }
+
+    const at = options.at ?? now();
+    const dueAt = this.measurementDueAt(executionId);
+    if (at < dueAt) {
+      const remainingMs = dueAt.getTime() - at.getTime();
+      throw new Error(
+        `KPIs for execution ${executionId} cannot be measured before ` +
+          `${dueAt.toISOString()} (${Math.ceil(remainingMs / 1000)}s remaining)`,
+      );
+    }
+
+    if (measurements.length === 0) {
+      throw new Error("At least one measurement is required");
+    }
+
+    const declaredByName = new Map(declaredKpis.map((k) => [k.name, k]));
+
+    // Every KPI the proposal committed to must be reported. Scoring only the
+    // subset a submitter chose to send would let them drop the ones they
+    // missed and reach 100%.
+    const submitted = new Set(measurements.map((m) => m.name));
+    const unreported = declaredKpis.filter((k) => !submitted.has(k.name));
+    if (unreported.length > 0) {
+      throw new Error(
+        "Every declared KPI must be measured. Missing: " +
+          unreported.map((k) => `"${k.name}"`).join(", "),
+      );
+    }
+
+    const seen = new Set<string>();
     const results: KPIResult[] = [];
 
-    // Simulated KPI measurement - in production, this would connect to actual data sources
-    const sampleKPIs = [
-      {
-        name: "Resolution Time",
-        target: 24,
-        actual: this.measureResolutionTime(execution),
-        unit: "hours",
-      },
-      {
-        name: "Issue Recurrence",
-        target: 0,
-        actual: 0, // Would check for similar issues
-        unit: "occurrences",
-      },
-    ];
+    for (const measurement of measurements) {
+      if (seen.has(measurement.name)) {
+        throw new Error(`KPI "${measurement.name}" was submitted more than once`);
+      }
+      seen.add(measurement.name);
 
-    for (const kpi of sampleKPIs) {
+      const declared = declaredByName.get(measurement.name);
+      const target = measurement.target ?? declared?.target;
+      if (target === undefined) {
+        throw new Error(
+          `KPI "${measurement.name}" is not declared on this proposal and no ` +
+            "target was supplied",
+        );
+      }
+      if (!Number.isFinite(measurement.actual)) {
+        throw new Error(`KPI "${measurement.name}" needs a numeric actual value`);
+      }
+
+      // Direction comes from the declaration, so a metric to maximize is not
+      // scored by the rule for one to minimize.
+      const direction: KPIDirection = declared?.direction ?? "at_most";
+      const met =
+        direction === "at_least"
+          ? measurement.actual >= target
+          : measurement.actual <= target;
+
       const deviation =
-        kpi.target !== 0
-          ? ((kpi.actual - kpi.target) / kpi.target) * 100
-          : kpi.actual === 0
+        target !== 0
+          ? ((measurement.actual - target) / target) * 100
+          : measurement.actual === 0
             ? 0
             : 100;
 
-      const result: KPIResult = {
+      results.push({
         id: generateId(),
         executionId,
-        kpiName: kpi.name,
-        targetValue: kpi.target,
-        actualValue: kpi.actual,
-        unit: kpi.unit,
-        measuredAt: now(),
-        success: kpi.actual <= kpi.target,
+        kpiName: measurement.name,
+        targetValue: target,
+        actualValue: measurement.actual,
+        unit: measurement.unit ?? declared?.unit ?? "",
+        measuredAt: at,
+        success: measurement.success ?? met,
         deviation,
-      };
-
-      results.push(result);
+      });
     }
 
     this.kpiResults.set(executionId, results);
     return results;
   }
 
+  /**
+   * Previously fabricated two KPIs — a resolution time computed as the
+   * milliseconds since execution (always ~0 hours, so always "on target")
+   * and a recurrence count hardcoded to 0 — which is how every execution
+   * produced a 100% proof milliseconds after it was recorded. Measurements
+   * must now be supplied by whoever observed the real metric.
+   */
+  async measureKPIs(executionId: string): Promise<KPIResult[]> {
+    const results = this.kpiResults.get(executionId);
+    if (!results || results.length === 0) {
+      throw new Error(
+        `No KPI measurements recorded for execution ${executionId}. Submit ` +
+          "observed values once the measurement window has elapsed.",
+      );
+    }
+    return results;
+  }
+
+  /**
+   * Build the outcome proof. Requires real measurements; successRate is a
+   * fraction in [0,1], the same unit used everywhere else.
+   */
   async generateProof(executionId: string): Promise<OutcomeProof> {
     const execution = this.executions.get(executionId);
     if (!execution) {
       throw new Error(`Execution ${executionId} not found`);
     }
 
-    let results = this.kpiResults.get(executionId);
-    if (!results) {
-      results = await this.measureKPIs(executionId);
-    }
+    const results = await this.measureKPIs(executionId);
 
     const successfulKPIs = results.filter((r) => r.success).length;
-    const successRate = results.length > 0 ? (successfulKPIs / results.length) * 100 : 0;
+    const successRate = results.length > 0 ? successfulKPIs / results.length : 0;
 
     const proofData = {
       executionId,
@@ -142,12 +285,13 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
       timestamp: now().toISOString(),
     };
 
+    const existing = this.getProofByExecution(executionId);
     const proof: OutcomeProof = {
-      id: generateId(),
+      id: existing?.id ?? generateId(),
       executionId,
       proposalId: execution.proposalId,
       kpiResults: results,
-      overallSuccess: successRate >= 80, // 80% KPIs must pass
+      overallSuccess: successRate >= OutcomeTrackerImpl.SUCCESS_THRESHOLD,
       successRate,
       proofHash: hashData(proofData),
       recordedAt: now(),
@@ -155,6 +299,21 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
 
     this.proofs.set(proof.id, proof);
     return proof;
+  }
+
+  /** Load persisted execution/KPI/proof state at boot. */
+  restoreExecution(record: ExecutionRecord, kpiResults?: KPIResult[]): void {
+    this.executions.set(record.id, record);
+    if (kpiResults && kpiResults.length > 0) {
+      this.kpiResults.set(record.id, kpiResults);
+    }
+  }
+
+  restoreProof(proof: OutcomeProof): void {
+    this.proofs.set(proof.id, proof);
+    if (proof.kpiResults.length > 0 && !this.kpiResults.has(proof.executionId)) {
+      this.kpiResults.set(proof.executionId, proof.kpiResults);
+    }
   }
 
   getExecution(executionId: string): ExecutionRecord | undefined {
@@ -175,11 +334,8 @@ export class OutcomeTrackerImpl implements OutcomeTracker {
     return Array.from(this.proofs.values());
   }
 
-  private measureResolutionTime(execution: ExecutionRecord): number {
-    // Calculate hours from execution start
-    // In production, this would compare to proposal creation time
-    return Math.round(
-      (now().getTime() - execution.executedAt.getTime()) / (1000 * 60 * 60)
-    );
+  listExecutions(): ExecutionRecord[] {
+    return Array.from(this.executions.values());
   }
+
 }

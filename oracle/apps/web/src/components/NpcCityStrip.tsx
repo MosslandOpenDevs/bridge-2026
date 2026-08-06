@@ -79,7 +79,6 @@ export async function NpcCityStrip() {
                   className="group flex h-full gap-2.5 rounded-xl border border-zinc-500/15 bg-zinc-500/[0.04] p-2.5 transition hover:border-zinc-500/40"
                 >
                   {h.npc.portrait_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
                     <img
                       src={`${NPC_BASE}${h.npc.portrait_url}`}
                       alt={h.npc.name}

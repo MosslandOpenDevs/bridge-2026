@@ -4,7 +4,7 @@
  * 모든 에이전트의 기본 클래스입니다.
  */
 
-import type { AgentType, AgentReasoning, Issue } from '../../../shared/types';
+import type { AgentType, AgentReasoning, Issue } from '@bridge-2026/shared';
 
 /**
  * 에이전트 인터페이스

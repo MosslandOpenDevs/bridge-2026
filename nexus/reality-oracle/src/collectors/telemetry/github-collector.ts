@@ -6,7 +6,7 @@
  */
 
 import { BaseCollector } from '../base-collector';
-import type { Signal, SignalSource } from '../../../../shared/types';
+import type { Signal, SignalSource } from '@bridge-2026/shared';
 
 /**
  * GitHub 수집기 설정

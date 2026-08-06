@@ -28,14 +28,19 @@ describe('Validation Utilities', () => {
   });
   
   describe('isValidWalletAddress', () => {
+    // An Ethereum address is exactly 40 hex characters after the 0x prefix;
+    // the fixtures below are counted, not eyeballed.
     it('should validate correct Ethereum addresses', () => {
-      expect(isValidWalletAddress('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb')).toBe(true);
+      expect(isValidWalletAddress('0x742d35Cc6634C0532925a3b844Bc454e4438f44e')).toBe(true);
       expect(isValidWalletAddress('0x0000000000000000000000000000000000000000')).toBe(true);
     });
-    
+
     it('should reject invalid addresses', () => {
       expect(isValidWalletAddress('0x123')).toBe(false);
-      expect(isValidWalletAddress('742d35Cc6634C0532925a3b844Bc9e7595f0bEb')).toBe(false);
+      // Correct length and characters, missing prefix.
+      expect(isValidWalletAddress('742d35Cc6634C0532925a3b844Bc454e4438f44e')).toBe(false);
+      // Correct prefix, one character short.
+      expect(isValidWalletAddress('0x742d35Cc6634C0532925a3b844Bc454e4438f44')).toBe(false);
       expect(isValidWalletAddress('')).toBe(false);
     });
   });

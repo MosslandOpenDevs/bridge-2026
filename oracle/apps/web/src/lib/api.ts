@@ -1,5 +1,24 @@
+import { adminHeaders } from "./adminKey";
+
 // Empty string means same origin, which lets nginx proxy /api and /socket.io.
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "";
+
+/** Error carrying the API's own explanation and status, not just a status line. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+
+  /** The caller is not authenticated for this admin endpoint. */
+  get isAuthError(): boolean {
+    return this.status === 401 || this.status === 503;
+  }
+}
 
 class APIClient {
   private baseUrl: string;
@@ -10,18 +29,42 @@ class APIClient {
 
   private async fetch<T>(path: string, options?: RequestInit): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
+      ...options,
       headers: {
         "Content-Type": "application/json",
         ...options?.headers,
       },
-      ...options,
     });
 
     if (!response.ok) {
-      throw new Error(`API Error: ${response.statusText}`);
+      // Surface the server's message ("Admin endpoints are disabled because
+      // ADMIN_API_KEY is not configured", validation details, …) instead of a
+      // bare status line, which told the user nothing actionable.
+      let message = response.statusText || `HTTP ${response.status}`;
+      let code: string | undefined;
+      try {
+        const body = await response.json();
+        if (body?.error) message = body.error;
+        if (body?.code) code = body.code;
+      } catch {
+        // Non-JSON body; keep the status line.
+      }
+      throw new ApiError(message, response.status, code);
     }
 
     return response.json();
+  }
+
+  /**
+   * Request against an admin-gated endpoint: attaches the operator key when the
+   * browser holds one. Without a key the API answers 401/503 and the UI shows
+   * the reason.
+   */
+  private async adminFetch<T>(path: string, options?: RequestInit): Promise<T> {
+    return this.fetch<T>(path, {
+      ...options,
+      headers: { ...options?.headers, ...adminHeaders() },
+    });
   }
 
   // Health
@@ -35,7 +78,7 @@ class APIClient {
   }
 
   async collectSignals() {
-    return this.fetch<{ collected: number; signals: any[] }>("/api/signals/collect", {
+    return this.adminFetch<{ collected: number; signals: any[] }>("/api/signals/collect", {
       method: "POST",
     });
   }
@@ -47,13 +90,13 @@ class APIClient {
   }
 
   async detectIssues() {
-    return this.fetch<{ detected: number; saved: number; issues: any[]; count: number }>("/api/issues/detect", {
+    return this.adminFetch<{ detected: number; saved: number; issues: any[]; count: number }>("/api/issues/detect", {
       method: "POST",
     });
   }
 
   async updateIssue(id: string, data: { status?: string; decisionPacket?: any }) {
-    return this.fetch<{ issue: any }>(`/api/issues/${id}`, {
+    return this.adminFetch<{ issue: any }>(`/api/issues/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
     });
@@ -61,7 +104,7 @@ class APIClient {
 
   // Deliberation
   async deliberate(issue: any, context?: any) {
-    return this.fetch<{ decisionPacket: any }>("/api/deliberate", {
+    return this.adminFetch<{ decisionPacket: any }>("/api/deliberate", {
       method: "POST",
       body: JSON.stringify({ issue, context }),
     });
@@ -69,7 +112,7 @@ class APIClient {
 
   // Debate (multi-round discussion)
   async startDebate(issue: any, context?: any, maxRounds?: number) {
-    return this.fetch<{ debateSession: any; decisionPacket: any }>("/api/debate", {
+    return this.adminFetch<{ debateSession: any; decisionPacket: any }>("/api/debate", {
       method: "POST",
       body: JSON.stringify({ issue, context, maxRounds }),
     });
@@ -90,7 +133,7 @@ class APIClient {
   }
 
   async createProposal(decisionPacket: any, proposer: string, options?: any) {
-    return this.fetch<{ proposal: any }>("/api/proposals", {
+    return this.adminFetch<{ proposal: any }>("/api/proposals", {
       method: "POST",
       body: JSON.stringify({ decisionPacket, proposer, options }),
     });
@@ -121,13 +164,13 @@ class APIClient {
   }
 
   async finalizeProposal(proposalId: string) {
-    return this.fetch<{ proposal: any }>(`/api/proposals/${proposalId}/finalize`, {
+    return this.adminFetch<{ proposal: any }>(`/api/proposals/${proposalId}/finalize`, {
       method: "POST",
     });
   }
 
   async executeProposal(proposalId: string) {
-    return this.fetch<{ proposal: any; execution: any; message: string }>(`/api/proposals/${proposalId}/execute`, {
+    return this.adminFetch<{ proposal: any; execution: any; message: string }>(`/api/proposals/${proposalId}/execute`, {
       method: "POST",
     });
   }
@@ -138,7 +181,7 @@ class APIClient {
   }
 
   async recordOutcome(proposalId: string, actions: any[]) {
-    return this.fetch<{ execution: any }>("/api/outcomes", {
+    return this.adminFetch<{ execution: any }>("/api/outcomes", {
       method: "POST",
       body: JSON.stringify({ proposalId, actions }),
     });
@@ -168,10 +211,16 @@ class APIClient {
     return this.fetch<{ policies: any[]; count: number }>(`/api/delegations${query}`);
   }
 
-  async createDelegation(delegator: string, delegate: string, conditions?: any[], expiresAt?: string) {
+  async createDelegation(
+    delegator: string,
+    delegate: string,
+    conditions?: any[],
+    expiresAt?: string,
+    auth?: { signature: string; nonce: string; timestamp: number },
+  ) {
     return this.fetch<{ policy: any }>("/api/delegations", {
       method: "POST",
-      body: JSON.stringify({ delegator, delegate, conditions, expiresAt }),
+      body: JSON.stringify({ delegator, delegate, conditions, expiresAt, ...auth }),
     });
   }
 
@@ -179,9 +228,13 @@ class APIClient {
     return this.fetch<{ policy: any }>(`/api/delegations/${id}`);
   }
 
-  async revokeDelegation(id: string) {
+  async revokeDelegation(
+    id: string,
+    auth?: { signature: string; nonce: string; timestamp: number },
+  ) {
     return this.fetch<{ message: string; policy: any }>(`/api/delegations/${id}`, {
       method: "DELETE",
+      body: JSON.stringify(auth ?? {}),
     });
   }
 

@@ -4,9 +4,9 @@
  * 멀티 에이전트 협의 및 Decision Packet 생성을 관리하는 메인 서비스입니다.
  */
 
-import type { Issue, DecisionPacket } from '../../../shared/types';
+import type { Issue, DecisionPacket } from '@bridge-2026/shared';
 import { DeliberationEngine, type DeliberationConfig } from './deliberation/deliberation-engine';
-import { Moderator } from './moderator/moderator';
+import { Moderator, type ModeratorConfig } from './moderator/moderator';
 import { PacketBuilder } from './decision-packet/packet-builder';
 import {
   RiskSecurityAgent,
@@ -26,7 +26,7 @@ export class AgenticConsensus {
   
   constructor(config?: {
     deliberation?: DeliberationConfig;
-    moderator?: { version?: string; model?: string };
+    moderator?: Partial<ModeratorConfig>;
   }) {
     // 협의 엔진 초기화
     this.deliberationEngine = new DeliberationEngine(config?.deliberation);

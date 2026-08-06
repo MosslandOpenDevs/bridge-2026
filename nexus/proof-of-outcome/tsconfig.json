@@ -1,4 +1,9 @@
 {
+  // No `paths` entries for `@bridge-2026/shared` / `@bridge-2026/event-bus`:
+  // they must resolve through the pnpm node_modules links to each package's
+  // built `dist/*.d.ts`. Aiming them at the sibling source trees instead pulls
+  // those sources into this program, where they sit outside `rootDir` (TS6059)
+  // and make tsc emit compiled output into the sibling directories.
   "compilerOptions": {
     "target": "ES2020",
     "module": "commonjs",
@@ -10,11 +15,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "paths": {
-      "@bridge-2026/shared": ["../../shared"],
-      "@bridge-2026/event-bus": ["../../infrastructure/event-bus"]
-    }
+    "resolveJsonModule": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

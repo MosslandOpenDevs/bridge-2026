@@ -46,9 +46,15 @@
 # Configuration (env, all optional):
 #   DEPLOY_BRANCH          branch to track                     (default: main)
 #   DEPLOY_REMOTE          git remote                          (default: origin)
-#   DEPLOY_REQUIRE_CI      1 = only deploy CI-green commits    (default: 0 —
-#                          this repo has no GitHub Actions yet; flip to 1 when
-#                          CI lands)
+#   DEPLOY_REQUIRE_CI      1 = only deploy CI-green commits    (default: 1)
+#                          Fail-closed: a commit with no reported checks, a
+#                          not-green check, or an unreachable API all block the
+#                          deploy. Set to 0 only if you accept deploying
+#                          unverified commits.
+#   DEPLOY_REQUIRED_CHECKS comma-separated check-run names that must each be
+#                          present and successful
+#                          (default: oracle,deploy-script — the job names in
+#                          .github/workflows/ci.yml)
 #   DEPLOY_GITHUB_REPO     owner/name used for the CI query
 #   DEPLOY_API_URL         backend health URL                  (:3101)
 #   DEPLOY_WEB_URL         frontend health URL                 (:3100)
@@ -88,7 +94,8 @@ cd "${REPO_ROOT}"
 
 DEPLOY_BRANCH=${DEPLOY_BRANCH:-main}
 DEPLOY_REMOTE=${DEPLOY_REMOTE:-origin}
-DEPLOY_REQUIRE_CI=${DEPLOY_REQUIRE_CI:-0}
+DEPLOY_REQUIRE_CI=${DEPLOY_REQUIRE_CI:-1}
+DEPLOY_REQUIRED_CHECKS=${DEPLOY_REQUIRED_CHECKS:-oracle,deploy-script}
 DEPLOY_GITHUB_REPO=${DEPLOY_GITHUB_REPO:-MosslandOpenDevs/bridge-2026}
 DEPLOY_API_URL=${DEPLOY_API_URL:-http://127.0.0.1:3101}
 DEPLOY_WEB_URL=${DEPLOY_WEB_URL:-http://127.0.0.1:3100}
@@ -183,28 +190,60 @@ acquire_lock() {
   return 0
 }
 
-# CI gate: deploy only commits GitHub Actions has gone green on.
+# CI gate: deploy only commits the required checks have gone green on.
+#
+# Fail-closed. Every non-success answer -- including "this commit reported no
+# checks at all" -- blocks the deploy. Proceeding when a commit had no check
+# runs is indistinguishable from CI never having started, and counting a
+# completed run as success unless its conclusion was on a blocklist let
+# `neutral` and `skipped` through.
+#
+# DEPLOY_REQUIRED_CHECKS names the checks that must each be present and
+# successful; extra checks beyond those are ignored, so adding an unrelated
+# workflow cannot silently block deploys.
 ci_conclusion() {
   local sha="$1" url auth
-  url="https://api.github.com/repos/${DEPLOY_GITHUB_REPO}/commits/${sha}/check-runs"
+  url="https://api.github.com/repos/${DEPLOY_GITHUB_REPO}/commits/${sha}/check-runs?per_page=100"
   if [ -n "${GITHUB_TOKEN:-}" ]; then
     auth="Authorization: Bearer ${GITHUB_TOKEN}"
   else
     auth="X-No-Auth: 1"
   fi
   curl -fsS -m 20 -H 'Accept: application/vnd.github+json' -H "${auth}" "${url}" 2>/dev/null \
-    | node -e '
+    | REQUIRED_CHECKS="${DEPLOY_REQUIRED_CHECKS}" node -e '
 let raw = "";
 process.stdin.on("data", d => (raw += d));
 process.stdin.on("end", () => {
   let runs;
   try { runs = JSON.parse(raw).check_runs || []; }
   catch { console.log("unknown"); return; }
-  if (!runs.length) { console.log("none"); return; }
-  const bad = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
-  if (runs.some(r => r.status !== "completed")) console.log("pending");
-  else if (runs.some(r => bad.has(r.conclusion))) console.log("failure");
-  else console.log("success");
+
+  const required = (process.env.REQUIRED_CHECKS || "")
+    .split(",").map(s => s.trim()).filter(Boolean);
+  if (!required.length) { console.log("misconfigured"); return; }
+
+  // Latest run per name: a re-run supersedes the earlier attempt.
+  const latest = new Map();
+  for (const run of runs) {
+    const previous = latest.get(run.name);
+    const at = Date.parse(run.started_at || run.completed_at || 0) || 0;
+    if (!previous || at >= previous.at) latest.set(run.name, { run, at });
+  }
+
+  const missing = required.filter(name => !latest.has(name));
+  if (missing.length) { console.log("missing:" + missing.join("+")); return; }
+
+  const states = required.map(name => latest.get(name).run);
+  if (states.some(r => r.status !== "completed")) { console.log("pending"); return; }
+
+  // Only an explicit success passes; neutral, skipped, stale and anything
+  // unrecognized are treated as not-green.
+  const notGreen = states.filter(r => r.conclusion !== "success");
+  if (notGreen.length) {
+    console.log("failure:" + notGreen.map(r => `${r.name}=${r.conclusion}`).join("+"));
+    return;
+  }
+  console.log("success");
 });
 ' 2>/dev/null || echo "unknown"
 }
@@ -340,12 +379,65 @@ record_success() {
   fi
 }
 
+# What kind of change is this? Everything lives under oracle/ — nexus/ and root
+# docs never require a build or restart. oracle/packages/* and the workspace
+# config feed both apps, so they mark both. oracle/scripts/* and the ecosystem
+# file are deploy infrastructure: they must reach the server (the script
+# self-updates via the reset) but need no build or restart.
+#
+# Sets API_CHANGED / WEB_CHANGED / DEPS_CHANGED / ECOSYSTEM_CHANGED /
+# INFRA_CHANGED / DOCS_ONLY from a newline-separated file list on stdin.
+# Exercised directly by scripts/test-deploy-classifier.sh — a path in the wrong
+# bucket means either a deploy that skips the build it needed, or a rebuild and
+# restart for a README edit.
+classify_changes() {
+  API_CHANGED=0
+  WEB_CHANGED=0
+  DEPS_CHANGED=0
+  ECOSYSTEM_CHANGED=0
+  INFRA_CHANGED=0
+
+  local f
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    case "${f}" in
+      oracle/apps/api/*) API_CHANGED=1 ;;
+      oracle/apps/web/*) WEB_CHANGED=1 ;;
+      # Workspace-wide config: pnpm-workspace.yaml decides which packages exist
+      # at all, and eslint.config.js gates the lint step both apps run.
+      oracle/packages/*|oracle/package.json|oracle/turbo.json|oracle/tsconfig*.json|oracle/pnpm-workspace.yaml|oracle/eslint.config.js)
+        API_CHANGED=1; WEB_CHANGED=1 ;;
+      oracle/scripts/*) INFRA_CHANGED=1 ;;
+    esac
+    case "${f}" in
+      oracle/pnpm-lock.yaml) DEPS_CHANGED=1; API_CHANGED=1; WEB_CHANGED=1 ;;
+      oracle/ecosystem.config.cjs) ECOSYSTEM_CHANGED=1 ;;
+    esac
+  done
+
+  # Docs-only pushes (README, docs/, nexus/, …) are synced, not deployed: the
+  # checkout is brought to the tip so on-server docs stay current, but there is
+  # no build, restart, or snapshot, and the log distinguishes SYNCED from
+  # DEPLOYED. Once synced, HEAD equals the tip, so repeat ticks stay quiet.
+  DOCS_ONLY=0
+  if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ] \
+     && [ "${ECOSYSTEM_CHANGED}" = "0" ] && [ "${INFRA_CHANGED}" = "0" ]; then
+    DOCS_ONLY=1
+  fi
+}
+
 main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --force) FORCE=1 ;;
       --check) CHECK_ONLY=1 ;;
       -h|--help) sed -n '4,66p' "${SELF}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      # Test hook: classify the file list on stdin and print the flags,
+      # without touching git, the lock, or PM2.
+      --classify)
+        classify_changes
+        echo "api=${API_CHANGED} web=${WEB_CHANGED} deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED} infra=${INFRA_CHANGED} docs_only=${DOCS_ONLY}"
+        exit 0 ;;
       *) echo "unknown option: $1" >&2; exit 64 ;;
     esac
     shift
@@ -394,41 +486,9 @@ main() {
   CHANGED=$(git diff --name-only "${DEPLOYED}" "${TARGET}")
   SUBJECT=$(git log -1 --format='%s' "${TARGET}")
 
-  # What kind of change is this? Everything lives under oracle/ — nexus/ and root
-  # docs never require a build or restart. oracle/packages/* and the workspace
-  # config feed both apps, so they mark both. oracle/scripts/* and the ecosystem
-  # file are deploy infrastructure: they must reach the server (the script
-  # self-updates via the reset) but need no build or restart.
-  API_CHANGED=0
-  WEB_CHANGED=0
-  DEPS_CHANGED=0
-  ECOSYSTEM_CHANGED=0
-  INFRA_CHANGED=0
-  while IFS= read -r f; do
-    [ -n "${f}" ] || continue
-    case "${f}" in
-      oracle/apps/api/*) API_CHANGED=1 ;;
-      oracle/apps/web/*) WEB_CHANGED=1 ;;
-      oracle/packages/*|oracle/package.json|oracle/turbo.json|oracle/tsconfig*.json) API_CHANGED=1; WEB_CHANGED=1 ;;
-      oracle/scripts/*) INFRA_CHANGED=1 ;;
-    esac
-    case "${f}" in
-      oracle/pnpm-lock.yaml) DEPS_CHANGED=1; API_CHANGED=1; WEB_CHANGED=1 ;;
-      oracle/ecosystem.config.cjs) ECOSYSTEM_CHANGED=1 ;;
-    esac
-  done <<EOF
+  classify_changes <<EOF
 ${CHANGED}
 EOF
-
-  # Docs-only pushes (README, docs/, nexus/, …) are synced, not deployed: the
-  # checkout is brought to the tip so on-server docs stay current, but there is
-  # no build, restart, or snapshot, and the log distinguishes SYNCED from
-  # DEPLOYED. Once synced, HEAD equals the tip, so repeat ticks stay quiet.
-  DOCS_ONLY=0
-  if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ] \
-     && [ "${ECOSYSTEM_CHANGED}" = "0" ] && [ "${INFRA_CHANGED}" = "0" ]; then
-    DOCS_ONLY=1
-  fi
 
   if [ "${DOCS_ONLY}" = "1" ]; then
     [ "${CHECK_ONLY}" = "1" ] || log "docs-only change ${DEPLOYED:0:8} -> ${TARGET:0:8} (${SUBJECT}) -- syncing checkout, no deploy"
@@ -489,13 +549,23 @@ EOF
   if [ "${DEPLOY_REQUIRE_CI}" = "1" ] && [ "${FORCE}" = "0" ] && [ "${DOCS_ONLY}" = "0" ]; then
     CI_STATUS=$(ci_conclusion "${TARGET}")
     case "${CI_STATUS}" in
-      success) log "CI: green" ;;
-      none)    log "CI: no checks reported for this commit -- proceeding" ;;
-      pending) log "CI: still running -- deferring to next tick"; exit 0 ;;
-      failure) log "CI: FAILED -- refusing to deploy ${TARGET:0:8}"
-               alert "BRIDGE deploy skipped: CI failed on ${TARGET:0:8} (${SUBJECT})"
-               exit 0 ;;
-      *)       log "CI: status unavailable (network/API) -- deferring to next tick"; exit 0 ;;
+      success)
+        log "CI: green (${DEPLOY_REQUIRED_CHECKS})" ;;
+      pending)
+        log "CI: still running -- deferring to next tick"; exit 0 ;;
+      missing:*)
+        log "CI: required check(s) not reported for ${TARGET:0:8}: ${CI_STATUS#missing:}"
+        log "    refusing to deploy (set DEPLOY_REQUIRE_CI=0 or --force to override)"
+        alert "BRIDGE deploy blocked: CI has not reported ${CI_STATUS#missing:} on ${TARGET:0:8}"
+        exit 0 ;;
+      failure:*)
+        log "CI: NOT GREEN on ${TARGET:0:8}: ${CI_STATUS#failure:}"
+        alert "BRIDGE deploy skipped: CI not green on ${TARGET:0:8} (${SUBJECT})"
+        exit 0 ;;
+      misconfigured)
+        log "CI: DEPLOY_REQUIRED_CHECKS is empty -- refusing to deploy"; exit 0 ;;
+      *)
+        log "CI: status unavailable (network/API) -- deferring to next tick"; exit 0 ;;
     esac
   fi
 

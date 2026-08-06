@@ -156,7 +156,8 @@
     "agentOpinions": "Agent Opinions",
     "goals": "Goals & KPIs",
     "target": "Target",
-    "alternatives": "Alternatives"
+    "alternatives": "Alternatives",
+    "votesUnit": "votes"
   },
   "delegation": {
     "title": "Delegation Policies",
@@ -320,5 +321,18 @@
       "title": "Delegation Removed",
       "message": "Delegation policy deactivated"
     }
+  },
+  "admin": {
+    "title": "Operator key",
+    "description": "Admin actions (collect signals, deliberate, create/finalize/execute proposals) require the operator API key. It is kept for this browser tab only.",
+    "placeholder": "Paste ADMIN_API_KEY",
+    "storedPlaceholder": "Enter a new key to replace the stored one",
+    "save": "Save",
+    "clear": "Clear",
+    "close": "Close",
+    "active": "Operator",
+    "inactive": "Read-only",
+    "scopeNote": "Shared operator secret — not a personal login. Anything running in this page can read it.",
+    "required": "This action needs the operator key. Add it from the key button in the header."
   }
 }

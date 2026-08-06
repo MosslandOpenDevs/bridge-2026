@@ -1,0 +1,13 @@
+{
+  // Exists so ts-jest compiles these tests from *this* directory: TypeScript
+  // discovers ambient type packages by walking up from the tsconfig that is in
+  // use, and `@types/jest` is a devDependency of this package rather than of
+  // the parent. Pointing ts-jest at ../tsconfig.json instead would start that
+  // walk one level too high and lose the Jest globals.
+  //
+  // The parent config supplies the compiler options, so the tests are checked
+  // exactly as the shipped build is. Only Jest reads this file; the emitted
+  // dist still comes from ../tsconfig.json, which excludes __tests__.
+  "extends": "../tsconfig.json",
+  "include": ["**/*.ts"]
+}

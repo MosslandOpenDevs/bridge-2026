@@ -14,9 +14,20 @@ import {
 import { BaseAgent } from "./agents/base.js";
 import { LLMClient, LLMConfig } from "./llm/index.js";
 
-export interface ModeratorConfig extends LLMConfig {}
+export type ModeratorConfig = LLMConfig;
 
 export class Moderator {
+  /** Hard bounds on debate length, independent of what a caller asks for. */
+  static readonly MIN_ROUNDS = 1;
+  static readonly MAX_ROUNDS = 5;
+
+  /** Coerce any caller-supplied round count into the supported range. */
+  static clampRounds(requested: unknown): number {
+    const n = Math.floor(Number(requested));
+    if (!Number.isFinite(n)) return 3;
+    return Math.min(Moderator.MAX_ROUNDS, Math.max(Moderator.MIN_ROUNDS, n));
+  }
+
   private agents: GovernanceAgent[] = [];
   private llmClient: LLMClient;
 
@@ -101,6 +112,11 @@ Be objective, thorough, and actionable.`;
     const sessionId = generateId();
     const startedAt = now();
 
+    // Clamp here as well as at the API boundary: every extra round replays the
+    // accumulated transcript to every agent, so an unbounded round count is an
+    // unbounded LLM bill.
+    maxRounds = Moderator.clampRounds(maxRounds);
+
     // Round 0: Initial deliberation (collect initial opinions)
     console.log(`[Moderator] Starting debate session ${sessionId} for issue: ${issue.title}`);
     const initialOpinions: AgentOpinion[] = [];
@@ -139,8 +155,9 @@ Be objective, thorough, and actionable.`;
     }
 
     // Conduct debate rounds
-    let currentOpinions = [...initialOpinions];
+    const currentOpinions = [...initialOpinions];
     let allMessages: DiscussionMessage[] = [];
+    let previousConsensusScore = initialConsensus.consensusScore;
 
     for (let roundNum = 1; roundNum <= maxRounds; roundNum++) {
       console.log(`[Moderator] Starting round ${roundNum}/${maxRounds}`);
@@ -192,12 +209,12 @@ Be objective, thorough, and actionable.`;
         }
       }
 
-      // Calculate consensus shift
-      const previousConsensus = roundNum === 1
-        ? initialConsensus.consensusScore
-        : session.rounds[roundNum - 2]?.consensusShift ?? initialConsensus.consensusScore;
+      // Calculate consensus shift against the previous round's *score*.
+      // Subtracting the previous round's shift instead made the value
+      // oscillate, so the "no progress" early exit rarely fired.
       const currentConsensus = this.calculateConsensusScore(currentOpinions);
-      const consensusShift = currentConsensus.consensusScore - previousConsensus;
+      const consensusShift = currentConsensus.consensusScore - previousConsensusScore;
+      previousConsensusScore = currentConsensus.consensusScore;
 
       // Generate insights for this round
       const keyInsights = this.extractKeyInsights(roundMessages);
@@ -423,7 +440,7 @@ Be objective, thorough, and actionable.`;
    * score >= 0.5 → action (clear consensus, ready for execution)
    * score < 0.5 → investigation (unclear, needs more research)
    */
-  private determineProposalType(consensusScore: number, averageScore: number): ProposalType {
+  private determineProposalType(consensusScore: number, _averageScore: number): ProposalType {
     // High consensus with clear direction → action
     if (consensusScore >= 0.5) {
       return "action";
@@ -437,7 +454,7 @@ Be objective, thorough, and actionable.`;
     opinions: AgentOpinion[]
   ): DecisionPacket {
     // Calculate consensus metrics
-    const { consensusScore, averageScore, avgConfidence } = this.calculateConsensusScore(opinions);
+    const { consensusScore, averageScore } = this.calculateConsensusScore(opinions);
     const recommendedProposalType = this.determineProposalType(consensusScore, averageScore);
 
     // Collect all concerns and recommendations from agents
@@ -577,38 +594,45 @@ Be objective, thorough, and actionable.`;
     ];
   }
 
+  /**
+   * Each KPI carries the direction its target is judged in: "at_most" for
+   * metrics to keep down (resolution time, error rate), "at_least" for ones to
+   * push up (uptime, engagement). Scoring them all one way marks a perfect
+   * uptime as a miss and a total outage as a hit.
+   */
   private generateKPIs(issue: DetectedIssue): DecisionPacket["kpis"] {
-    const baseKPIs = [
+    const baseKPIs: DecisionPacket["kpis"] = [
       {
         name: "Resolution Time",
         target: issue.priority === "urgent" ? 24 : issue.priority === "high" ? 72 : 168,
+        direction: "at_most",
         unit: "hours",
         measurementMethod: `Time from approval to ${issue.title} resolution`,
       },
     ];
 
     // Category-specific KPIs
-    const categoryKPIs: Record<string, Array<{ name: string; target: number; unit: string; measurementMethod: string }>> = {
+    const categoryKPIs: Record<string, DecisionPacket["kpis"]> = {
       treasury: [
-        { name: "Treasury Balance Impact", target: 0, unit: "percent deviation", measurementMethod: "Compare treasury balance before/after" },
-        { name: "Transaction Success Rate", target: 100, unit: "percent", measurementMethod: "Successful vs failed treasury operations" },
+        { name: "Treasury Balance Impact", target: 0, direction: "at_most", unit: "percent deviation", measurementMethod: "Compare treasury balance before/after" },
+        { name: "Transaction Success Rate", target: 100, direction: "at_least", unit: "percent", measurementMethod: "Successful vs failed treasury operations" },
       ],
       protocol: [
-        { name: "Protocol Uptime", target: 99.9, unit: "percent", measurementMethod: "System availability after changes" },
-        { name: "Error Rate", target: 0, unit: "errors per hour", measurementMethod: "Monitor error logs post-deployment" },
+        { name: "Protocol Uptime", target: 99.9, direction: "at_least", unit: "percent", measurementMethod: "System availability after changes" },
+        { name: "Error Rate", target: 0, direction: "at_most", unit: "errors per hour", measurementMethod: "Monitor error logs post-deployment" },
       ],
       community: [
-        { name: "Community Engagement", target: 50, unit: "responses", measurementMethod: "Community feedback count within 7 days" },
-        { name: "Sentiment Score", target: 70, unit: "percent positive", measurementMethod: "Analyze community reaction sentiment" },
+        { name: "Community Engagement", target: 50, direction: "at_least", unit: "responses", measurementMethod: "Community feedback count within 7 days" },
+        { name: "Sentiment Score", target: 70, direction: "at_least", unit: "percent positive", measurementMethod: "Analyze community reaction sentiment" },
       ],
       security: [
-        { name: "Vulnerability Status", target: 0, unit: "open vulnerabilities", measurementMethod: "Security scan after mitigation" },
-        { name: "Incident Recurrence", target: 0, unit: "incidents", measurementMethod: "Similar security events within 30 days" },
+        { name: "Vulnerability Status", target: 0, direction: "at_most", unit: "open vulnerabilities", measurementMethod: "Security scan after mitigation" },
+        { name: "Incident Recurrence", target: 0, direction: "at_most", unit: "incidents", measurementMethod: "Similar security events within 30 days" },
       ],
     };
 
     const specific = categoryKPIs[issue.category] || [
-      { name: "Issue Recurrence", target: 0, unit: "occurrences", measurementMethod: `Similar ${issue.category} issues within 30 days` },
+      { name: "Issue Recurrence", target: 0, direction: "at_most" as const, unit: "occurrences", measurementMethod: `Similar ${issue.category} issues within 30 days` },
     ];
 
     return [...baseKPIs, ...specific];
@@ -750,15 +774,85 @@ ${opinionsText}
 
 ---
 
-Please synthesize these opinions into a Decision Packet with:
-1. A clear recommendation (action, rationale, expected outcome)
-2. 2-3 alternatives with pros/cons
-3. Key risks with likelihood, impact, and mitigation
-4. 3-5 measurable KPIs
-5. Any dissenting opinions
+Synthesize these opinions into a Decision Packet.
 
-Respond in JSON format matching the DecisionPacket schema.
+Respond with JSON only, in exactly this shape:
+
+{
+  "recommendation": { "action": "…", "rationale": "…", "expectedOutcome": "…" },
+  "alternatives": [ { "action": "…", "pros": ["…"], "cons": ["…"] } ],
+  "risks": [ { "description": "…", "likelihood": "low|medium|high", "impact": "low|medium|high", "mitigation": "…" } ],
+  "kpis": [ { "name": "…", "target": 0, "direction": "at_most|at_least", "unit": "…", "measurementMethod": "…" } ],
+  "dissent": [ { "agentRole": "risk|treasury|community|product|moderator", "reason": "…" } ]
+}
+
+Give 2-3 alternatives, the key risks, and 3-5 KPIs.
+
+The KPIs are the contract this decision will be judged against later: someone
+measures them after execution and the proposal's outcome is scored on whether
+they were met. So each one must be mechanically checkable, not prose.
+- "name" is a short label, and is the key the measurement is submitted under.
+- "target" is a bare number. Not "&gt;= 95%", not "under 30 minutes" — just 95, or 30.
+- "direction" says which side of the target passes: "at_least" for a metric to
+  raise (uptime, participation), "at_most" for one to keep down (latency,
+  incidents, error rate).
+- "unit" carries the dimension ("percent", "minutes", "incidents").
 `;
+  }
+
+  /**
+   * Coerce model-authored KPIs into the shape outcome measurement requires.
+   *
+   * These are the contract a proposal is judged against: a measurement is
+   * submitted per KPI name and scored against a numeric target on a stated
+   * side. A model asked for "measurable KPIs" happily answers with
+   * `{metric, definition, target: ">= 95%"}` — no name the measurement can be
+   * keyed on, a target that is a string, and no direction — which passes
+   * through to a proposal whose outcome can never be recorded.
+   *
+   * Anything that cannot be repaired is dropped, and if nothing survives the
+   * rule-based KPIs stand in, so a proposal always carries a measurable
+   * contract.
+   */
+  private normalizeKpis(raw: unknown, issue: DetectedIssue): DecisionPacket["kpis"] {
+    const parseTarget = (value: unknown): number | undefined => {
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+      if (typeof value !== "string") return undefined;
+      // "&gt;= 95%", "<= 30 minutes", "95" -> 95
+      const match = value.match(/-?\d+(?:\.\d+)?/);
+      return match ? Number(match[0]) : undefined;
+    };
+
+    const inferDirection = (
+      declared: unknown,
+      target: unknown,
+    ): "at_most" | "at_least" => {
+      if (declared === "at_least" || declared === "at_most") return declared;
+      // A comparator left in the target string still says which way it goes.
+      if (typeof target === "string" && /(>=|>|at least|minimum|min\b)/i.test(target)) {
+        return "at_least";
+      }
+      return "at_most";
+    };
+
+    const normalized = (Array.isArray(raw) ? raw : [])
+      .map((entry: any) => {
+        const name = String(entry?.name ?? entry?.metric ?? "").trim();
+        const target = parseTarget(entry?.target);
+        if (!name || target === undefined) return null;
+        return {
+          name,
+          target,
+          direction: inferDirection(entry?.direction, entry?.target),
+          unit: String(entry?.unit ?? "").trim(),
+          measurementMethod: String(
+            entry?.measurementMethod ?? entry?.definition ?? "",
+          ).trim(),
+        };
+      })
+      .filter((k): k is DecisionPacket["kpis"][number] => k !== null);
+
+    return normalized.length > 0 ? normalized : this.generateKPIs(issue);
   }
 
   private parseSynthesisResponse(
@@ -791,7 +885,7 @@ Respond in JSON format matching the DecisionPacket schema.
         },
         alternatives: parsed.alternatives || [],
         risks: parsed.risks || [],
-        kpis: parsed.kpis || [],
+        kpis: this.normalizeKpis(parsed.kpis, issue),
         agentOpinions: opinions,
         dissent: parsed.dissent || [],
         createdAt: now(),

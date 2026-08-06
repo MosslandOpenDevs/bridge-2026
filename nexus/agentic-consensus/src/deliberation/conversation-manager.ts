@@ -4,7 +4,7 @@
  * 에이전트 간 대화를 관리합니다.
  */
 
-import type { AgentReasoning, AgentType } from '../../../shared/types';
+import type { AgentReasoning, AgentType } from '@bridge-2026/shared';
 
 export interface ConversationMessage {
   /** 발신자 에이전트 타입 */

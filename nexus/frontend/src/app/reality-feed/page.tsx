@@ -3,111 +3,62 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import Link from 'next/link';
 import { SignalCard } from '@/components/signal-card';
+import { DemoModeBanner } from '@/components/demo-mode-banner';
 import { useState, useEffect } from 'react';
-import type { Signal } from '@bridge-2026/shared';
-import { api } from '@/lib/api';
+import { SignalSource, type Signal } from '@bridge-2026/shared';
+import { api, isAbortError } from '@/lib/api';
+import { DEMO_MODE, getDemoSignals } from '@/lib/demo-data';
+
+/** "anomaly" is a tag, not a source, so it can only be filtered client-side. */
+type SignalFilter = 'all' | 'anomaly' | SignalSource.ONCHAIN | SignalSource.COMMUNITY;
 
 export default function RealityFeedPage() {
   const [signals, setSignals] = useState<Signal[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<'all' | 'onchain' | 'community' | 'anomaly'>('all');
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<SignalFilter>('all');
 
   useEffect(() => {
-    // API 호출
-    api.getSignals({ limit: 100 })
-      .then(result => setSignals(result.signals))
-      .catch(error => {
-        console.error('Error fetching signals:', error);
-        // 에러 시 빈 배열
-        setSignals([]);
-      })
-      .finally(() => setLoading(false));
-    
-    // 임시 데이터 (API 실패 시 fallback)
-    const mockSignals: Signal[] = [
-      {
-        id: 'sig-1',
-        metadata: {
-          sourceType: 'onchain',
-          timestamp: Date.now() - 1000 * 60 * 30,
-          confidence: 0.95,
-          tags: ['governance', 'proposal'],
-        },
-        data: {
-          eventType: 'ProposalCreated',
-          blockNumber: 18500000,
-          transactionHash: '0x1234...',
-        },
-      },
-      {
-        id: 'sig-2',
-        metadata: {
-          sourceType: 'community',
-          timestamp: Date.now() - 1000 * 60 * 60 * 2,
-          confidence: 0.88,
-          tags: ['checkin', 'proof-of-presence'],
-        },
-        data: {
-          checkInType: 'qr',
-          location: { name: '서울 이벤트장' },
-          walletAddress: '0x5678...',
-        },
-      },
-      {
-        id: 'sig-3',
-        metadata: {
-          sourceType: 'onchain',
-          timestamp: Date.now() - 1000 * 60 * 60 * 5,
-          confidence: 0.92,
-          tags: ['governance', 'anomaly'],
-        },
-        data: {
-          eventType: 'ParticipationRateDrop',
-          participationRate: 0.05,
-        },
-      },
-      {
-        id: 'sig-4',
-        metadata: {
-          sourceType: 'public_api',
-          timestamp: Date.now() - 1000 * 60 * 60 * 12,
-          confidence: 0.85,
-          tags: ['weather', 'city-pulse'],
-        },
-        data: {
-          source: 'weather',
-          city: '서울',
-          temperature: 22,
-          humidity: 65,
-        },
-      },
-      {
-        id: 'sig-5',
-        metadata: {
-          sourceType: 'telemetry',
-          timestamp: Date.now() - 1000 * 60 * 60 * 24,
-          confidence: 0.90,
-          tags: ['github', 'development'],
-        },
-        data: {
-          source: 'github',
-          type: 'pull_request',
-          repository: 'mossland/bridge-2026',
-          openPRs: 5,
-        },
-      },
-    ];
-    
-    setTimeout(() => {
-      setSignals(mockSignals);
+    // 데모 모드에서는 백엔드를 호출하지 않습니다. 데모 데이터는 API 실패의
+    // 대체물이 아니므로, 실패는 아래 catch에서 실패로 드러나야 합니다.
+    if (DEMO_MODE) {
+      setSignals(getDemoSignals());
+      setError(null);
       setLoading(false);
-    }, 500);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    setLoading(true);
+    setError(null);
+
+    api.getSignals({ limit: 100 }, { signal: controller.signal })
+      .then(result => {
+        setSignals(result.signals);
+        setError(null);
+      })
+      .catch(err => {
+        if (isAbortError(err)) return;
+        console.error('Error fetching signals:', err);
+        setSignals([]);
+        setError('신호를 불러오지 못했습니다.');
+      })
+      .finally(() => {
+        // The abort already discarded the result; leaving `loading` alone keeps
+        // the spinner up for the newer request that replaced this one.
+        if (controller.signal.aborted) return;
+        setLoading(false);
+      });
+
+    return () => controller.abort();
   }, []);
+
 
   const filteredSignals = signals.filter(s => {
     if (filter === 'all') return true;
     if (filter === 'anomaly') return s.metadata.tags?.includes('anomaly');
-    return s.metadata.sourceType === filter;
+    return s.metadata.source === filter;
   });
 
   const anomalyCount = signals.filter(s => s.metadata.tags?.includes('anomaly')).length;
@@ -133,6 +84,8 @@ export default function RealityFeedPage() {
           </div>
         </header>
 
+        {DEMO_MODE && <DemoModeBanner />}
+
         {/* Stats */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
           <div className="bg-white rounded-lg shadow-md p-4 border border-moss-200">
@@ -145,13 +98,13 @@ export default function RealityFeedPage() {
           </div>
           <div className="bg-white rounded-lg shadow-md p-4 border border-moss-200">
             <div className="text-2xl font-bold text-blue-600">
-              {signals.filter(s => s.metadata.sourceType === 'onchain').length}
+              {signals.filter(s => s.metadata.source === SignalSource.ONCHAIN).length}
             </div>
             <div className="text-sm text-gray-600">온체인 신호</div>
           </div>
           <div className="bg-white rounded-lg shadow-md p-4 border border-moss-200">
             <div className="text-2xl font-bold text-green-600">
-              {signals.filter(s => s.metadata.sourceType === 'community').length}
+              {signals.filter(s => s.metadata.source === SignalSource.COMMUNITY).length}
             </div>
             <div className="text-sm text-gray-600">커뮤니티 신호</div>
           </div>
@@ -170,9 +123,9 @@ export default function RealityFeedPage() {
             전체
           </button>
           <button
-            onClick={() => setFilter('onchain')}
+            onClick={() => setFilter(SignalSource.ONCHAIN)}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-              filter === 'onchain'
+              filter === SignalSource.ONCHAIN
                 ? 'bg-moss-600 text-white'
                 : 'bg-white text-gray-700 hover:bg-gray-50'
             }`}
@@ -180,9 +133,9 @@ export default function RealityFeedPage() {
             온체인
           </button>
           <button
-            onClick={() => setFilter('community')}
+            onClick={() => setFilter(SignalSource.COMMUNITY)}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-              filter === 'community'
+              filter === SignalSource.COMMUNITY
                 ? 'bg-moss-600 text-white'
                 : 'bg-white text-gray-700 hover:bg-gray-50'
             }`}
@@ -205,6 +158,14 @@ export default function RealityFeedPage() {
         {loading ? (
           <div className="text-center py-12">
             <p className="text-gray-600">로딩 중...</p>
+          </div>
+        ) : error ? (
+          // 조회 실패를 "신호 없음"으로 보여주면 사용자가 잘못된 결론을 내립니다.
+          <div className="bg-white rounded-lg shadow-md p-12 text-center border border-red-200">
+            <p className="text-red-700 mb-4">{error}</p>
+            <p className="text-sm text-gray-500">
+              백엔드 API 연결을 확인한 뒤 다시 시도해주세요.
+            </p>
           </div>
         ) : filteredSignals.length === 0 ? (
           <div className="bg-white rounded-lg shadow-md p-12 text-center">

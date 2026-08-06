@@ -4,9 +4,8 @@
  * 거버넌스 통과 시 온체인/오프체인 실행을 원자적으로 트리거하는 서비스입니다.
  */
 
-import type { Proposal, ProposalAction } from '../../shared/types';
-import { eventPublisher } from '../../infrastructure/event-bus';
-import { EventType } from '../../infrastructure/event-bus/event-types';
+import type { Proposal, ProposalAction } from '@bridge-2026/shared';
+import { eventPublisher, EventType } from '@bridge-2026/event-bus';
 
 /**
  * 실행 결과

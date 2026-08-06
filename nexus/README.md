@@ -147,17 +147,34 @@ Reality Oracle → Inference Mining → Agentic Consensus → Human Governance �
 
 ### 의존성 설치
 
-각 모듈은 독립적인 패키지로 관리됩니다. 루트에서:
+`nexus/`는 하나의 pnpm 워크스페이스입니다. 레이어 패키지들은 서로를
+`workspace:*`로 참조하는데, 이 지정자는 워크스페이스 루트를 통해서만 해석됩니다.
+(npm은 `workspace:` 프로토콜을 지원하지 않으므로 개별 폴더에서 `npm install`을
+실행하면 해석에 실패합니다.) 설치는 `nexus/`에서 한 번만 합니다:
 
 ```bash
-# 공통 타입 빌드
-cd shared && npm install && npm run build
+cd nexus
+pnpm install
+```
 
-# 이벤트 버스 빌드
-cd ../infrastructure/event-bus && npm install && npm run build
+설치가 끝나면 각 패키지의 `node_modules/@bridge-2026/*`가 워크스페이스 폴더로
+심볼릭 링크되고, `shared`는 자신의 `prepare` 스크립트로 자동 빌드됩니다
+(다른 패키지가 `shared/dist`의 타입을 바로 참조할 수 있어야 하기 때문입니다).
 
-# Reality Oracle 빌드
-cd ../../reality-oracle && npm install && npm run build
+나머지 레이어는 워크스페이스 의존성 순서대로 빌드합니다:
+
+```bash
+pnpm -r build
+
+# 특정 패키지만
+pnpm --filter @bridge-2026/reality-oracle build
+```
+
+앱 실행:
+
+```bash
+pnpm --filter @bridge-2026/backend start:dev
+pnpm --filter @bridge-2026/frontend dev
 ```
 
 ### 사용 예제

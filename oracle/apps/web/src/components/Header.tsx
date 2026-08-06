@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { RealtimeIndicator } from "./RealtimeIndicator";
+import { AdminKeyButton } from "./AdminKeyButton";
 import {
   Activity,
   AlertTriangle,
@@ -81,6 +82,7 @@ export function Header() {
           {/* Wallet, Realtime & Language */}
           <div className="flex items-center space-x-2 sm:space-x-3">
             <RealtimeIndicator />
+            <AdminKeyButton />
             <div className="hidden sm:block">
               <LanguageSwitcher />
             </div>

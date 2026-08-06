@@ -5,11 +5,19 @@
  */
 
 import { BaseAgent } from './base-agent';
-import type { AgentType, AgentReasoning, Issue } from '../../../shared/types';
+import { AgentType } from '@bridge-2026/shared';
+import type { AgentReasoning, Issue } from '@bridge-2026/shared';
+
+/** `analyze` 가 각 평가 메서드의 결과를 묶어 넘기는 구조. */
+interface RiskAssessments {
+  priorityRisk: { level: string; description: string };
+  securityRisk: { level: string; details: string[] };
+  operationalRisk: { level: string; details: string[] };
+}
 
 export class RiskSecurityAgent extends BaseAgent {
   constructor() {
-    super('risk_security' as AgentType, 'Risk & Security Agent');
+    super(AgentType.RISK_SECURITY, 'Risk & Security Agent');
   }
   
   async analyze(issue: Issue, context?: Record<string, unknown>): Promise<AgentReasoning> {
@@ -120,7 +128,7 @@ export class RiskSecurityAgent extends BaseAgent {
   
   private calculateConfidence(
     issue: Issue,
-    risks: Record<string, any>
+    risks: RiskAssessments
   ): number {
     let confidence = 0.7; // 기본 신뢰도
     
@@ -141,7 +149,7 @@ export class RiskSecurityAgent extends BaseAgent {
   
   private generateRecommendation(
     issue: Issue,
-    risks: Record<string, any>
+    risks: RiskAssessments
   ): string {
     if (risks.securityRisk.level === 'high') {
       return '즉각적인 보안 검토 및 대응 조치가 필요합니다. 보안 팀과 긴급 협의를 권장합니다.';
@@ -160,7 +168,7 @@ export class RiskSecurityAgent extends BaseAgent {
   
   private generateAnalysis(
     issue: Issue,
-    risks: Record<string, any>
+    risks: RiskAssessments
   ): string {
     return `위험 및 보안 관점 분석:
 

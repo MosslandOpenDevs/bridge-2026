@@ -6,42 +6,28 @@ import { io, Socket } from "socket.io-client";
 // 빈 문자열이면 현재 도메인 사용 (상대 경로)
 const SOCKET_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
-export interface SocketStats {
-  signals: number;
-  issues: number;
-  proposals: number;
-  activeProposals: number;
-}
+// The event payloads come from @oracle/core, which the API emits against, so
+// the two cannot drift apart unnoticed. They used to be declared separately
+// here and had: the server sent a round object where this expected a number,
+// and finalConsensusScore where this read consensusScore (rendering NaN).
+import {
+  SOCKET_EVENTS,
+  type StatsUpdateEvent,
+  type SignalsCollectedEvent,
+  type IssuesDetectedEvent,
+  type ProposalCreatedEvent,
+  type ProposalVotedEvent,
+  type ProposalFinalizedEvent,
+} from "@oracle/core";
 
-export interface SignalsCollectedEvent {
-  count: number;
-  total: number;
-  signals: any[];
-}
-
-export interface IssuesDetectedEvent {
-  newCount: number;
-  totalCount: number;
-  issues: any[];
-}
-
-export interface ProposalCreatedEvent {
-  proposal: any;
-  totalCount: number;
-  activeCount: number;
-}
-
-export interface ProposalVotedEvent {
-  proposalId: string;
-  vote: any;
-  tally: {
-    forVotes: string;
-    againstVotes: string;
-    abstainVotes: string;
-    totalVotes: string;
-    participationRate: number;
-  };
-}
+export type {
+  SignalsCollectedEvent,
+  IssuesDetectedEvent,
+  ProposalCreatedEvent,
+  ProposalVotedEvent,
+  ProposalFinalizedEvent,
+};
+export type SocketStats = StatsUpdateEvent;
 
 type SocketEventHandler<T> = (data: T) => void;
 
@@ -56,11 +42,13 @@ export function useSocket() {
     issuesDetected: SocketEventHandler<IssuesDetectedEvent>[];
     proposalCreated: SocketEventHandler<ProposalCreatedEvent>[];
     proposalVoted: SocketEventHandler<ProposalVotedEvent>[];
+    proposalFinalized: SocketEventHandler<ProposalFinalizedEvent>[];
   }>({
     signalsCollected: [],
     issuesDetected: [],
     proposalCreated: [],
     proposalVoted: [],
+    proposalFinalized: [],
   });
 
   useEffect(() => {
@@ -88,24 +76,24 @@ export function useSocket() {
     });
 
     // Stats update on connection
-    socket.on("stats:update", (data: SocketStats) => {
+    socket.on(SOCKET_EVENTS.statsUpdate, (data: SocketStats) => {
       setStats(data);
     });
 
     // Signal events
-    socket.on("signals:collected", (data: SignalsCollectedEvent) => {
+    socket.on(SOCKET_EVENTS.signalsCollected, (data: SignalsCollectedEvent) => {
       setStats((prev) => prev ? { ...prev, signals: data.total } : prev);
       handlersRef.current.signalsCollected.forEach((handler) => handler(data));
     });
 
     // Issue events
-    socket.on("issues:detected", (data: IssuesDetectedEvent) => {
+    socket.on(SOCKET_EVENTS.issuesDetected, (data: IssuesDetectedEvent) => {
       setStats((prev) => prev ? { ...prev, issues: data.totalCount } : prev);
       handlersRef.current.issuesDetected.forEach((handler) => handler(data));
     });
 
     // Proposal events
-    socket.on("proposals:created", (data: ProposalCreatedEvent) => {
+    socket.on(SOCKET_EVENTS.proposalCreated, (data: ProposalCreatedEvent) => {
       setStats((prev) => prev ? {
         ...prev,
         proposals: data.totalCount,
@@ -115,8 +103,18 @@ export function useSocket() {
     });
 
     // Vote events
-    socket.on("proposals:voted", (data: ProposalVotedEvent) => {
+    socket.on(SOCKET_EVENTS.proposalVoted, (data: ProposalVotedEvent) => {
       handlersRef.current.proposalVoted.forEach((handler) => handler(data));
+    });
+
+    // Finalization: voting closed and the proposal passed or was rejected.
+    socket.on(SOCKET_EVENTS.proposalFinalized, (data: ProposalFinalizedEvent) => {
+      setStats((prev) => prev ? {
+        ...prev,
+        proposals: data.totalCount,
+        activeProposals: data.activeCount,
+      } : prev);
+      handlersRef.current.proposalFinalized.forEach((handler) => handler(data));
     });
 
     return () => {
@@ -164,6 +162,18 @@ export function useSocket() {
     };
   }, []);
 
+  // Subscribe to finalization events
+  const onProposalFinalized = useCallback(
+    (handler: SocketEventHandler<ProposalFinalizedEvent>) => {
+      handlersRef.current.proposalFinalized.push(handler);
+      return () => {
+        handlersRef.current.proposalFinalized =
+          handlersRef.current.proposalFinalized.filter((h) => h !== handler);
+      };
+    },
+    [],
+  );
+
   return {
     isConnected,
     stats,
@@ -172,5 +182,6 @@ export function useSocket() {
     onIssuesDetected,
     onProposalCreated,
     onProposalVoted,
+    onProposalFinalized,
   };
 }

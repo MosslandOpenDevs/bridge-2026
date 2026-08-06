@@ -5,62 +5,64 @@ import {
   ManyToOne,
   CreateDateColumn,
   Index,
+  Unique,
   JoinColumn,
 } from 'typeorm';
 import type { Vote } from '@bridge-2026/shared';
 import { ProposalEntity } from './proposal.entity';
 
+/**
+ * Maps the `votes` table in infrastructure/database/schemas/proposals.sql.
+ *
+ * The (proposal_id, voter_address) uniqueness is declared in the database as
+ * well: the service's "already voted" lookup is not atomic, so two concurrent
+ * requests can both pass it and only the constraint stops the second insert.
+ * Voter addresses are stored EIP-55 checksummed, so the constraint only holds
+ * if every write path canonicalizes first (see src/security.ts).
+ */
 @Entity('votes')
-@Index(['proposalId', 'voterAddress'])
+@Unique('votes_proposal_id_voter_address_key', ['proposalId', 'voterAddress'])
 export class VoteEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ name: 'proposal_id', type: 'uuid' })
   @Index()
   proposalId: string;
 
   @ManyToOne(() => ProposalEntity, proposal => proposal.votes)
-  @JoinColumn({ name: 'proposalId' })
+  @JoinColumn({ name: 'proposal_id' })
   proposal: ProposalEntity;
 
-  @Column({ type: 'varchar', length: 255 })
+  @Column({ name: 'voter_address', type: 'text' })
   @Index()
   voterAddress: string;
 
-  @Column({ type: 'varchar', length: 20 })
-  choice: string;
+  @Column({ name: 'choice', type: 'varchar', length: 10 })
+  choice: Vote['choice'];
 
-  @Column({ type: 'decimal', precision: 20, scale: 2 })
-  weight: number;
+  /**
+   * NUMERIC has no lossless JavaScript counterpart, so the pg driver hands it
+   * back as a string; toVote() is the single place that converts.
+   */
+  @Column({ name: 'weight', type: 'numeric' })
+  weight: string | number;
 
-  @Column({ type: 'varchar', length: 255, nullable: true })
+  @Column({ name: 'tx_hash', type: 'text', nullable: true })
   txHash: string | null;
 
-  @Column({ type: 'bigint' })
-  timestamp: number;
-
-  @CreateDateColumn()
-  createdAt: Date;
+  @CreateDateColumn({ name: 'voted_at', type: 'timestamp with time zone' })
+  votedAt: Date;
 
   toVote(): Vote {
     return {
       id: this.id,
       proposalId: this.proposalId,
       voterAddress: this.voterAddress,
-      choice: this.choice as Vote['choice'],
-      weight: parseFloat(this.weight.toString()),
-      txHash: this.txHash,
-      timestamp: this.timestamp,
+      choice: this.choice,
+      weight: parseFloat(String(this.weight)),
+      votedAt: this.votedAt.getTime(),
+      txHash: this.txHash ?? undefined,
     };
   }
 }
-
-
-
-
-
-
-
-
-

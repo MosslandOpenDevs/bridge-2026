@@ -2,7 +2,7 @@
 -- Agentic Consensus에서 생성된 Decision Packet을 저장합니다.
 
 CREATE TABLE IF NOT EXISTS decision_packets (
-    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     issue_id UUID NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
     recommendation TEXT NOT NULL,
     recommendation_details TEXT NOT NULL,

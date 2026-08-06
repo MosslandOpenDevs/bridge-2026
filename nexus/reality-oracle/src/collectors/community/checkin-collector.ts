@@ -5,7 +5,7 @@
  */
 
 import { BaseCollector } from '../base-collector';
-import type { Signal, SignalSource } from '../../../../shared/types';
+import type { Signal, SignalSource } from '@bridge-2026/shared';
 import { v4 as uuidv4 } from 'uuid';
 
 /**

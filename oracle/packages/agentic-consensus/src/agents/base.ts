@@ -261,7 +261,9 @@ ${ctx.patterns.map((p: string) => `- ${p}`).join("\n")}`);
    * Filter context for prompt (remove large arrays to save tokens)
    */
   protected filterContextForPrompt(context: AgentContext): any {
-    const { historicalDecisions, agentFeedback, patterns, ...rest } = context as any;
+    // `patterns` is dropped from the prompt deliberately; the other two are
+    // summarized below rather than passed through in full.
+    const { historicalDecisions, agentFeedback, patterns: _patterns, ...rest } = context as any;
     return {
       ...rest,
       hasHistoricalData: !!historicalDecisions && historicalDecisions.length > 0,
@@ -476,7 +478,7 @@ Respond in JSON format:
       .filter(o => o.agentId !== this.id)
       .find(o => o.stance.includes("support"));
 
-    let targetOpinion = opposingOpinion || supportingOpinion || otherOpinions[0];
+    const targetOpinion = opposingOpinion || supportingOpinion || otherOpinions[0];
     let messageType: DiscussionMessage["messageType"] = "clarification";
     let content = "";
     let keyPoints: string[] = [];
@@ -517,7 +519,7 @@ Respond in JSON format:
     };
   }
 
-  protected getExpertiseContext(issue: DetectedIssue): string {
+  protected getExpertiseContext(_issue: DetectedIssue): string {
     const contexts: Record<AgentRole, string> = {
       risk: "security and risk mitigation are paramount for sustainable governance",
       treasury: "financial stability and token economics must be carefully balanced",
@@ -528,7 +530,7 @@ Respond in JSON format:
     return contexts[this.role] || "this requires careful analysis";
   }
 
-  protected getCounterpoint(issue: DetectedIssue): string {
+  protected getCounterpoint(_issue: DetectedIssue): string {
     const counterpoints: Record<AgentRole, string> = {
       risk: "the potential risks can be mitigated with proper safeguards",
       treasury: "the financial impact can be managed through phased implementation",

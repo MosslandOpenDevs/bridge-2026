@@ -3,6 +3,7 @@
  * canonical JSON hashing, and error sanitization.
  */
 
+import { timingSafeEqual } from "node:crypto";
 import { verifyMessage, type Address, type Hex } from "viem";
 import type { Request, Response, NextFunction } from "express";
 
@@ -10,6 +11,14 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PROD = NODE_ENV === "production";
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
+/**
+ * Opt-in escape hatch for local demos, honoured outside production only.
+ * It leaves every admin endpoint anonymous, so it must never be set on a
+ * deployment that anyone else can reach.
+ */
+const DEMO_MODE = process.env.DEMO_MODE === "1" && !IS_PROD;
+/** Shortest key we accept; a two-character "key" is not a credential. */
+const MIN_ADMIN_KEY_LENGTH = 16;
 const REQUIRE_VOTE_SIGNATURE =
   (process.env.REQUIRE_VOTE_SIGNATURE || "auto").toLowerCase();
 
@@ -115,6 +124,95 @@ export async function verifyVoteSignature(
   return { ok: true };
 }
 
+/* ------------------------------------------------------------------ *
+ * Delegation authorization
+ *
+ * A delegation policy hands someone else the delegator's voting influence,
+ * so creating or revoking one must be proven by the delegator's wallet.
+ * ------------------------------------------------------------------ */
+
+export interface DelegationMessageParams {
+  action: "create" | "revoke";
+  delegator: string;
+  /** Agent id or address receiving the delegation; absent when revoking. */
+  delegate?: string;
+  /** Canonical JSON of the normalized conditions; absent when revoking. */
+  conditions?: string;
+  expiresAt?: string;
+  /** Policy being revoked; absent when creating. */
+  policyId?: string;
+  nonce: string;
+  timestamp: number;
+}
+
+export function buildDelegationMessage(params: DelegationMessageParams): string {
+  const lines = [
+    "BRIDGE Oracle Delegation",
+    `Action: ${params.action}`,
+    `Delegator: ${params.delegator.toLowerCase()}`,
+  ];
+  if (params.action === "create") {
+    lines.push(
+      `Delegate: ${(params.delegate || "").trim()}`,
+      `Conditions: ${params.conditions ?? "[]"}`,
+      `ExpiresAt: ${params.expiresAt ?? "none"}`,
+    );
+  } else {
+    lines.push(`PolicyId: ${params.policyId ?? ""}`);
+  }
+  lines.push(`Nonce: ${params.nonce}`, `Timestamp: ${params.timestamp}`);
+  return lines.join("\n");
+}
+
+/**
+ * Whether delegation changes must carry a delegator signature.
+ * Always required in production; "never" is honoured only outside it.
+ */
+export function isDelegationSignatureRequired(): boolean {
+  const mode = (process.env.REQUIRE_DELEGATION_SIGNATURE || "always").toLowerCase();
+  if (mode === "never" && !IS_PROD) return false;
+  return true;
+}
+
+export async function verifyDelegationSignature(input: {
+  message: string;
+  delegator: Address;
+  signature?: Hex;
+  nonce?: string;
+  timestamp?: number;
+}): Promise<VoteSignatureResult> {
+  const { message, delegator, signature, nonce, timestamp } = input;
+
+  if (!signature || !nonce || !timestamp) {
+    return { ok: false, reason: "signature, nonce, and timestamp are required" };
+  }
+  if (!/^0x[0-9a-fA-F]+$/.test(signature)) {
+    return { ok: false, reason: "invalid signature format" };
+  }
+  if (Math.abs(Date.now() - timestamp) > SIGNATURE_TTL_MS) {
+    return { ok: false, reason: "signature expired or timestamp out of range" };
+  }
+
+  const nonceKey = `delegation:${delegator.toLowerCase()}:${nonce}`;
+  if (seenNonces.has(nonceKey)) {
+    return { ok: false, reason: "nonce already used (replay detected)" };
+  }
+
+  let valid = false;
+  try {
+    valid = await verifyMessage({ address: delegator, message, signature });
+  } catch {
+    return { ok: false, reason: "signature verification failed" };
+  }
+  if (!valid) {
+    return { ok: false, reason: "signature does not match the delegator address" };
+  }
+
+  seenNonces.set(nonceKey, Date.now() + SIGNATURE_TTL_MS);
+  pruneNonces();
+  return { ok: true };
+}
+
 /**
  * Decide whether vote signatures are required.
  * - "always": always require
@@ -123,35 +221,104 @@ export async function verifyVoteSignature(
  */
 export function isVoteSignatureRequired(mocEnabled: boolean): boolean {
   if (REQUIRE_VOTE_SIGNATURE === "always") return true;
-  if (REQUIRE_VOTE_SIGNATURE === "never") return false;
+  // "never" is a demo switch. Honouring it in production would leave voting
+  // open to anyone able to name someone else's address, which is the one thing
+  // the signature exists to stop — the admin key and delegation switches are
+  // ignored in production for the same reason.
+  if (REQUIRE_VOTE_SIGNATURE === "never") return IS_PROD;
   return mocEnabled;
 }
 
 /**
- * Admin API key middleware. Protects mutation endpoints from anonymous abuse.
- * If ADMIN_API_KEY is unset, the middleware is a no-op (dev convenience).
+ * How admin endpoints behave in this process:
+ * - "enforced":  ADMIN_API_KEY is set; callers must present it.
+ * - "demo-open": no key, DEMO_MODE=1, non-production — anonymous access.
+ * - "blocked":   no key — admin endpoints are refused outright.
+ *
+ * "blocked" is the default precisely because the previous behaviour was to
+ * fall through to next(): a single missing environment variable opened
+ * proposal creation, finalization, execution and outcome recording to anyone.
+ */
+export type AdminAuthMode = "enforced" | "demo-open" | "blocked";
+
+export const adminAuthMode: AdminAuthMode = ADMIN_API_KEY
+  ? "enforced"
+  : DEMO_MODE
+    ? "demo-open"
+    : "blocked";
+
+/**
+ * Fail fast at boot rather than at the first admin request. Returns an error
+ * message when the process must not start; null when the configuration is
+ * acceptable.
+ */
+export function adminAuthStartupError(): string | null {
+  if (IS_PROD && !ADMIN_API_KEY) {
+    return (
+      "ADMIN_API_KEY is required when NODE_ENV=production. Without it the " +
+      "admin endpoints (proposal create/finalize/execute, outcome recording, " +
+      "signal collection, issue detection) have no authentication at all. " +
+      "Set ADMIN_API_KEY to a random secret of at least " +
+      `${MIN_ADMIN_KEY_LENGTH} characters.`
+    );
+  }
+  if (ADMIN_API_KEY && ADMIN_API_KEY.length < MIN_ADMIN_KEY_LENGTH) {
+    return `ADMIN_API_KEY is too short (minimum ${MIN_ADMIN_KEY_LENGTH} characters).`;
+  }
+  if (DEMO_MODE) {
+    return null; // allowed, but the caller logs a warning
+  }
+  return null;
+}
+
+/** Constant-time comparison that does not leak the key length through timing. */
+function secretEquals(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) {
+    // Still burn a comparison so the failure path has similar cost.
+    timingSafeEqual(b, b);
+    return false;
+  }
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Admin API key middleware. Protects mutation and LLM-spending endpoints from
+ * anonymous abuse.
  */
 export function requireAdminKey(
   req: Request,
   res: Response,
   next: NextFunction,
 ): void {
-  if (!ADMIN_API_KEY) {
+  if (adminAuthMode === "demo-open") {
     next();
     return;
   }
+
+  if (adminAuthMode === "blocked") {
+    res.status(503).json({
+      error:
+        "Admin endpoints are disabled because ADMIN_API_KEY is not configured.",
+      code: "ADMIN_AUTH_UNCONFIGURED",
+    });
+    return;
+  }
+
   const provided =
     req.header("x-admin-api-key") ||
     (req.header("authorization") || "").replace(/^Bearer\s+/i, "");
-  if (provided !== ADMIN_API_KEY) {
-    res.status(401).json({ error: "Unauthorized" });
+
+  if (!provided || !secretEquals(provided, ADMIN_API_KEY as string)) {
+    res.status(401).json({ error: "Unauthorized", code: "ADMIN_AUTH_INVALID" });
     return;
   }
   next();
 }
 
 export function isAdminAuthEnabled(): boolean {
-  return Boolean(ADMIN_API_KEY);
+  return adminAuthMode === "enforced";
 }
 
 /**

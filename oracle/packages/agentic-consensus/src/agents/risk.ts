@@ -23,7 +23,7 @@ Your analysis should help protect the system and its users from harm.`;
 
   protected deliberateRuleBased(
     issue: DetectedIssue,
-    context: AgentContext
+    _context: AgentContext
   ): AgentOpinion {
     let stance: AgentOpinion["stance"] = "neutral";
     let confidence = 0.5;

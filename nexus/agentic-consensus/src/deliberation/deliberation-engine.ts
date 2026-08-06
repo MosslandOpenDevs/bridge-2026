@@ -4,7 +4,8 @@
  * 멀티 에이전트 협의를 관리하는 엔진입니다.
  */
 
-import type { Issue, AgentReasoning, AgentType } from '../../../shared/types';
+import { AgentType } from '@bridge-2026/shared';
+import type { Issue, AgentReasoning } from '@bridge-2026/shared';
 import type { IAgent } from '../agents/base-agent';
 import { DeliberationProtocol } from './deliberation-protocol';
 
@@ -82,7 +83,7 @@ export class DeliberationEngine {
     
     // Moderator 에이전트 찾기
     const moderatorAgent = Array.from(this.agents.values()).find(
-      a => a.type === 'moderator'
+      a => a.type === AgentType.MODERATOR
     );
     
     if (!moderatorAgent) {
@@ -156,14 +157,14 @@ export class DeliberationEngine {
     
     // Moderator의 최종 추론 생성
     const moderatorReasoning: AgentReasoning = {
-      agentType: 'moderator',
+      agentType: AgentType.MODERATOR,
       analysis: `최종 종합:\n${synthesis.recommendation}\n\n위험: ${synthesis.risks.map(r => r.title).join(', ')}`,
       recommendation: synthesis.recommendation,
       confidence: synthesis.confidence,
       considerations: synthesis.alternatives.map(a => a.title),
     };
     
-    reasonings.set('moderator', moderatorReasoning);
+    reasonings.set(AgentType.MODERATOR, moderatorReasoning);
     
     rounds.push({
       round: 3,

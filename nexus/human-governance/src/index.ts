@@ -11,7 +11,11 @@ export * from './agora-integration';
 
 // 편의를 위한 재export
 export { governanceService } from './governance-service';
-export { delegationManager, policyEngine } from './delegation/delegation-manager';
+export { delegationManager } from './delegation/delegation-manager';
+// policyEngine lives in policy-engine, not delegation-manager. Re-exporting it
+// from the wrong module resolved to undefined and, because this explicit
+// export is evaluated after the star exports above, it shadowed the real one.
+export { policyEngine } from './delegation/policy-engine';
 export { agoraIntegration } from './agora-integration';
 
 

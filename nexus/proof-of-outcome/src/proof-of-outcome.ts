@@ -4,13 +4,13 @@
  * 결과 측정, 평가 및 온체인 증명을 관리하는 메인 서비스입니다.
  */
 
-import type { Outcome, Proposal, DecisionPacket } from '../../shared/types';
+import { OutcomeStatus } from '@bridge-2026/shared';
+import type { Outcome, Proposal, DecisionPacket } from '@bridge-2026/shared';
 import { kpiTracker } from './kpi-tracking/kpi-tracker';
 import { outcomeEvaluator } from './evaluation/evaluator';
 import { reputationManager } from './reputation/reputation-manager';
 import { v4 as uuidv4 } from 'uuid';
-import { eventPublisher } from '../../infrastructure/event-bus';
-import { EventType } from '../../infrastructure/event-bus/event-types';
+import { eventPublisher, EventType } from '@bridge-2026/event-bus';
 
 /**
  * Proof of Outcome 서비스
@@ -30,7 +30,7 @@ export class ProofOfOutcome {
       id: uuidv4(),
       proposalId: proposal.id,
       decisionPacketId: decisionPacket.id,
-      status: 'in_progress',
+      status: OutcomeStatus.IN_PROGRESS,
       kpiMeasurements: [],
       executionStartTime,
       createdAt: Date.now(),
@@ -104,7 +104,9 @@ export class ProofOfOutcome {
     outcome.evaluation = outcomeEvaluator.evaluateOutcome(outcome);
     
     // 상태 업데이트
-    outcome.status = outcome.evaluation.success ? 'success' : 'failure';
+    outcome.status = outcome.evaluation.success
+      ? OutcomeStatus.SUCCESS
+      : OutcomeStatus.FAILURE;
     outcome.executionEndTime = executionEndTime;
     outcome.onChainProofHash = onChainProofHash;
     outcome.ipfsRef = ipfsRef;

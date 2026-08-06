@@ -12,7 +12,7 @@ import type {
   Risk,
   KPI,
   DissentingOpinion,
-} from '../../../shared/types';
+} from '@bridge-2026/shared';
 import type { DeliberationResult } from '../deliberation/deliberation-engine';
 
 export interface ModeratorConfig {
@@ -22,14 +22,22 @@ export interface ModeratorConfig {
   model?: string;
 }
 
+/** 호출자가 version을 생략했을 때 Decision Packet에 기록되는 버전. */
+export const DEFAULT_MODERATOR_VERSION = '1.0.0';
+
 /**
  * 모더레이터
  */
 export class Moderator {
   private config: ModeratorConfig;
-  
-  constructor(config: ModeratorConfig = { version: '1.0.0' }) {
-    this.config = config;
+
+  // version은 DecisionPacket.moderator에서 필수이므로 내부적으로는 항상 채워두되,
+  // 호출자에게는 부분 설정만 넘기도록 허용한다.
+  constructor(config: Partial<ModeratorConfig> = {}) {
+    this.config = {
+      ...config,
+      version: config.version ?? DEFAULT_MODERATOR_VERSION,
+    };
   }
   
   /**

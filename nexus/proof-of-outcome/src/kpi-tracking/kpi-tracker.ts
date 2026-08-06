@@ -4,8 +4,7 @@
  * KPI를 추적하고 측정하는 서비스입니다.
  */
 
-import type { KPI, KPIMeasurement, Outcome } from '../../../shared/types';
-import { v4 as uuidv4 } from 'uuid';
+import type { KPI, KPIMeasurement } from '@bridge-2026/shared';
 
 /**
  * KPI 추적기

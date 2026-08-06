@@ -5,11 +5,19 @@
  */
 
 import { BaseAgent } from './base-agent';
-import type { AgentType, AgentReasoning, Issue } from '../../../shared/types';
+import { AgentType } from '@bridge-2026/shared';
+import type { AgentReasoning, Issue } from '@bridge-2026/shared';
+
+/** `analyze` 가 각 평가 메서드의 결과를 묶어 넘기는 구조. */
+interface TreasuryAssessments {
+  financialImpact: { level: string; estimated: string };
+  resourceRequirement: { level: string; details: string[] };
+  budgetFeasibility: boolean;
+}
 
 export class TreasuryAgent extends BaseAgent {
   constructor() {
-    super('treasury' as AgentType, 'Treasury & Resource Agent');
+    super(AgentType.TREASURY, 'Treasury & Resource Agent');
   }
   
   async analyze(issue: Issue, context?: Record<string, unknown>): Promise<AgentReasoning> {
@@ -152,7 +160,7 @@ export class TreasuryAgent extends BaseAgent {
   
   private calculateConfidence(
     issue: Issue,
-    assessments: Record<string, any>
+    assessments: TreasuryAssessments
   ): number {
     let confidence = 0.6; // 기본 신뢰도
     
@@ -170,7 +178,7 @@ export class TreasuryAgent extends BaseAgent {
   
   private generateRecommendation(
     issue: Issue,
-    assessments: Record<string, any>
+    assessments: TreasuryAssessments
   ): string {
     if (!assessments.budgetFeasibility) {
       return '예산 제약이 있어 단계적 접근이나 대안적 자금 조달 방안을 검토해야 합니다.';
@@ -189,7 +197,7 @@ export class TreasuryAgent extends BaseAgent {
   
   private generateAnalysis(
     issue: Issue,
-    assessments: Record<string, any>
+    assessments: TreasuryAssessments
   ): string {
     return `재무 및 자원 할당 관점 분석:
 

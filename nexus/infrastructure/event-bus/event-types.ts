@@ -4,7 +4,7 @@
  * BRIDGE 2026 시스템의 모든 이벤트 타입을 정의합니다.
  */
 
-import type { Signal, Issue, DecisionPacket, Proposal, Outcome } from '../../shared/types';
+import type { Signal, Issue, DecisionPacket, Proposal, Outcome } from '@bridge-2026/shared';
 
 /**
  * 이벤트 타입 열거형
@@ -199,6 +199,15 @@ export type Event =
   | OutcomeMeasuredEvent
   | OutcomeEvaluatedEvent
   | ReputationUpdatedEvent;
+
+/**
+ * 이벤트 타입 키에 대응하는 구체 이벤트 타입
+ *
+ * 구독 API는 핸들러가 받는 이벤트를 구독 키로부터 유도해야 한다. 핸들러 타입을
+ * 키와 무관한 타입 인자로 두면 `SIGNAL_COLLECTED`를 구독하면서 `VoteCastEvent`를
+ * 받는 핸들러를 넘길 수 있고, 그 불일치는 런타임에야 드러난다.
+ */
+export type EventOf<K extends EventType> = Extract<Event, { type: K }>;
 
 
 

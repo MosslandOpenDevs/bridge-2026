@@ -1,0 +1,120 @@
+name: CI
+
+# The deploy poller (oracle/scripts/deploy.sh) can be configured to refuse any
+# commit these checks have not gone green on. The job names below are what
+# DEPLOY_REQUIRED_CHECKS matches against, so renaming one means updating the
+# server's configuration too.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    name: oracle
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oracle
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: oracle/pnpm-lock.yaml
+
+      # --frozen-lockfile also verifies the lockfile matches every package.json.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      # Boots the API against a temporary database and exercises the governance
+      # lifecycle end to end; also runs the contract test suite.
+      - name: Test
+        run: pnpm test
+
+  # Nexus is the reference stack and is never deployed, so it is not part of the
+  # deploy gate's required checks. It is built here so its documented setup
+  # cannot silently rot again.
+  nexus:
+    name: nexus
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nexus
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: nexus/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Test
+        run: |
+          pnpm --filter @bridge-2026/reality-oracle exec jest
+          pnpm --filter @bridge-2026/shared-utils exec jest
+
+      # The build must not write into source directories. It used to emit 24
+      # files beside the shared sources, which a `git add -A` would commit.
+      - name: No build output in sources
+        run: |
+          strays=$(git status --porcelain | grep '^??' || true)
+          if [ -n "$strays" ]; then
+            echo "Build left untracked files in the source tree:"
+            echo "$strays"
+            exit 1
+          fi
+
+  deploy-script:
+    name: deploy-script
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: bash -n oracle/scripts/deploy.sh
+
+      # Warning and above. ShellCheck exits non-zero on info-level notes too,
+      # and deploy.sh carries two by design (a deliberately single-quoted node
+      # program, and an `ls` over filenames this script itself creates). With
+      # the deploy gate fail-closed, a job that can never go green would block
+      # every deploy.
+      - name: ShellCheck
+        run: shellcheck --severity=warning oracle/scripts/deploy.sh oracle/scripts/test-deploy-classifier.sh
+
+      # Guards the change classifier: a file landing in the wrong bucket means a
+      # deploy that skips the build, or one that rebuilds for a README edit.
+      - name: Change classifier
+        run: oracle/scripts/test-deploy-classifier.sh

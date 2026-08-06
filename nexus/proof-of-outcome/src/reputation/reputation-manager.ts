@@ -4,8 +4,7 @@
  * 에이전트 신뢰도 및 평판을 관리하는 서비스입니다.
  */
 
-import type { Reputation, AgentType } from '../../../shared/types';
-import { v4 as uuidv4 } from 'uuid';
+import type { Reputation, AgentType } from '@bridge-2026/shared';
 
 /**
  * 평판 관리자
@@ -100,10 +99,13 @@ export class ReputationManager {
    * 신뢰도가 높은 에이전트를 추천합니다.
    */
   getRecommendedAgents(threshold: number = 0.7): AgentType[] {
-    return Array.from(this.reputations.values())
-      .filter(r => r.trustScore >= threshold)
-      .sort((a, b) => b.trustScore - a.trustScore)
-      .map(r => r.agentType);
+    // Ranked over the map entries rather than the values: `Reputation.agentType`
+    // is declared as a plain `string` in the shared types, so only the map key
+    // still carries the narrower `AgentType`.
+    return Array.from(this.reputations.entries())
+      .filter(([, reputation]) => reputation.trustScore >= threshold)
+      .sort(([, a], [, b]) => b.trustScore - a.trustScore)
+      .map(([agentType]) => agentType);
   }
 }
 

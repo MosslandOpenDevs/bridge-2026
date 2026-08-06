@@ -534,7 +534,7 @@ export class GitHubAdapter extends BaseAdapter {
         }
         break;
 
-      case "activity_summary":
+      case "activity_summary": {
         category = "github_activity";
         severity = (data.totalEvents || 0) > 20 ? "medium" : "low";
         value = data.totalEvents || 0;
@@ -550,6 +550,7 @@ export class GitHubAdapter extends BaseAdapter {
           .replace("{pr}", String(prCount))
           .replace("{privateNote}", privateNote);
         break;
+      }
 
       default:
         category = "github_unknown";

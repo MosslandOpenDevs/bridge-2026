@@ -4,8 +4,23 @@
   "description": "Shared types and utilities for BRIDGE 2026",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./utils": {
+      "types": "./dist/utils/index.d.ts",
+      "default": "./dist/utils/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepare": "pnpm run build",
     "watch": "tsc --watch",
     "clean": "rm -rf dist"
   },

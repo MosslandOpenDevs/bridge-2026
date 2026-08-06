@@ -5,9 +5,9 @@
  * Decision Packet을 Proposal로 변환하고, 투표를 관리합니다.
  */
 
-import type { DecisionPacket, Proposal, Vote, ProposalResult } from '../../shared/types';
-import { eventPublisher } from '../../infrastructure/event-bus';
-import { EventType } from '../../infrastructure/event-bus/event-types';
+import type { DecisionPacket, Proposal, Vote, ProposalResult } from '@bridge-2026/shared';
+import { ProposalStatus, ProposalType } from '@bridge-2026/shared';
+import { EventType, eventPublisher } from '@bridge-2026/event-bus';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -37,7 +37,7 @@ export class GovernanceService {
       title: `[AI Assisted] ${decisionPacket.recommendation.substring(0, 100)}`,
       description: this.generateProposalDescription(decisionPacket),
       type: this.inferProposalType(decisionPacket),
-      status: 'pending',
+      status: ProposalStatus.PENDING,
       decisionPacketId: decisionPacket.id,
       issueId: decisionPacket.issueId,
       actions: this.extractActions(decisionPacket),
@@ -79,7 +79,7 @@ export class GovernanceService {
     }
     
     const oldStatus = proposal.status;
-    proposal.status = 'active';
+    proposal.status = ProposalStatus.ACTIVE;
     proposal.updatedAt = Date.now();
     
     await eventPublisher.publish({
@@ -196,7 +196,7 @@ export class GovernanceService {
     
     // Proposal 상태 업데이트
     const oldStatus = proposal.status;
-    proposal.status = passed ? 'passed' : 'rejected';
+    proposal.status = passed ? ProposalStatus.PASSED : ProposalStatus.REJECTED;
     proposal.updatedAt = Date.now();
     
     // 이벤트 발행
@@ -273,21 +273,21 @@ ${decisionPacket.alternatives.map(a => `- ${a.title}`).join('\n')}
   /**
    * Proposal 타입을 추론합니다.
    */
-  private inferProposalType(decisionPacket: DecisionPacket): 'governance' | 'treasury' | 'technical' | 'policy' {
+  private inferProposalType(decisionPacket: DecisionPacket): ProposalType {
     // Decision Packet의 내용을 기반으로 타입 추론
     const recommendation = decisionPacket.recommendation.toLowerCase();
-    
+
     if (recommendation.includes('budget') || recommendation.includes('treasury') || recommendation.includes('fund')) {
-      return 'treasury';
+      return ProposalType.TREASURY;
     }
     if (recommendation.includes('code') || recommendation.includes('development') || recommendation.includes('technical')) {
-      return 'technical';
+      return ProposalType.TECHNICAL;
     }
     if (recommendation.includes('policy') || recommendation.includes('rule') || recommendation.includes('regulation')) {
-      return 'policy';
+      return ProposalType.POLICY;
     }
-    
-    return 'governance';
+
+    return ProposalType.GOVERNANCE;
   }
   
   /**

@@ -1,14 +1,7 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Param,
-  Body,
-  Query,
-} from '@nestjs/common';
+import { Controller, Get, Post, Param, Body, Query } from '@nestjs/common';
 import { ProposalsService } from './proposals.service';
 import { VoteDto } from './dto/vote.dto';
-import type { Proposal } from '@bridge-2026/shared';
+import type { Proposal, ProposalResult } from '@bridge-2026/shared';
 
 @Controller('api/proposals')
 export class ProposalsController {
@@ -36,26 +29,12 @@ export class ProposalsController {
   async castVote(
     @Param('id') id: string,
     @Body() voteDto: VoteDto,
-  ): Promise<{ success: boolean; txHash?: string }> {
+  ): Promise<{ success: boolean; txHash?: string; weight: number }> {
     return this.proposalsService.castVote(id, voteDto);
   }
 
   @Post(':id/tally')
-  async tallyVotes(@Param('id') id: string): Promise<{
-    passed: boolean;
-    totalVotes: number;
-    yesVotes: number;
-    noVotes: number;
-  }> {
+  async tallyVotes(@Param('id') id: string): Promise<ProposalResult> {
     return this.proposalsService.tallyVotes(id);
   }
 }
-
-
-
-
-
-
-
-
-

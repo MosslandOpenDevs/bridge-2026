@@ -13,5 +13,11 @@ export * from './outcome';
 // DelegationPolicy는 proposal.ts에 포함되어 있음
 
 // Utils
-export * from '../utils';
+//
+// The file is named explicitly: `../utils` is a directory carrying its own
+// package.json (@bridge-2026/shared-utils) whose "types" points at
+// ../dist/utils/index.d.ts, so a directory-style import resolves to the
+// previous build's output as soon as dist/ exists and tsc then refuses to
+// overwrite its own input.
+export * from '../utils/index';
 

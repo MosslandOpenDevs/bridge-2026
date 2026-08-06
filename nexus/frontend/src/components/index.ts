@@ -10,4 +10,5 @@ export * from './signal-card';
 export * from './delegation-policy-card';
 export * from './delegation-policy-form';
 export * from './outcome-card';
+export * from './demo-mode-banner';
 

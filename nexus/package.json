@@ -1,0 +1,22 @@
+{
+  "name": "@bridge-2026/nexus",
+  "version": "0.1.0",
+  "description": "BRIDGE 2026 Nexus - workspace root for the governance layer packages",
+  "private": true,
+  "license": "BUSL-1.1",
+  "packageManager": "pnpm@10.33.1",
+  "scripts": {
+    "build": "pnpm -r build",
+    "build:shared": "pnpm --filter @bridge-2026/shared build",
+    "clean": "pnpm -r clean"
+  },
+  "keywords": [
+    "governance",
+    "bridge-2026",
+    "nexus"
+  ],
+  "author": "",
+  "engines": {
+    "node": ">=20"
+  }
+}

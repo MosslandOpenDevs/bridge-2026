@@ -2,7 +2,7 @@
 -- Proof of Outcome에서 측정된 결과를 저장합니다.
 
 CREATE TABLE IF NOT EXISTS outcomes (
-    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     proposal_id UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
     decision_packet_id UUID NOT NULL REFERENCES decision_packets(id) ON DELETE CASCADE,
     status VARCHAR(50) NOT NULL CHECK (status IN ('pending', 'in_progress', 'success', 'partial_success', 'failure', 'cancelled')),
@@ -45,7 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_reputation_updated_at ON reputation(updated_at);
 -- 거버넌스 학습 데이터를 저장합니다.
 
 CREATE TABLE IF NOT EXISTS governance_learning (
-    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     issue_categories TEXT[] NOT NULL,
     agent_types TEXT[] NOT NULL,
     success_patterns TEXT[],

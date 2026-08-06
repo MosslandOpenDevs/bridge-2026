@@ -10,14 +10,16 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "paths": {
-      "@bridge-2026/shared": ["../../shared"],
-      "@bridge-2026/event-bus": ["../../infrastructure/event-bus"]
-    }
+    "resolveJsonModule": true
+    // @bridge-2026/* 는 "paths"가 아니라 node_modules의 워크스페이스 심볼릭
+    // 링크로 해석된다. paths로 이웃 패키지의 소스 디렉터리를 가리키면 그
+    // .ts 파일들이 이 패키지의 입력이 되어 rootDir(src) 밖이라는 TS6059가
+    // 나고, tsc가 컴파일 결과를 남의 패키지 디렉터리에 쏟아붓는다.
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  // 테스트는 패키지가 내보내는 산출물이 아니므로 dist에 들어가면 안 된다.
+  // ts-jest는 tsconfig.test.json으로 이들을 따로 컴파일한다.
+  "exclude": ["node_modules", "dist", "src/**/__tests__/**"]
 }
 
 

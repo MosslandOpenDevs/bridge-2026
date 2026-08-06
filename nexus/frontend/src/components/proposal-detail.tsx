@@ -169,14 +169,6 @@ export function ProposalDetail({ proposal, decisionPacket }: ProposalDetailProps
                 {formatPercent(decisionPacket.overallConfidence)}
               </span>
             </div>
-            {decisionPacket.consensusConfidence && (
-              <div>
-                <span className="text-sm text-gray-500">합의 신뢰도:</span>
-                <span className="ml-2 text-moss-600 font-semibold">
-                  {formatPercent(decisionPacket.consensusConfidence)}
-                </span>
-              </div>
-            )}
           </div>
         </div>
       )}

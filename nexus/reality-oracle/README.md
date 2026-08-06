@@ -46,6 +46,19 @@ realityOracle.registerCollector(checkinCollector);
 await realityOracle.startCollectors(60000); // 1분마다 수집
 ```
 
+## 테스트
+
+```bash
+pnpm --filter @bridge-2026/reality-oracle test
+```
+
+해시 체인(`attestation/hash-chain.ts`)의 `verify()`는 저장된 노드만으로 판정하도록
+설계되어 있어, 원본 신호 없이도 변조·재정렬·중간 삭제를 잡아냅니다. 단, 꼬리에서
+노드를 잘라낸 체인은 그 자체로 유효한 접두사이므로 `verify()`만으로는 탐지되지
+않습니다. 절단까지 막으려면 마지막 노드의 해시를 체인 밖에 고정해 두고 대조해야
+합니다. 페이로드 자체의 변조는 원본 신호를 가진 쪽에서 `verifySignal(signal)`로
+확인합니다.
+
 ## 개발 상태
 
 현재 기본 구조가 구현되었습니다:

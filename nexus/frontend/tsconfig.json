@@ -19,9 +19,12 @@
         "name": "next"
       }
     ],
+    // No entry for @bridge-2026/shared: the workspace symlink in node_modules
+    // already resolves it, and mapping only the package root here would send
+    // "@bridge-2026/shared" and "@bridge-2026/shared/utils" down two different
+    // resolution paths — the first bypassing the package's "exports" map.
     "paths": {
-      "@/*": ["./src/*"],
-      "@bridge-2026/shared": ["../shared"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
