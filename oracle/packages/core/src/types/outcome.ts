@@ -51,7 +51,7 @@ export const OutcomeProofSchema = z.object({
   proposalId: z.string().uuid(),
   kpiResults: z.array(KPIResultSchema),
   overallSuccess: z.boolean(),
-  successRate: z.number(), // Percentage of KPIs met
+  successRate: z.number(), // Fraction of KPIs met, in [0,1]
   proofHash: z.string(), // Hash of the proof data
   attestation: z.string().optional(), // Signature or merkle proof
   recordedAt: z.date(),

@@ -485,6 +485,49 @@ async function testExecutionAndMeasuredOutcome() {
   assert(row.successRate === 0.5, "listed outcome keeps the fraction");
 }
 
+/**
+ * The failing case above is satisfied by any threshold above 0.5 — including a
+ * regression of SUCCESS_THRESHOLD to its old percentage value of 80. Only an
+ * outcome that actually passes pins the constant to the [0,1] fraction, and
+ * `overallSuccess === true` is asserted nowhere else in the suite.
+ *
+ * A fresh execution is required rather than re-measuring the one above: a
+ * repeat submission is refused with 409 ALREADY_MEASURED.
+ */
+async function testFullySuccessfulOutcome() {
+  const proposal = await createProposal({ votingPeriod: 800 });
+  await post(
+    `/api/proposals/${proposal.id}/vote`,
+    { voter: voterAddress(51), choice: "for", weight: "10" },
+    false,
+  );
+  await sleep(1000);
+  await post(`/api/proposals/${proposal.id}/finalize`);
+
+  const executed = await post(`/api/proposals/${proposal.id}/execute`);
+  assertStatus(executed.response, 200, "execute for the success case");
+
+  // Both declared KPIs are `at_most`: Resolution time ≤ 24, Recurrence ≤ 0.
+  const measured = await post(
+    `/api/outcomes/${executed.data.execution.id}/measurements`,
+    {
+      measurements: [
+        { name: "Resolution time", actual: 12 },
+        { name: "Recurrence", actual: 0 },
+      ],
+    },
+  );
+  assertStatus(measured.response, 201, "submit passing measurements");
+  assert(
+    measured.data.proof.successRate === 1,
+    `every KPI met should be the fraction 1, got ${measured.data.proof.successRate}`,
+  );
+  assert(
+    measured.data.proof.overallSuccess === true,
+    "every KPI met is an overall success (fails if SUCCESS_THRESHOLD regressed to 80)",
+  );
+}
+
 async function testDeliberationContract() {
   const missing = await post("/api/deliberate", {});
   assertStatus(missing.response, 400, "deliberate without an issue");
@@ -628,6 +671,20 @@ async function testRestartRestoresState() {
     "restored proposal keeps its settings",
   );
 
+  // testExecutionAndMeasuredOutcome left exactly one measured proof (0.5) in the
+  // database. Re-read it: saving and restoring are separate code paths, so a
+  // scaling applied on one side and not the other would otherwise go unnoticed —
+  // nothing else in the suite observes a success rate that has been through SQLite.
+  const outcomesAfter = await get("/api/outcomes");
+  const measuredAfter = outcomesAfter.data.outcomes.filter(
+    (o: any) => o.status === "measured",
+  );
+  assert(measuredAfter.length === 1, "the measured outcome should survive the restart");
+  assert(
+    measuredAfter[0].successRate === 0.5,
+    `restored outcome keeps the 0-1 fraction, got ${measuredAfter[0].successRate}`,
+  );
+
   // The one-vote-per-holder rule has to survive the restore, not just the
   // in-process cache.
   const again = await post(
@@ -709,9 +766,19 @@ async function testStats() {
   assertStatus(response, 200, "stats");
   assert(typeof data.signals.total === "number", "stats: signal total");
   assert(typeof data.proposals.total === "number", "stats: proposal total");
+  // Not a unit check on proof.successRate: this field is a ratio of counts
+  // (successful proofs / total proofs), structurally in [0,1] whatever unit the
+  // proofs carry. The unit is pinned where it actually lives, in
+  // testExecutionAndMeasuredOutcome and testFullySuccessfulOutcome. What this
+  // asserts is that both of those proofs reached the tracker and that exactly
+  // one of them passed the threshold.
   assert(
-    data.outcomes.successRate >= 0 && data.outcomes.successRate <= 1,
-    `stats: success rate should be a 0-1 fraction, got ${data.outcomes.successRate}`,
+    data.outcomes.totalProofs === 2,
+    `stats: expected 2 proofs, got ${data.outcomes.totalProofs}`,
+  );
+  assert(
+    data.outcomes.successRate === 0.5,
+    `stats: expected 1 of 2 proofs successful, got ${data.outcomes.successRate}`,
   );
 }
 
@@ -747,6 +814,9 @@ async function main() {
     await runTest("Delegation authorization", testDelegationAuthorization);
     await runTest("Delegation requires a signature", testDelegationRequiresSignature);
     await runTest("Restart restores governance state", testRestartRestoresState);
+    // Runs after the restart test on purpose: that test asserts exactly one
+    // measured proof survived, and this one mints a second.
+    await runTest("A fully successful outcome", testFullySuccessfulOutcome);
     await runTest("Stats", testStats);
     await runTest("Unknown ids return 404", testNotFoundPaths);
   } finally {
