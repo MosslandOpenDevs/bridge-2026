@@ -64,13 +64,26 @@ const ORACLE_GOVERNANCE_ABI = [
     outputs: [{ type: "uint256" }],
   },
   {
-    name: "castVote",
+    name: "castVoteFor",
     type: "function",
     stateMutability: "nonpayable",
     inputs: [
       { name: "proposalId", type: "uint256" },
+      { name: "voter", type: "address" },
       { name: "choice", type: "uint8" },
       { name: "weight", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    name: "castVotesFor",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "proposalId", type: "uint256" },
+      { name: "voters", type: "address[]" },
+      { name: "choices", type: "uint8[]" },
+      { name: "weights", type: "uint256[]" },
     ],
     outputs: [],
   },
@@ -499,10 +512,16 @@ export class BlockchainService {
   }
 
   /**
-   * Cast a vote on-chain
+   * Mirror one holder's vote on-chain.
+   *
+   * The voter is passed explicitly: the contract keys duplicate detection on
+   * that address, not on the relaying account. Every relayed vote is sent by
+   * this service's single signer, so keying it on the sender let only the
+   * first vote through and reverted the rest with "Already voted".
    */
-  async castVote(
+  async castVoteFor(
     proposalId: number,
+    voter: Address,
     choice: VoteChoice,
     weight: bigint
   ): Promise<TxResult> {
@@ -515,8 +534,8 @@ export class BlockchainService {
       const { request } = await this.publicClient.simulateContract({
         address: this.contractAddress,
         abi: ORACLE_GOVERNANCE_ABI,
-        functionName: "castVote",
-        args: [BigInt(proposalId), choice, weight],
+        functionName: "castVoteFor",
+        args: [BigInt(proposalId), voter, choice, weight],
         account: this.account,
       });
 

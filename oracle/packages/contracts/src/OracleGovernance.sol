@@ -167,16 +167,27 @@ contract OracleGovernance is AccessControl, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @notice Cast a vote on a proposal
-     * @param proposalId The proposal to vote on
+     * @notice Record a vote cast by `voter`, relayed by the oracle.
+     * @dev Only ORACLE_ROLE may submit. Voting power is decided off-chain from
+     *      the proposal's balance snapshot, so the oracle is trusted to report
+     *      the voter and weight faithfully; this contract is the public record
+     *      of that tally, not an independent check of it.
+     *
+     *      Duplicate detection is keyed on `voter`, not on msg.sender. Keying
+     *      it on the sender made relaying impossible: every relayed vote comes
+     *      from the same oracle account, so the first one recorded blocked
+     *      every other holder with "Already voted".
+     * @param proposalId The proposal being voted on
+     * @param voter The holder whose vote this is
      * @param choice The vote choice (For, Against, Abstain)
-     * @param weight The voting power (typically token balance)
+     * @param weight The voting power drawn from the proposal's snapshot
      */
-    function castVote(
+    function castVoteFor(
         uint256 proposalId,
+        address voter,
         VoteChoice choice,
         uint256 weight
-    ) external nonReentrant whenNotPaused onlyRole(ORACLE_ROLE) {
+    ) public nonReentrant whenNotPaused onlyRole(ORACLE_ROLE) {
         Proposal storage proposal = proposals[proposalId];
 
         require(proposal.id != 0, "Proposal does not exist");
@@ -188,11 +199,12 @@ contract OracleGovernance is AccessControl, ReentrancyGuard, Pausable {
             block.timestamp <= proposal.votingEndTime,
             "Voting period ended"
         );
-        require(!hasVoted[proposalId][msg.sender], "Already voted");
+        require(voter != address(0), "Voter required");
+        require(!hasVoted[proposalId][voter], "Already voted");
         require(weight > 0, "Weight must be positive");
 
-        hasVoted[proposalId][msg.sender] = true;
-        votes[proposalId][msg.sender] = choice;
+        hasVoted[proposalId][voter] = true;
+        votes[proposalId][voter] = choice;
 
         if (choice == VoteChoice.For) {
             proposal.forVotes += weight;
@@ -202,7 +214,27 @@ contract OracleGovernance is AccessControl, ReentrancyGuard, Pausable {
             proposal.abstainVotes += weight;
         }
 
-        emit VoteCast(proposalId, msg.sender, choice, weight);
+        emit VoteCast(proposalId, voter, choice, weight);
+    }
+
+    /**
+     * @notice Record several relayed votes in one transaction.
+     * @dev Reverts as a whole if any entry is invalid, so a batch cannot be
+     *      partially applied.
+     */
+    function castVotesFor(
+        uint256 proposalId,
+        address[] calldata voters,
+        VoteChoice[] calldata choices,
+        uint256[] calldata weights
+    ) external {
+        require(
+            voters.length == choices.length && voters.length == weights.length,
+            "Length mismatch"
+        );
+        for (uint256 i = 0; i < voters.length; i++) {
+            castVoteFor(proposalId, voters[i], choices[i], weights[i]);
+        }
     }
 
     /**
