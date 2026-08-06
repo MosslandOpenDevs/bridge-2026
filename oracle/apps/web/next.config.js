@@ -30,6 +30,12 @@ const nextConfig = {
   // take the running site's assets down for the whole build (and leave it
   // broken if the build fails). Unset (dev, plain builds) means default.
   ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
+  experimental: {
+    // Runs src/instrumentation.ts before any route module: it strips Node 25's
+    // method-less localStorage global, which otherwise breaks wallet libraries
+    // during SSR and turns every page into a 500.
+    instrumentationHook: true,
+  },
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },
