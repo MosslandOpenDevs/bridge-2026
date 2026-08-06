@@ -25,8 +25,19 @@ export const ProposalSchema = z.object({
   status: ProposalStatusSchema,
   votingStartsAt: z.date(),
   votingEndsAt: z.date(),
-  quorum: z.number(), // Minimum votes required
-  threshold: z.number(), // Percentage to pass (0-100)
+  /**
+   * Voting duration in ms. Kept on the proposal so activation re-derives the
+   * end time from the period this proposal was created with, instead of
+   * silently substituting the system default.
+   */
+  votingPeriodMs: z.number().int().positive(),
+  quorum: z.number().int().positive(), // Minimum number of votes required
+  threshold: z.number().min(1).max(100), // Percentage of decisive votes to pass
+  /**
+   * Earliest time a passed proposal may be executed. Set when the proposal is
+   * finalized as passed; the timelock gives holders a window to react.
+   */
+  executionEta: z.date().optional(),
   createdAt: z.date(),
   executedAt: z.date().optional(),
 });

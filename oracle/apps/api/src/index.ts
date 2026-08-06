@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { z } from "zod";
 import express, { Express } from "express";
 import { createServer } from "http";
 import { Server as SocketIOServer } from "socket.io";
@@ -261,7 +262,36 @@ moderator.registerAgent(treasuryAgent);
 moderator.registerAgent(communityAgent);
 moderator.registerAgent(productAgent);
 
-const votingSystem = new VotingSystem();
+// Governance parameters. The voting-period floor and the execution timelock
+// are relaxed outside production so tests can exercise the full lifecycle
+// without waiting; production keeps real windows.
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const DAY_MS = 24 * 60 * 60 * 1000;
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    console.error(`❌ Refusing to start: ${name} must be a non-negative integer`);
+    process.exit(1);
+  }
+  return n;
+}
+
+const MIN_VOTING_PERIOD_MS = envInt(
+  "MIN_VOTING_PERIOD_MS",
+  IS_PRODUCTION ? 60 * 60 * 1000 : 1000,
+);
+const EXECUTION_DELAY_MS = envInt(
+  "EXECUTION_DELAY_MS",
+  IS_PRODUCTION ? 2 * DAY_MS : 0,
+);
+
+const votingSystem = new VotingSystem({
+  votingPeriod: envInt("DEFAULT_VOTING_PERIOD_MS", 7 * DAY_MS),
+  minVotingPeriod: MIN_VOTING_PERIOD_MS,
+  executionDelay: EXECUTION_DELAY_MS,
+});
 const delegationManager = new DelegationManager();
 const outcomeTracker = new OutcomeTrackerImpl();
 const trustManager = new TrustManager();
@@ -645,10 +675,12 @@ app.post("/api/deliberate", requireAdminKey, async (req, res) => {
 // Admin-gated: a debate fans out to every agent for several rounds.
 app.post("/api/debate", requireAdminKey, async (req, res) => {
   try {
-    const { issue, context, maxRounds = 3 } = req.body;
+    const { issue, context } = req.body;
     if (!issue) {
       return res.status(400).json({ error: "Issue is required" });
     }
+    // Never pass the client's number straight through as a loop bound.
+    const maxRounds = Moderator.clampRounds(req.body?.maxRounds ?? 3);
 
     // Enrich context with historical data for agent learning
     const enrichedContext = enrichContextWithHistory(
@@ -759,13 +791,46 @@ app.get("/api/proposals", (req, res) => {
   }
 });
 
+// Proposal settings are attacker-controlled input, so they are validated
+// before they reach the voting system: a negative quorum or threshold makes
+// both the quorum and threshold checks vacuously true, passing a proposal
+// with no votes at all.
+const proposalOptionsSchema = z
+  .object({
+    quorum: z.number().int().positive().max(1_000_000_000).optional(),
+    threshold: z.number().min(1).max(100).optional(),
+    votingPeriod: z
+      .number()
+      .int()
+      .min(MIN_VOTING_PERIOD_MS)
+      .max(90 * DAY_MS)
+      .optional(),
+  })
+  .strict();
+
 app.post("/api/proposals", requireAdminKey, (req, res) => {
   try {
     const { decisionPacket, proposer, options } = req.body;
     if (!decisionPacket || !proposer) {
       return res.status(400).json({ error: "decisionPacket and proposer are required" });
     }
-    const proposal = votingSystem.createProposal(decisionPacket, proposer, options);
+
+    const parsedOptions = proposalOptionsSchema.safeParse(options ?? {});
+    if (!parsedOptions.success) {
+      return res.status(400).json({
+        error: "Invalid proposal options",
+        details: parsedOptions.error.issues.map((i) => ({
+          path: i.path.join("."),
+          message: i.message,
+        })),
+      });
+    }
+
+    const proposal = votingSystem.createProposal(
+      decisionPacket,
+      proposer,
+      parsedOptions.data,
+    );
     // Auto-activate the proposal for immediate voting
     votingSystem.activateProposal(proposal.id);
     const activatedProposal = votingSystem.getProposal(proposal.id);
@@ -780,7 +845,9 @@ app.post("/api/proposals", requireAdminKey, (req, res) => {
 
     res.status(201).json({ proposal: activatedProposal });
   } catch (error) {
-    res.status(500).json({ error: "Failed to create proposal" });
+    // Rejected settings are a client mistake, not a server fault.
+    console.error("Failed to create proposal:", error);
+    res.status(400).json({ error: sanitizeError(error, "Failed to create proposal") });
   }
 });
 

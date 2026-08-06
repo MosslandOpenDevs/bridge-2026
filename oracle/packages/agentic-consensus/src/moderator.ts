@@ -17,6 +17,17 @@ import { LLMClient, LLMConfig } from "./llm/index.js";
 export interface ModeratorConfig extends LLMConfig {}
 
 export class Moderator {
+  /** Hard bounds on debate length, independent of what a caller asks for. */
+  static readonly MIN_ROUNDS = 1;
+  static readonly MAX_ROUNDS = 5;
+
+  /** Coerce any caller-supplied round count into the supported range. */
+  static clampRounds(requested: unknown): number {
+    const n = Math.floor(Number(requested));
+    if (!Number.isFinite(n)) return 3;
+    return Math.min(Moderator.MAX_ROUNDS, Math.max(Moderator.MIN_ROUNDS, n));
+  }
+
   private agents: GovernanceAgent[] = [];
   private llmClient: LLMClient;
 
@@ -101,6 +112,11 @@ Be objective, thorough, and actionable.`;
     const sessionId = generateId();
     const startedAt = now();
 
+    // Clamp here as well as at the API boundary: every extra round replays the
+    // accumulated transcript to every agent, so an unbounded round count is an
+    // unbounded LLM bill.
+    maxRounds = Moderator.clampRounds(maxRounds);
+
     // Round 0: Initial deliberation (collect initial opinions)
     console.log(`[Moderator] Starting debate session ${sessionId} for issue: ${issue.title}`);
     const initialOpinions: AgentOpinion[] = [];
@@ -141,6 +157,7 @@ Be objective, thorough, and actionable.`;
     // Conduct debate rounds
     let currentOpinions = [...initialOpinions];
     let allMessages: DiscussionMessage[] = [];
+    let previousConsensusScore = initialConsensus.consensusScore;
 
     for (let roundNum = 1; roundNum <= maxRounds; roundNum++) {
       console.log(`[Moderator] Starting round ${roundNum}/${maxRounds}`);
@@ -192,12 +209,12 @@ Be objective, thorough, and actionable.`;
         }
       }
 
-      // Calculate consensus shift
-      const previousConsensus = roundNum === 1
-        ? initialConsensus.consensusScore
-        : session.rounds[roundNum - 2]?.consensusShift ?? initialConsensus.consensusScore;
+      // Calculate consensus shift against the previous round's *score*.
+      // Subtracting the previous round's shift instead made the value
+      // oscillate, so the "no progress" early exit rarely fired.
       const currentConsensus = this.calculateConsensusScore(currentOpinions);
-      const consensusShift = currentConsensus.consensusScore - previousConsensus;
+      const consensusShift = currentConsensus.consensusScore - previousConsensusScore;
+      previousConsensusScore = currentConsensus.consensusScore;
 
       // Generate insights for this round
       const keyInsights = this.extractKeyInsights(roundMessages);
