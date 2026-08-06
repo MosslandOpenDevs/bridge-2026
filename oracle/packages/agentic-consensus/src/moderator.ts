@@ -774,15 +774,85 @@ ${opinionsText}
 
 ---
 
-Please synthesize these opinions into a Decision Packet with:
-1. A clear recommendation (action, rationale, expected outcome)
-2. 2-3 alternatives with pros/cons
-3. Key risks with likelihood, impact, and mitigation
-4. 3-5 measurable KPIs
-5. Any dissenting opinions
+Synthesize these opinions into a Decision Packet.
 
-Respond in JSON format matching the DecisionPacket schema.
+Respond with JSON only, in exactly this shape:
+
+{
+  "recommendation": { "action": "…", "rationale": "…", "expectedOutcome": "…" },
+  "alternatives": [ { "action": "…", "pros": ["…"], "cons": ["…"] } ],
+  "risks": [ { "description": "…", "likelihood": "low|medium|high", "impact": "low|medium|high", "mitigation": "…" } ],
+  "kpis": [ { "name": "…", "target": 0, "direction": "at_most|at_least", "unit": "…", "measurementMethod": "…" } ],
+  "dissent": [ { "agentRole": "risk|treasury|community|product|moderator", "reason": "…" } ]
+}
+
+Give 2-3 alternatives, the key risks, and 3-5 KPIs.
+
+The KPIs are the contract this decision will be judged against later: someone
+measures them after execution and the proposal's outcome is scored on whether
+they were met. So each one must be mechanically checkable, not prose.
+- "name" is a short label, and is the key the measurement is submitted under.
+- "target" is a bare number. Not "&gt;= 95%", not "under 30 minutes" — just 95, or 30.
+- "direction" says which side of the target passes: "at_least" for a metric to
+  raise (uptime, participation), "at_most" for one to keep down (latency,
+  incidents, error rate).
+- "unit" carries the dimension ("percent", "minutes", "incidents").
 `;
+  }
+
+  /**
+   * Coerce model-authored KPIs into the shape outcome measurement requires.
+   *
+   * These are the contract a proposal is judged against: a measurement is
+   * submitted per KPI name and scored against a numeric target on a stated
+   * side. A model asked for "measurable KPIs" happily answers with
+   * `{metric, definition, target: ">= 95%"}` — no name the measurement can be
+   * keyed on, a target that is a string, and no direction — which passes
+   * through to a proposal whose outcome can never be recorded.
+   *
+   * Anything that cannot be repaired is dropped, and if nothing survives the
+   * rule-based KPIs stand in, so a proposal always carries a measurable
+   * contract.
+   */
+  private normalizeKpis(raw: unknown, issue: DetectedIssue): DecisionPacket["kpis"] {
+    const parseTarget = (value: unknown): number | undefined => {
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+      if (typeof value !== "string") return undefined;
+      // "&gt;= 95%", "<= 30 minutes", "95" -> 95
+      const match = value.match(/-?\d+(?:\.\d+)?/);
+      return match ? Number(match[0]) : undefined;
+    };
+
+    const inferDirection = (
+      declared: unknown,
+      target: unknown,
+    ): "at_most" | "at_least" => {
+      if (declared === "at_least" || declared === "at_most") return declared;
+      // A comparator left in the target string still says which way it goes.
+      if (typeof target === "string" && /(>=|>|at least|minimum|min\b)/i.test(target)) {
+        return "at_least";
+      }
+      return "at_most";
+    };
+
+    const normalized = (Array.isArray(raw) ? raw : [])
+      .map((entry: any) => {
+        const name = String(entry?.name ?? entry?.metric ?? "").trim();
+        const target = parseTarget(entry?.target);
+        if (!name || target === undefined) return null;
+        return {
+          name,
+          target,
+          direction: inferDirection(entry?.direction, entry?.target),
+          unit: String(entry?.unit ?? "").trim(),
+          measurementMethod: String(
+            entry?.measurementMethod ?? entry?.definition ?? "",
+          ).trim(),
+        };
+      })
+      .filter((k): k is DecisionPacket["kpis"][number] => k !== null);
+
+    return normalized.length > 0 ? normalized : this.generateKPIs(issue);
   }
 
   private parseSynthesisResponse(
@@ -815,7 +885,7 @@ Respond in JSON format matching the DecisionPacket schema.
         },
         alternatives: parsed.alternatives || [],
         risks: parsed.risks || [],
-        kpis: parsed.kpis || [],
+        kpis: this.normalizeKpis(parsed.kpis, issue),
         agentOpinions: opinions,
         dissent: parsed.dissent || [],
         createdAt: now(),

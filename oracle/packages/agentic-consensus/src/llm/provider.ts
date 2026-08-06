@@ -25,9 +25,11 @@ export interface LLMResponse {
   };
 }
 
+// Overridable with LLM_MODEL. A deliberation fans out to five agents, so the
+// default favours a fast, cheap model that still returns well-formed JSON.
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
   anthropic: "claude-sonnet-4-20250514",
-  openai: "gpt-4o",
+  openai: "gpt-5.4-mini",
   ollama: "qwen3.5:9b",
 };
 
@@ -38,6 +40,21 @@ const DEFAULT_MAX_TOKENS: Record<LLMProvider, number> = {
 };
 
 export class LLMClient {
+  /**
+   * Whether a model wants `max_completion_tokens` rather than `max_tokens`.
+   *
+   * Matched by family prefix, not an allowlist of exact ids: OpenAI ships new
+   * point releases regularly, and an allowlist would silently break every call
+   * the day a newer one is configured. The reasoning families (o-series, and
+   * gpt-5 onwards) use the newer field; anything older keeps `max_tokens`.
+   */
+  static usesMaxCompletionTokens(model: string): boolean {
+    const id = model.toLowerCase();
+    if (/^o\d/.test(id)) return true; // o1, o3, o4, …
+    const gpt = id.match(/^gpt-(\d+)/);
+    return gpt ? Number(gpt[1]) >= 5 : false;
+  }
+
   private anthropicClient: Anthropic | null = null;
   private openaiClient: OpenAI | null = null;
   private provider: LLMProvider;
@@ -141,9 +158,18 @@ export class LLMClient {
     systemPrompt: string,
     userMessage: string
   ): Promise<LLMResponse> {
+    // Newer OpenAI models reject `max_tokens` outright ("Unsupported parameter
+    // ... use 'max_completion_tokens' instead"), so sending the old name fails
+    // every call rather than degrading. Older models and Ollama's
+    // OpenAI-compatible endpoint only understand `max_tokens`, so the field
+    // name is chosen per model rather than switched globally.
+    const tokenLimit = LLMClient.usesMaxCompletionTokens(this.model)
+      ? { max_completion_tokens: this.maxTokens }
+      : { max_tokens: this.maxTokens };
+
     const response = await this.openaiClient!.chat.completions.create({
       model: this.model,
-      max_tokens: this.maxTokens,
+      ...tokenLimit,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
