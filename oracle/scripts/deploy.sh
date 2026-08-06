@@ -118,77 +118,6 @@ PNPM_BIN=${PNPM_BIN:-pnpm}
 
 FORCE=0
 CHECK_ONLY=0
-CLASSIFY_ONLY=0
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --force) FORCE=1 ;;
-    --check) CHECK_ONLY=1 ;;
-    --classify) CLASSIFY_ONLY=1 ;;
-    # Prints the whole header block rather than a fixed line range, which
-    # silently truncated the options list as the header grew.
-    -h|--help) sed -n '2,/^$/p' "${SELF}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown option: $1" >&2; exit 64 ;;
-  esac
-  shift
-done
-
-# What kind of change is this? Everything lives under oracle/ — nexus/ and root
-# docs never require a build or restart. oracle/packages/* and the workspace
-# config feed both apps, so they mark both. oracle/scripts/* and the ecosystem
-# file are deploy infrastructure: they must reach the server (the script
-# self-updates via the reset) but need no build or restart.
-#
-# Sets API_CHANGED / WEB_CHANGED / DEPS_CHANGED / ECOSYSTEM_CHANGED /
-# INFRA_CHANGED / DOCS_ONLY from a newline-separated file list on stdin.
-# Exercised directly by scripts/test-deploy-classifier.sh — a path in the wrong
-# bucket means either a deploy that skips the build it needed, or a rebuild and
-# restart for a README edit.
-classify_changes() {
-  API_CHANGED=0
-  WEB_CHANGED=0
-  DEPS_CHANGED=0
-  ECOSYSTEM_CHANGED=0
-  INFRA_CHANGED=0
-
-  local f
-  while IFS= read -r f; do
-    [ -n "${f}" ] || continue
-    case "${f}" in
-      oracle/apps/api/*) API_CHANGED=1 ;;
-      oracle/apps/web/*) WEB_CHANGED=1 ;;
-      # Workspace-wide config: pnpm-workspace.yaml decides which packages exist
-      # at all, and eslint.config.js gates the lint step both apps run.
-      oracle/packages/*|oracle/package.json|oracle/turbo.json|oracle/tsconfig*.json|oracle/pnpm-workspace.yaml|oracle/eslint.config.js)
-        API_CHANGED=1; WEB_CHANGED=1 ;;
-      oracle/scripts/*) INFRA_CHANGED=1 ;;
-    esac
-    case "${f}" in
-      oracle/pnpm-lock.yaml) DEPS_CHANGED=1; API_CHANGED=1; WEB_CHANGED=1 ;;
-      oracle/ecosystem.config.cjs) ECOSYSTEM_CHANGED=1 ;;
-    esac
-  done
-
-  # Docs-only pushes (README, docs/, nexus/, …) are synced, not deployed: the
-  # checkout is brought to the tip so on-server docs stay current, but there is
-  # no build, restart, or snapshot, and the log distinguishes SYNCED from
-  # DEPLOYED. Once synced, HEAD equals the tip, so repeat ticks stay quiet.
-  DOCS_ONLY=0
-  if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ] \
-     && [ "${ECOSYSTEM_CHANGED}" = "0" ] && [ "${INFRA_CHANGED}" = "0" ]; then
-    DOCS_ONLY=1
-  fi
-}
-
-
-# Test hook: classify the file list on stdin and print the flags, without
-# touching git, the lock, or PM2.
-if [ "${CLASSIFY_ONLY}" = "1" ]; then
-  classify_changes
-  echo "api=${API_CHANGED} web=${WEB_CHANGED} deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED} infra=${INFRA_CHANGED} docs_only=${DOCS_ONLY}"
-  exit 0
-fi
-
 
 log() {
   local line
@@ -261,61 +190,17 @@ acquire_lock() {
   return 0
 }
 
-CURRENT=$(git rev-parse HEAD)
-TARGET=$(git rev-parse "${DEPLOY_REMOTE}/${DEPLOY_BRANCH}")
-
-if [ "${CURRENT}" = "${TARGET}" ]; then
-  if [ "${DEPLOY_VERBOSE}" = "1" ] || [ "${CHECK_ONLY}" = "1" ]; then
-    log "up to date at ${CURRENT:0:8}"
-  fi
-  exit 0
-fi
-
-CHANGED=$(git diff --name-only "${CURRENT}" "${TARGET}")
-SUBJECT=$(git log -1 --format='%s' "${TARGET}")
-
-classify_changes <<EOF
-${CHANGED}
-EOF
-
-if [ "${DOCS_ONLY}" = "1" ]; then
-  [ "${CHECK_ONLY}" = "1" ] || log "docs-only change ${CURRENT:0:8} -> ${TARGET:0:8} (${SUBJECT}) -- syncing checkout, no deploy"
-else
-  log "update available: ${CURRENT:0:8} -> ${TARGET:0:8} (${SUBJECT})"
-fi
-
-# ---------------------------------------------------------------------------
-# 2. Guards
-# ---------------------------------------------------------------------------
-BRANCH_NOW=$(git rev-parse --abbrev-ref HEAD)
-if [ "${BRANCH_NOW}" != "${DEPLOY_BRANCH}" ] && [ "${FORCE}" = "0" ]; then
-  log "ABORT checkout is on '${BRANCH_NOW}', not '${DEPLOY_BRANCH}' -- not touching it"
-  exit 0
-fi
-
-# Tracked-file edits made by hand on the server would be silently discarded by
-# the reset below, so stop and let a human look. Untracked files (.env, the DB)
-# are never at risk and are deliberately not checked.
-if [ -n "$(git status --porcelain --untracked-files=no)" ] && [ "${FORCE}" = "0" ]; then
-  log "ABORT working tree has local modifications to tracked files:"
-  git status --short --untracked-files=no | while read -r l; do log "       ${l}"; done
-  log "       resolve on the server, or re-run with --force to discard them"
-  alert "BRIDGE deploy blocked: local modifications on the server checkout"
-  exit 0
-fi
-
 # CI gate: deploy only commits the required checks have gone green on.
 #
 # Fail-closed. Every non-success answer -- including "this commit reported no
-# checks at all" -- blocks the deploy. The previous version proceeded when a
-# commit had no check runs, which is indistinguishable from CI never having
-# started, and counted a completed run as success unless its conclusion was on
-# a blocklist, so `neutral` and `skipped` passed the gate.
+# checks at all" -- blocks the deploy. Proceeding when a commit had no check
+# runs is indistinguishable from CI never having started, and counting a
+# completed run as success unless its conclusion was on a blocklist let
+# `neutral` and `skipped` through.
 #
 # DEPLOY_REQUIRED_CHECKS names the checks that must each be present and
-# successful (comma-separated; defaults to the job names in
-# .github/workflows/ci.yml). Extra checks beyond those are ignored, so adding
-# an unrelated workflow cannot silently block deploys.
+# successful; extra checks beyond those are ignored, so adding an unrelated
+# workflow cannot silently block deploys.
 ci_conclusion() {
   local sha="$1" url auth
   url="https://api.github.com/repos/${DEPLOY_GITHUB_REPO}/commits/${sha}/check-runs?per_page=100"
@@ -362,58 +247,6 @@ process.stdin.on("end", () => {
 });
 ' 2>/dev/null || echo "unknown"
 }
-
-if [ "${DEPLOY_REQUIRE_CI}" = "1" ] && [ "${FORCE}" = "0" ] && [ "${DOCS_ONLY}" = "0" ]; then
-  CI_STATUS=$(ci_conclusion "${TARGET}")
-  case "${CI_STATUS}" in
-    success)
-      log "CI: green (${DEPLOY_REQUIRED_CHECKS})" ;;
-    pending)
-      log "CI: still running -- deferring to next tick"; exit 0 ;;
-    missing:*)
-      log "CI: required check(s) not reported for ${TARGET:0:8}: ${CI_STATUS#missing:}"
-      log "    refusing to deploy (set DEPLOY_REQUIRE_CI=0 or --force to override)"
-      alert "BRIDGE deploy blocked: CI has not reported ${CI_STATUS#missing:} on ${TARGET:0:8}"
-      exit 0 ;;
-    failure:*)
-      log "CI: NOT GREEN on ${TARGET:0:8}: ${CI_STATUS#failure:}"
-      alert "BRIDGE deploy skipped: CI not green on ${TARGET:0:8} (${SUBJECT})"
-      exit 0 ;;
-    misconfigured)
-      log "CI: DEPLOY_REQUIRED_CHECKS is empty -- refusing to deploy"
-      exit 0 ;;
-    *)
-      log "CI: status unavailable (network/API) -- deferring to next tick"; exit 0 ;;
-  esac
-fi
-
-if [ "${CHECK_ONLY}" = "1" ]; then
-  if [ "${DOCS_ONLY}" = "1" ]; then
-    log "--check: docs-only change ${CURRENT:0:8} -> ${TARGET:0:8} -- would sync checkout (no deploy)"
-  else
-    log "--check: would deploy ${TARGET:0:8} (api=${API_CHANGED} web=${WEB_CHANGED} \
-deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED} infra=${INFRA_CHANGED})"
-  fi
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# 3. Deploy
-# ---------------------------------------------------------------------------
-
-# Pre-deploy snapshot of the SQLite DB (non-fatal): a restore point from
-# immediately before this change. Uses sqlite3's online .backup when available.
-DB_FILE="${APP_ROOT}/apps/api/data/oracle.db"
-if [ "${API_CHANGED}" = "1" ] && [ -f "${DB_FILE}" ] && command -v sqlite3 >/dev/null 2>&1; then
-  BACKUP_DIR="${APP_ROOT}/apps/api/data/backup"
-  mkdir -p "${BACKUP_DIR}"
-  if sqlite3 "${DB_FILE}" ".backup '${BACKUP_DIR}/pre-deploy-$(date +%Y%m%d-%H%M%S).db'" 2>/dev/null; then
-    log "pre-deploy DB snapshot written to apps/api/data/backup/"
-    ls -1t "${BACKUP_DIR}"/pre-deploy-*.db 2>/dev/null | tail -n +6 | xargs -r rm -f
-  else
-    log "WARN pre-deploy DB snapshot failed (continuing)"
-  fi
-fi
 
 # Build + restart for whatever the current checkout is. Used for the deploy and,
 # unchanged, for the rollback -- so a rollback restores a consistent build too.
@@ -546,12 +379,65 @@ record_success() {
   fi
 }
 
+# What kind of change is this? Everything lives under oracle/ — nexus/ and root
+# docs never require a build or restart. oracle/packages/* and the workspace
+# config feed both apps, so they mark both. oracle/scripts/* and the ecosystem
+# file are deploy infrastructure: they must reach the server (the script
+# self-updates via the reset) but need no build or restart.
+#
+# Sets API_CHANGED / WEB_CHANGED / DEPS_CHANGED / ECOSYSTEM_CHANGED /
+# INFRA_CHANGED / DOCS_ONLY from a newline-separated file list on stdin.
+# Exercised directly by scripts/test-deploy-classifier.sh — a path in the wrong
+# bucket means either a deploy that skips the build it needed, or a rebuild and
+# restart for a README edit.
+classify_changes() {
+  API_CHANGED=0
+  WEB_CHANGED=0
+  DEPS_CHANGED=0
+  ECOSYSTEM_CHANGED=0
+  INFRA_CHANGED=0
+
+  local f
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    case "${f}" in
+      oracle/apps/api/*) API_CHANGED=1 ;;
+      oracle/apps/web/*) WEB_CHANGED=1 ;;
+      # Workspace-wide config: pnpm-workspace.yaml decides which packages exist
+      # at all, and eslint.config.js gates the lint step both apps run.
+      oracle/packages/*|oracle/package.json|oracle/turbo.json|oracle/tsconfig*.json|oracle/pnpm-workspace.yaml|oracle/eslint.config.js)
+        API_CHANGED=1; WEB_CHANGED=1 ;;
+      oracle/scripts/*) INFRA_CHANGED=1 ;;
+    esac
+    case "${f}" in
+      oracle/pnpm-lock.yaml) DEPS_CHANGED=1; API_CHANGED=1; WEB_CHANGED=1 ;;
+      oracle/ecosystem.config.cjs) ECOSYSTEM_CHANGED=1 ;;
+    esac
+  done
+
+  # Docs-only pushes (README, docs/, nexus/, …) are synced, not deployed: the
+  # checkout is brought to the tip so on-server docs stay current, but there is
+  # no build, restart, or snapshot, and the log distinguishes SYNCED from
+  # DEPLOYED. Once synced, HEAD equals the tip, so repeat ticks stay quiet.
+  DOCS_ONLY=0
+  if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ] \
+     && [ "${ECOSYSTEM_CHANGED}" = "0" ] && [ "${INFRA_CHANGED}" = "0" ]; then
+    DOCS_ONLY=1
+  fi
+}
+
 main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --force) FORCE=1 ;;
       --check) CHECK_ONLY=1 ;;
       -h|--help) sed -n '4,66p' "${SELF}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      # Test hook: classify the file list on stdin and print the flags,
+      # without touching git, the lock, or PM2.
+      --classify)
+        classify_changes
+        echo "api=${API_CHANGED} web=${WEB_CHANGED} deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED} infra=${INFRA_CHANGED} docs_only=${DOCS_ONLY}"
+        exit 0 ;;
       *) echo "unknown option: $1" >&2; exit 64 ;;
     esac
     shift
@@ -600,41 +486,9 @@ main() {
   CHANGED=$(git diff --name-only "${DEPLOYED}" "${TARGET}")
   SUBJECT=$(git log -1 --format='%s' "${TARGET}")
 
-  # What kind of change is this? Everything lives under oracle/ — nexus/ and root
-  # docs never require a build or restart. oracle/packages/* and the workspace
-  # config feed both apps, so they mark both. oracle/scripts/* and the ecosystem
-  # file are deploy infrastructure: they must reach the server (the script
-  # self-updates via the reset) but need no build or restart.
-  API_CHANGED=0
-  WEB_CHANGED=0
-  DEPS_CHANGED=0
-  ECOSYSTEM_CHANGED=0
-  INFRA_CHANGED=0
-  while IFS= read -r f; do
-    [ -n "${f}" ] || continue
-    case "${f}" in
-      oracle/apps/api/*) API_CHANGED=1 ;;
-      oracle/apps/web/*) WEB_CHANGED=1 ;;
-      oracle/packages/*|oracle/package.json|oracle/turbo.json|oracle/tsconfig*.json) API_CHANGED=1; WEB_CHANGED=1 ;;
-      oracle/scripts/*) INFRA_CHANGED=1 ;;
-    esac
-    case "${f}" in
-      oracle/pnpm-lock.yaml) DEPS_CHANGED=1; API_CHANGED=1; WEB_CHANGED=1 ;;
-      oracle/ecosystem.config.cjs) ECOSYSTEM_CHANGED=1 ;;
-    esac
-  done <<EOF
+  classify_changes <<EOF
 ${CHANGED}
 EOF
-
-  # Docs-only pushes (README, docs/, nexus/, …) are synced, not deployed: the
-  # checkout is brought to the tip so on-server docs stay current, but there is
-  # no build, restart, or snapshot, and the log distinguishes SYNCED from
-  # DEPLOYED. Once synced, HEAD equals the tip, so repeat ticks stay quiet.
-  DOCS_ONLY=0
-  if [ "${API_CHANGED}" = "0" ] && [ "${WEB_CHANGED}" = "0" ] \
-     && [ "${ECOSYSTEM_CHANGED}" = "0" ] && [ "${INFRA_CHANGED}" = "0" ]; then
-    DOCS_ONLY=1
-  fi
 
   if [ "${DOCS_ONLY}" = "1" ]; then
     [ "${CHECK_ONLY}" = "1" ] || log "docs-only change ${DEPLOYED:0:8} -> ${TARGET:0:8} (${SUBJECT}) -- syncing checkout, no deploy"
@@ -695,13 +549,23 @@ EOF
   if [ "${DEPLOY_REQUIRE_CI}" = "1" ] && [ "${FORCE}" = "0" ] && [ "${DOCS_ONLY}" = "0" ]; then
     CI_STATUS=$(ci_conclusion "${TARGET}")
     case "${CI_STATUS}" in
-      success) log "CI: green" ;;
-      none)    log "CI: no checks reported for this commit -- proceeding" ;;
-      pending) log "CI: still running -- deferring to next tick"; exit 0 ;;
-      failure) log "CI: FAILED -- refusing to deploy ${TARGET:0:8}"
-               alert "BRIDGE deploy skipped: CI failed on ${TARGET:0:8} (${SUBJECT})"
-               exit 0 ;;
-      *)       log "CI: status unavailable (network/API) -- deferring to next tick"; exit 0 ;;
+      success)
+        log "CI: green (${DEPLOY_REQUIRED_CHECKS})" ;;
+      pending)
+        log "CI: still running -- deferring to next tick"; exit 0 ;;
+      missing:*)
+        log "CI: required check(s) not reported for ${TARGET:0:8}: ${CI_STATUS#missing:}"
+        log "    refusing to deploy (set DEPLOY_REQUIRE_CI=0 or --force to override)"
+        alert "BRIDGE deploy blocked: CI has not reported ${CI_STATUS#missing:} on ${TARGET:0:8}"
+        exit 0 ;;
+      failure:*)
+        log "CI: NOT GREEN on ${TARGET:0:8}: ${CI_STATUS#failure:}"
+        alert "BRIDGE deploy skipped: CI not green on ${TARGET:0:8} (${SUBJECT})"
+        exit 0 ;;
+      misconfigured)
+        log "CI: DEPLOY_REQUIRED_CHECKS is empty -- refusing to deploy"; exit 0 ;;
+      *)
+        log "CI: status unavailable (network/API) -- deferring to next tick"; exit 0 ;;
     esac
   fi
 
