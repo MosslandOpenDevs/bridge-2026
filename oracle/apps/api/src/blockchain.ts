@@ -605,6 +605,11 @@ export class BlockchainService {
   /**
    * Record outcome proof on-chain
    */
+  /**
+   * @param successRate Fraction of KPIs met, in [0,1]. The contract stores an
+   * integer percentage, so it is converted once, here — the only place the
+   * unit changes.
+   */
   async recordOutcome(
     proposalId: number,
     proofHash: `0x${string}`,
@@ -620,7 +625,12 @@ export class BlockchainService {
         address: this.contractAddress,
         abi: ORACLE_GOVERNANCE_ABI,
         functionName: "recordOutcome",
-        args: [BigInt(proposalId), proofHash, BigInt(Math.round(successRate * 100)), overallSuccess],
+        args: [
+          BigInt(proposalId),
+          proofHash,
+          BigInt(Math.round(Math.min(1, Math.max(0, successRate)) * 100)),
+          overallSuccess,
+        ],
         account: this.account,
       });
 

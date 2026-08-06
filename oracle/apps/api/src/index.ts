@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getAddress } from "viem";
 import express, { Express } from "express";
@@ -314,7 +315,11 @@ const votingSystem = new VotingSystem({
   executionDelay: EXECUTION_DELAY_MS,
 });
 const delegationManager = new DelegationManager();
-const outcomeTracker = new OutcomeTrackerImpl();
+// Observation window before an execution's KPIs may be measured. Configurable
+// so tests can exercise the measurement path without waiting a day.
+const outcomeTracker = new OutcomeTrackerImpl({
+  kpiMeasurementDelay: envInt("KPI_MEASUREMENT_DELAY_MS", 24 * 60 * 60 * 1000),
+});
 const trustManager = new TrustManager();
 
 // Create Express app with Socket.IO
@@ -558,7 +563,12 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
     const savedIssues = [];
     for (const issue of detectedIssues) {
       // Check if similar issue already exists
-      const existing = issueDb.findSimilar.get(issue.category);
+      const existing = issueDb.findSimilar.get({
+        category: issue.category,
+        kind: issue.kind ?? "issue",
+        direction: issue.direction ?? "",
+        window: ISSUE_DEDUPE_WINDOW,
+      });
       if (!existing) {
         issueDb.insert.run(serializeIssue(issue));
         savedIssues.push(issue);
@@ -590,6 +600,9 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
 });
 
 const VALID_ISSUE_STATUSES = ["detected", "deliberating", "proposed", "resolved"];
+
+// How far back a detection counts as a repeat of one already recorded.
+const ISSUE_DEDUPE_WINDOW = `-${envInt("ISSUE_DEDUPE_MINUTES", 15)} minutes`;
 
 app.patch("/api/issues/:id", requireAdminKey, async (req, res) => {
   try {
@@ -647,14 +660,107 @@ class LRUMap<K, V> extends Map<K, V> {
 }
 const debateSessions = new LRUMap<string, any>(DEBATE_SESSION_LIMIT);
 
+/**
+ * Resolve the issue a deliberation is about.
+ *
+ * Decision history references issues by foreign key, so deliberating over an
+ * issue the database has never seen used to fail the insert and return a 500
+ * after the LLM work had already been paid for. The caller may now either name
+ * a stored issue by id, or supply a full issue which is validated and stored
+ * first, so the later decision record has something to point at.
+ */
+const inlineIssueSchema = z
+  .object({
+    id: z.string().min(1).max(200).optional(),
+    title: z.string().min(1).max(500),
+    description: z.string().max(5000).default(""),
+    category: z.string().min(1).max(100),
+    priority: z.enum(["low", "medium", "high", "urgent"]).default("medium"),
+    status: z.enum(["detected", "deliberating", "proposed", "resolved"]).default("detected"),
+    kind: z.string().max(50).optional(),
+    direction: z.string().max(50).optional(),
+    detectedAt: z.string().datetime().optional(),
+    signals: z.array(z.any()).max(500).optional(),
+    evidence: z.array(z.any()).max(500).optional(),
+    suggestedActions: z.array(z.string().max(1000)).max(100).optional(),
+  })
+  .passthrough();
+
+type ResolvedIssue =
+  | { ok: true; issue: any }
+  | { ok: false; status: number; body: Record<string, unknown> };
+
+function resolveDeliberationIssue(body: any): ResolvedIssue {
+  const issueId: unknown = body?.issueId;
+  if (typeof issueId === "string" && issueId.length > 0) {
+    const row = issueDb.getById.get(issueId) as IssueRow | undefined;
+    if (!row) {
+      return {
+        ok: false,
+        status: 404,
+        body: { error: `Issue ${issueId} not found` },
+      };
+    }
+    return { ok: true, issue: deserializeIssue(row) };
+  }
+
+  if (!body?.issue) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: "issueId or issue is required" },
+    };
+  }
+
+  const parsed = inlineIssueSchema.safeParse(body.issue);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: "Invalid issue",
+        details: parsed.error.issues.map((i) => ({
+          path: i.path.join("."),
+          message: i.message,
+        })),
+      },
+    };
+  }
+
+  const candidate = {
+    ...parsed.data,
+    id: parsed.data.id || randomUUID(),
+    detectedAt: parsed.data.detectedAt || new Date().toISOString(),
+  };
+
+  const existing = issueDb.getById.get(candidate.id) as IssueRow | undefined;
+  if (existing) {
+    return { ok: true, issue: deserializeIssue(existing) };
+  }
+
+  try {
+    issueDb.insert.run(serializeIssue(candidate));
+  } catch (error) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: sanitizeError(error, "Could not store the supplied issue") },
+    };
+  }
+  const stored = issueDb.getById.get(candidate.id) as IssueRow | undefined;
+  return { ok: true, issue: stored ? deserializeIssue(stored) : candidate };
+}
+
 // Deliberation endpoints.
 // Admin-gated: each call spends LLM credits on behalf of the operator.
 app.post("/api/deliberate", requireAdminKey, async (req, res) => {
   try {
-    const { issue, context } = req.body;
-    if (!issue) {
-      return res.status(400).json({ error: "Issue is required" });
+    const resolved = resolveDeliberationIssue(req.body);
+    if (!resolved.ok) {
+      return res.status(resolved.status).json(resolved.body);
     }
+    const issue = resolved.issue;
+    const { context } = req.body;
 
     // Enrich context with historical data for agent learning
     const enrichedContext = enrichContextWithHistory(
@@ -676,7 +782,7 @@ app.post("/api/deliberate", requireAdminKey, async (req, res) => {
       );
 
       recordDecision(
-        issue.id || `issue-${Date.now()}`,
+        issue.id,
         issue.category || "general",
         issue.priority || "medium",
         decisionPacket.consensusScore || 0,
@@ -696,10 +802,12 @@ app.post("/api/deliberate", requireAdminKey, async (req, res) => {
 // Admin-gated: a debate fans out to every agent for several rounds.
 app.post("/api/debate", requireAdminKey, async (req, res) => {
   try {
-    const { issue, context } = req.body;
-    if (!issue) {
-      return res.status(400).json({ error: "Issue is required" });
+    const resolved = resolveDeliberationIssue(req.body);
+    if (!resolved.ok) {
+      return res.status(resolved.status).json(resolved.body);
     }
+    const issue = resolved.issue;
+    const { context } = req.body;
     // Never pass the client's number straight through as a loop bound.
     const maxRounds = Moderator.clampRounds(req.body?.maxRounds ?? 3);
 
@@ -1193,75 +1301,187 @@ app.post("/api/proposals/:id/execute", requireAdminKey, async (req, res) => {
       });
     }
 
-    // Record the execution as an outcome
+    // Record the execution. No proof is produced here: a proof asserts that
+    // the proposal's KPIs were met, and nothing has been observed yet. It is
+    // issued only once measurements are submitted after the observation
+    // window, via POST /api/outcomes/:executionId/measurements.
     const execution = await outcomeTracker.recordExecution(proposalId, actions);
+    const measurement = outcomeTracker.measurementStatus(execution.id);
 
-    // Generate proof and update trust scores
-    const proof = await outcomeTracker.generateProof(execution.id);
+    saveExecutionOutcome({ proposal: executedProposal, execution });
 
-    const updatedTrust = [
-      trustManager.recordOutcome(proposal.proposer, "proposer", proof),
-      ...Array.from(
-        new Set((dp?.agentOpinions ?? []).map((op) => op.agentId)),
-      ).map((agentId) => trustManager.recordOutcome(agentId, "agent", proof)),
-    ];
-
-    // Execution, proof and the trust scores it moved are written as one unit.
-    saveExecutionOutcome({
-      proposal: executedProposal,
-      execution,
-      proof,
-      trustScores: updatedTrust,
-    });
-
-    // Record outcome for agent learning feedback loop
-    // Find the decision by issue_id and update with outcome
-    const issueId = dp?.issue?.id;
-    if (issueId && proof) {
-      try {
-        const recorded = recordOutcomeByIssueId(
-          issueId,
-          proof.successRate,
-          proof.kpiResults
-        );
-        if (recorded) {
-          console.log(`📊 Recorded learning outcome for issue ${issueId}: ${(proof.successRate * 100).toFixed(0)}% success`);
-        }
-      } catch (err) {
-        console.warn("Could not record learning outcome:", err);
-      }
-    }
+    // The learning feedback loop is fed when the outcome is actually measured,
+    // not here — recording a result now would teach the agents from a number
+    // nobody observed.
 
     res.json({
-      proposal: executedProposal,
+      proposal: withTally(executedProposal),
       execution,
-      proof,
-      message: "Proposal executed successfully",
+      measurement: {
+        status: "pending_measurement",
+        dueAt: measurement.dueAt.toISOString(),
+        declaredKpis: dp?.kpis ?? [],
+        submitTo: `/api/outcomes/${execution.id}/measurements`,
+      },
+      message:
+        "Proposal executed. Submit measured KPI values after the observation " +
+        "window to produce an outcome proof.",
     });
   } catch (error: any) {
     res.status(400).json({ error: sanitizeError(error, "Failed to execute proposal") });
   }
 });
 
+const measurementsSchema = z
+  .object({
+    measurements: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1).max(200),
+            actual: z.number().finite(),
+            target: z.number().finite().optional(),
+            unit: z.string().max(50).optional(),
+            success: z.boolean().optional(),
+            source: z.string().max(500).optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50),
+  })
+  .strict();
+
+/**
+ * Submit observed KPI values for an execution and issue its outcome proof.
+ *
+ * This is the only path that produces a proof. Execution used to mint one
+ * immediately from two fabricated KPIs, so every proposal was recorded as a
+ * 100% success milliseconds after execution, before anything could have
+ * happened.
+ */
+app.post("/api/outcomes/:executionId/measurements", requireAdminKey, async (req, res) => {
+  try {
+    const parsed = measurementsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: "Invalid measurements",
+        details: parsed.error.issues.map((i) => ({
+          path: i.path.join("."),
+          message: i.message,
+        })),
+      });
+    }
+
+    const execution = outcomeTracker.getExecution(req.params.executionId);
+    if (!execution) {
+      return res.status(404).json({ error: "Execution not found" });
+    }
+
+    const proposal = votingSystem.getProposal(execution.proposalId);
+    const declaredKpis = (proposal?.decisionPacket?.kpis ?? []).map((k) => ({
+      name: k.name,
+      target: k.target,
+      unit: k.unit,
+    }));
+
+    const kpiResults = outcomeTracker.submitMeasurements(
+      execution.id,
+      declaredKpis,
+      parsed.data.measurements,
+    );
+    const proof = await outcomeTracker.generateProof(execution.id);
+
+    // Trust only moves on measured outcomes.
+    const dp = proposal?.decisionPacket;
+    const updatedTrust = proposal
+      ? [
+          trustManager.recordOutcome(proposal.proposer, "proposer", proof),
+          ...Array.from(
+            new Set((dp?.agentOpinions ?? []).map((op) => op.agentId)),
+          ).map((agentId) => trustManager.recordOutcome(agentId, "agent", proof)),
+        ]
+      : [];
+
+    if (proposal) {
+      saveExecutionOutcome({
+        proposal,
+        execution,
+        kpiResults,
+        proof,
+        trustScores: updatedTrust,
+      });
+    } else {
+      saveExecution(execution, kpiResults);
+      saveProof(proof);
+    }
+
+    // Now the learning loop has a real number to learn from.
+    const issueId = dp?.issue?.id;
+    if (issueId) {
+      try {
+        if (recordOutcomeByIssueId(issueId, proof.successRate, proof.kpiResults)) {
+          console.log(
+            `📊 Recorded learning outcome for issue ${issueId}: ` +
+              `${(proof.successRate * 100).toFixed(0)}% of KPIs met`,
+          );
+        }
+      } catch (err) {
+        console.warn("Could not record learning outcome:", err);
+      }
+    }
+
+    res.status(201).json({ proof, kpiResults });
+  } catch (error: any) {
+    console.error("Failed to record measurements:", error);
+    res.status(400).json({ error: sanitizeError(error, "Failed to record measurements") });
+  }
+});
+
+/** Whether an execution is still awaiting measurement. */
+app.get("/api/outcomes/:executionId/measurements", (req, res) => {
+  try {
+    const execution = outcomeTracker.getExecution(req.params.executionId);
+    if (!execution) {
+      return res.status(404).json({ error: "Execution not found" });
+    }
+    const status = outcomeTracker.measurementStatus(execution.id);
+    res.json({
+      executionId: status.executionId,
+      status: status.measured ? "measured" : "pending_measurement",
+      dueAt: status.dueAt.toISOString(),
+      measurable: Date.now() >= status.dueAt.getTime(),
+      proofId: status.proofId,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: sanitizeError(error, "Failed to read measurement status") });
+  }
+});
+
+/** Title for an outcome row, from the proposal it came from. */
+function outcomeTitle(proposalId: string): string {
+  const proposal = votingSystem.getProposal(proposalId);
+  return proposal
+    ? proposalTitle(proposal)
+    : `Proposal #${proposalId.slice(0, 8)}`;
+}
+
 // Outcome endpoints
 app.get("/api/outcomes", async (req, res) => {
   try {
     const proofs = outcomeTracker.listProofs();
-    const outcomes = proofs.map((proof) => {
-      const proposal = votingSystem.getProposal(proof.proposalId);
-      const dp = proposal?.decisionPacket;
-      const rec = dp?.recommendation;
-      const title = proposal?.decisionPacket?.issue?.title ||
-        (typeof rec?.action === "string" ? rec.action : (rec?.action as any)?.action) ||
-        `Proposal #${proof.proposalId.slice(0, 8)}`;
+    const measuredExecutions = new Set(proofs.map((p) => p.executionId));
 
+    const measured = proofs.map((proof) => {
+      const proposal = votingSystem.getProposal(proof.proposalId);
       return {
         id: proof.id,
         executionId: proof.executionId,
         proposalId: proof.proposalId,
-        proposalTitle: title,
-        status: "completed",
+        proposalTitle: outcomeTitle(proof.proposalId),
+        status: "measured" as const,
         overallSuccess: proof.overallSuccess,
+        /** Fraction of declared KPIs met, in [0,1]. */
         successRate: proof.successRate,
         kpis: proof.kpiResults.map((kpi) => ({
           name: kpi.kpiName,
@@ -1276,8 +1496,33 @@ app.get("/api/outcomes", async (req, res) => {
       };
     });
 
+    // Executions still inside their observation window are listed as pending
+    // rather than omitted, so an executed proposal with no measurable result
+    // yet is visible instead of looking like nothing happened.
+    const pending = outcomeTracker
+      .listExecutions()
+      .filter((execution) => !measuredExecutions.has(execution.id))
+      .map((execution) => {
+        const status = outcomeTracker.measurementStatus(execution.id);
+        return {
+          id: execution.id,
+          executionId: execution.id,
+          proposalId: execution.proposalId,
+          proposalTitle: outcomeTitle(execution.proposalId),
+          status: "pending_measurement" as const,
+          overallSuccess: null,
+          successRate: null,
+          kpis: [],
+          measurementDueAt: status.dueAt,
+          executedAt: execution.executedAt,
+          recordedAt: execution.executedAt,
+        };
+      });
+
+    const outcomes = [...measured, ...pending];
     res.json({ outcomes, count: outcomes.length });
   } catch (error) {
+    console.error("Failed to fetch outcomes:", error);
     res.status(500).json({ error: "Failed to fetch outcomes" });
   }
 });
@@ -1313,6 +1558,8 @@ app.get("/api/outcomes/:executionId", async (req, res) => {
 
 app.get("/api/outcomes/:executionId/proof", async (req, res) => {
   try {
+    // Returns the proof for an already-measured execution. It does not
+    // manufacture one: without measurements this reports what is missing.
     const proof = await outcomeTracker.generateProof(req.params.executionId);
     saveProof(proof);
     res.json({ proof });
@@ -1775,7 +2022,12 @@ async function detectAndSaveIssues() {
   let savedCount = 0;
   const savedIssues = [];
   for (const issue of detectedIssues) {
-    const existing = issueDb.findSimilar.get(issue.category);
+    const existing = issueDb.findSimilar.get({
+        category: issue.category,
+        kind: issue.kind ?? "issue",
+        direction: issue.direction ?? "",
+        window: ISSUE_DEDUPE_WINDOW,
+      });
     if (!existing) {
       issueDb.insert.run(serializeIssue(issue));
       savedIssues.push(issue);

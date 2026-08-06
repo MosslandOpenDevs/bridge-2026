@@ -362,12 +362,24 @@ export const issueDb = {
     SELECT status, COUNT(*) as count FROM issues GROUP BY status
   `),
 
-  // Check if similar issue already exists (to avoid duplicates)
+  /**
+   * Suppress a repeat detection of the same thing within a short window.
+   *
+   * Compared as julianday, not as text: detected_at is stored in ISO form
+   * ("2026-08-05T12:00:00.000Z") while datetime('now', …) yields a
+   * space-separated string, and "T" sorts above " ", so a plain text
+   * comparison treated every earlier issue from the same day as "recent" and
+   * suppressed it. The key includes kind and direction as well as category,
+   * so a threshold breach and a downward trend in one category are not
+   * mistaken for the same detection.
+   */
   findSimilar: db.prepare(`
     SELECT * FROM issues
-    WHERE category = ?
+    WHERE category = @category
+      AND IFNULL(kind, 'issue') = IFNULL(@kind, 'issue')
+      AND IFNULL(direction, '') = IFNULL(@direction, '')
       AND status IN ('detected', 'deliberating', 'proposed')
-      AND detected_at > datetime('now', '-15 minutes')
+      AND julianday(detected_at) > julianday('now', @window)
     LIMIT 1
   `),
 

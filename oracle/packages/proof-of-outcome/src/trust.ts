@@ -45,18 +45,21 @@ export class TrustManager {
     entityHistory.push(proof);
     this.history.set(entityId, entityHistory);
 
-    // Update score
+    // Update score. proof.successRate is a fraction in [0,1]; it was divided
+    // by 100 here as though it were a percentage, which shrank every
+    // adjustment to a hundredth of its intended size.
+    const successRate = Math.min(1, Math.max(0, proof.successRate));
     score.totalDecisions++;
     if (proof.overallSuccess) {
       score.successfulDecisions++;
       score.score = Math.min(
         100,
-        score.score + this.config.successWeight! * (proof.successRate / 100)
+        score.score + this.config.successWeight! * successRate
       );
     } else {
       score.score = Math.max(
         0,
-        score.score - this.config.failureWeight! * (1 - proof.successRate / 100)
+        score.score - this.config.failureWeight! * (1 - successRate)
       );
     }
 
@@ -100,7 +103,11 @@ export class TrustManager {
       .slice(0, limit);
   }
 
-  // Calculate weighted reputation considering recency
+  /**
+   * Recency-weighted reputation on the same 0-100 scale as `score`.
+   * successRate is a fraction, so it is scaled here rather than compared
+   * against scores as if it were already a percentage.
+   */
   calculateWeightedReputation(entityId: string): number {
     const history = this.history.get(entityId) || [];
     if (history.length === 0) {
@@ -118,7 +125,8 @@ export class TrustManager {
     for (let i = 0; i < sorted.length; i++) {
       const proof = sorted[i];
       const weight = Math.pow(this.config.decayRate!, i);
-      weightedSum += proof.successRate * weight;
+      // Fraction -> 0-100, matching the scale of `score`.
+      weightedSum += proof.successRate * 100 * weight;
       totalWeight += weight;
     }
 
