@@ -63,6 +63,25 @@ export {
   type DelegationPolicy,
 } from "./governance.js";
 
+// Realtime event contract (shared by the API and the web client)
+export {
+  SOCKET_EVENTS,
+  type SocketEventName,
+  type SocketEventPayloads,
+  type StatsUpdateEvent,
+  type SignalsCollectedEvent,
+  type IssuesDetectedEvent,
+  type TallyPayload,
+  type ProposalPayload,
+  type ProposalCreatedEvent,
+  type ProposalVotedEvent,
+  type ProposalFinalizedEvent,
+  type DebateRoundCompletedEvent,
+  type DebateCompletedEvent,
+  type DecisionsRecordedEvent,
+  type OutcomesEvaluatedEvent,
+} from "./events.js";
+
 // Outcome types (Layer 5: Proof of Outcome)
 export {
   ExecutionStatusSchema,

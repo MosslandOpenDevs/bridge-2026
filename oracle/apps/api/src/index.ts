@@ -10,6 +10,7 @@ import rateLimit from "express-rate-limit";
 
 // Import database
 import {
+  proposalTitle,
   saveProposal,
   saveVoteWithProposal,
   saveDelegation,
@@ -87,6 +88,12 @@ import {
 } from "@oracle/agentic-consensus";
 import { VotingSystem, DelegationManager } from "@oracle/human-governance";
 import { OutcomeTrackerImpl, TrustManager } from "@oracle/proof-of-outcome";
+import {
+  SOCKET_EVENTS,
+  type Proposal,
+  type VoteTally,
+  type TallyPayload,
+} from "@oracle/core";
 
 // Refuse to start on an unsafe auth configuration rather than discovering it
 // when an anonymous caller executes a proposal.
@@ -709,20 +716,15 @@ app.post("/api/debate", requireAdminKey, async (req, res) => {
       enrichedContext,
       maxRounds,
       (round, session) => {
-        // Emit real-time updates for each round
-        io.emit("debate:round_completed", {
+        // Emit real-time updates for each round, in the shared event shape.
+        io.emit(SOCKET_EVENTS.debateRoundCompleted, {
           sessionId: session.id,
-          round: {
-            roundNumber: round.roundNumber,
-            topic: round.topic,
-            messages: round.messages,
-            consensusShift: round.consensusShift,
-            keyInsights: round.keyInsights,
-            unresolvedPoints: round.unresolvedPoints,
-          },
-          currentRound: session.currentRound,
-          maxRounds: session.maxRounds,
-          positionChanges: session.positionChanges,
+          round: round.roundNumber,
+          totalRounds: session.maxRounds,
+          consensusShift: round.consensusShift,
+          keyInsights: round.keyInsights,
+          unresolvedPoints: round.unresolvedPoints,
+          positionChanges: session.positionChanges.length,
         });
       }
     );
@@ -753,10 +755,11 @@ app.post("/api/debate", requireAdminKey, async (req, res) => {
       );
     }
 
-    // Emit completion event
-    io.emit("debate:completed", {
+    // Emit completion event. The client reads `consensusScore`; sending
+    // `finalConsensusScore` made it render NaN.
+    io.emit(SOCKET_EVENTS.debateCompleted, {
       sessionId: debateSession.id,
-      finalConsensusScore: debateSession.finalConsensusScore,
+      consensusScore: debateSession.finalConsensusScore ?? 0,
       positionChanges: debateSession.positionChanges.length,
       totalRounds: debateSession.rounds.length,
     });
@@ -794,13 +797,46 @@ app.get("/api/debates", (req, res) => {
   }
 });
 
+/**
+ * JSON-safe tally. Weights are bigint internally and must not be handed to
+ * JSON.stringify directly.
+ */
+function serializeTally(tally: VoteTally): TallyPayload {
+  return {
+    forVotes: tally.forVotes.toString(),
+    againstVotes: tally.againstVotes.toString(),
+    abstainVotes: tally.abstainVotes.toString(),
+    totalVotes: tally.totalVotes.toString(),
+    voteCount: tally.voteCount,
+    forPercentage: tally.forPercentage,
+    participationRate: tally.participationRate,
+    quorumReached: tally.quorumReached,
+    passed: tally.passed,
+  };
+}
+
+/**
+ * A proposal as clients consume it, with its authoritative tally attached.
+ * Listing proposals without one made the UI read vote totals that were never
+ * on the object, so every proposal displayed as 0 votes no matter what had
+ * been cast.
+ */
+function withTally(proposal: Proposal) {
+  return {
+    ...proposal,
+    title: proposalTitle(proposal),
+    tally: serializeTally(votingSystem.tallyVotes(proposal.id)),
+  };
+}
+
 // Proposal endpoints
 app.get("/api/proposals", (req, res) => {
   try {
     const status = req.query.status as string | undefined;
-    const proposals = votingSystem.listProposals(status as any);
+    const proposals = votingSystem.listProposals(status as any).map(withTally);
     res.json({ proposals, count: proposals.length });
   } catch (error) {
+    console.error("Failed to fetch proposals:", error);
     res.status(500).json({ error: "Failed to fetch proposals" });
   }
 });
@@ -873,13 +909,14 @@ app.post("/api/proposals", requireAdminKey, async (req, res) => {
 
     // Emit real-time event
     const allProposals = votingSystem.listProposals();
-    io.emit("proposals:created", {
-      proposal: activatedProposal,
+    io.emit(SOCKET_EVENTS.proposalCreated, {
+      proposal: withTally(activatedProposal),
       totalCount: allProposals.length,
       activeCount: allProposals.filter(p => p.status === "active").length,
+      source: "manual",
     });
 
-    res.status(201).json({ proposal: activatedProposal });
+    res.status(201).json({ proposal: withTally(activatedProposal) });
   } catch (error) {
     // Rejected settings are a client mistake, not a server fault.
     console.error("Failed to create proposal:", error);
@@ -893,7 +930,7 @@ app.get("/api/proposals/:id", (req, res) => {
     if (!proposal) {
       return res.status(404).json({ error: "Proposal not found" });
     }
-    res.json({ proposal });
+    res.json({ proposal: withTally(proposal) });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch proposal" });
   }
@@ -1056,19 +1093,13 @@ app.post("/api/proposals/:id/vote", async (req, res) => {
 
     // Emit real-time event
     const tally = votingSystem.tallyVotes(req.params.id);
-    io.emit("proposals:voted", {
+    io.emit(SOCKET_EVENTS.proposalVoted, {
       proposalId: req.params.id,
       vote: {
         ...vote,
         weight: vote.weight.toString(),
       },
-      tally: {
-        forVotes: tally.forVotes.toString(),
-        againstVotes: tally.againstVotes.toString(),
-        abstainVotes: tally.abstainVotes.toString(),
-        totalVotes: tally.totalVotes.toString(),
-        participationRate: tally.participationRate,
-      },
+      tally: serializeTally(tally),
       txHash,
     });
 
@@ -1703,6 +1734,9 @@ const OUTCOME_EVAL_INTERVAL = parseInt(process.env.OUTCOME_EVAL_INTERVAL || "180
 const OUTCOME_EVAL_AGE_HOURS = parseInt(process.env.OUTCOME_EVAL_AGE_HOURS || "6", 10);
 const OUTCOME_EVAL_BATCH = parseInt(process.env.OUTCOME_EVAL_BATCH || "20", 10);
 
+// How often to close out proposals whose voting period has ended (0 disables).
+const AUTO_FINALIZE_INTERVAL = envInt("AUTO_FINALIZE_INTERVAL", 60);
+
 const AUTO_PROPOSAL_ENABLED = process.env.AUTO_PROPOSAL_ENABLED !== "0";
 const AUTO_PROPOSAL_THRESHOLD = parseFloat(process.env.AUTO_PROPOSAL_THRESHOLD || "0.7");
 const AUTO_PROPOSAL_PROPOSER = process.env.AUTO_PROPOSAL_PROPOSER || "auto-system";
@@ -1815,8 +1849,11 @@ async function detectAndSaveIssues() {
               // only blocks the issue from being proposed again.
               saveProposal(activated, issue.id);
               promotedCount++;
-              io.emit("proposals:created", {
-                proposal: activated,
+              const all = votingSystem.listProposals();
+              io.emit(SOCKET_EVENTS.proposalCreated, {
+                proposal: withTally(activated),
+                totalCount: all.length,
+                activeCount: all.filter((p) => p.status === "active").length,
                 source: "auto-promotion",
               });
             } catch (promoteError) {
@@ -1880,6 +1917,45 @@ async function evaluatePendingOutcomes() {
   }
 
   return { pending: pending.length, evaluated };
+}
+
+/**
+ * Close out proposals whose voting period has ended.
+ *
+ * Nothing finalized a proposal before: the web declared a finalize mutation it
+ * never called, and there was no scheduler, so a proposal created from the UI
+ * stayed "active" forever and could never reach the execute step. Idempotent —
+ * it only touches active proposals that are actually past their end time.
+ */
+function finalizeDueProposals(): { finalized: number; failed: number } {
+  const nowMs = Date.now();
+  let finalized = 0;
+  let failed = 0;
+
+  for (const proposal of votingSystem.listProposals("active")) {
+    if (proposal.votingEndsAt.getTime() > nowMs) continue;
+    try {
+      const updated = votingSystem.finalizeProposal(proposal.id);
+      saveProposal(updated);
+      finalized++;
+
+      const all = votingSystem.listProposals();
+      io.emit(SOCKET_EVENTS.proposalFinalized, {
+        proposalId: updated.id,
+        status: updated.status,
+        tally: serializeTally(votingSystem.tallyVotes(updated.id)),
+        executionEta: updated.executionEta?.toISOString(),
+        totalCount: all.length,
+        activeCount: all.filter((p) => p.status === "active").length,
+      });
+      console.log(`🗳️  Finalized proposal ${proposal.id}: ${updated.status}`);
+    } catch (error) {
+      failed++;
+      console.error(`[auto-finalize] failed for proposal ${proposal.id}:`, error);
+    }
+  }
+
+  return { finalized, failed };
 }
 
 // Rebuild governance state from storage BEFORE accepting traffic. Serving
@@ -2046,6 +2122,25 @@ httpServer.listen(PORT, () => {
     }, OUTCOME_EVAL_INTERVAL * 1000);
   } else {
     console.log(`📈 Outcome evaluation: DISABLED`);
+  }
+
+  // Close out proposals whose voting period ended, including any that expired
+  // while the process was down.
+  if (AUTO_FINALIZE_INTERVAL > 0) {
+    console.log(`🗳️  Auto finalize: every ${AUTO_FINALIZE_INTERVAL}s`);
+    const due = finalizeDueProposals();
+    if (due.finalized > 0) {
+      console.log(`   ✅ Finalized ${due.finalized} proposal(s) whose voting had ended`);
+    }
+    setInterval(() => {
+      try {
+        finalizeDueProposals();
+      } catch (error) {
+        console.error("❌ Auto finalize failed:", error);
+      }
+    }, AUTO_FINALIZE_INTERVAL * 1000);
+  } else {
+    console.log(`🗳️  Auto finalize: DISABLED`);
   }
 });
 

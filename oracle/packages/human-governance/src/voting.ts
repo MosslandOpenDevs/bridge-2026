@@ -282,6 +282,8 @@ export class VotingSystem {
       againstVotes,
       abstainVotes,
       totalVotes,
+      voteCount: votes.length,
+      forPercentage,
       participationRate: votes.length / proposal.quorum,
       quorumReached,
       passed,

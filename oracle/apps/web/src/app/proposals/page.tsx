@@ -277,12 +277,20 @@ export default function ProposalsPage() {
           </div>
         ) : (
           proposals.map((proposal: any) => {
-            const forVotes = Number(proposal.forVotes || 0);
-            const againstVotes = Number(proposal.againstVotes || 0);
-            const abstainVotes = Number(proposal.abstainVotes || 0);
+            // The tally comes from the API. Reading forVotes/againstVotes off
+            // the proposal itself always yielded 0: those fields never existed
+            // on the object, so every proposal showed no votes however many
+            // had been cast.
+            const tally = proposal.tally;
+            const forVotes = Number(tally?.forVotes ?? 0);
+            const againstVotes = Number(tally?.againstVotes ?? 0);
+            const abstainVotes = Number(tally?.abstainVotes ?? 0);
             const total = forVotes + againstVotes + abstainVotes;
-            const quorum = Number(proposal.quorum || 1000000);
-            const quorumPercent = (total / quorum) * 100;
+            // Quorum counts ballots, not weight, so measure the indicator
+            // against the number of votes cast.
+            const quorum = Number(proposal.quorum || 1);
+            const voteCount = Number(tally?.voteCount ?? 0);
+            const quorumPercent = Math.min(100, (voteCount / quorum) * 100);
             const isExpanded = expandedId === proposal.id;
             const votingEndsAt = new Date(proposal.votingEndsAt);
 
@@ -555,7 +563,7 @@ export default function ProposalsPage() {
                     {/* Proposal Info */}
                     <div className="text-sm text-gray-500 pt-2 border-t border-gray-100">
                       <p>{t("proposals.proposer")}: <span className="font-mono text-gray-700">{proposal.proposer}</span></p>
-                      <p>{t("proposals.quorum")}: {formatNumber(quorum)} MOC ({quorumPercent.toFixed(1)}% {t("proposals.reached") || "reached"})</p>
+                      <p>{t("proposals.quorum")}: {formatNumber(voteCount)} / {formatNumber(quorum)} {t("proposals.votesUnit")} ({quorumPercent.toFixed(1)}% {t("proposals.reached") || "reached"})</p>
                       <p>ID: <span className="font-mono text-xs">{proposal.id}</span></p>
                     </div>
                   </div>

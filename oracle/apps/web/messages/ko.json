@@ -156,7 +156,8 @@
     "agentOpinions": "에이전트 의견",
     "goals": "목표 및 KPI",
     "target": "목표",
-    "alternatives": "대안"
+    "alternatives": "대안",
+    "votesUnit": "표"
   },
   "delegation": {
     "title": "위임 정책",

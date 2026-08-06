@@ -156,7 +156,8 @@
     "agentOpinions": "Agent Opinions",
     "goals": "Goals & KPIs",
     "target": "Target",
-    "alternatives": "Alternatives"
+    "alternatives": "Alternatives",
+    "votesUnit": "votes"
   },
   "delegation": {
     "title": "Delegation Policies",

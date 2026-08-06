@@ -22,7 +22,8 @@ const iso = (d: Date | string | undefined | null): string | null => {
   return d instanceof Date ? d.toISOString() : String(d);
 };
 
-function proposalTitle(proposal: Proposal): string {
+/** Label for a proposal, derived from its decision packet. */
+export function proposalTitle(proposal: Proposal): string {
   const dp: any = proposal.decisionPacket;
   return (
     dp?.issue?.title ||

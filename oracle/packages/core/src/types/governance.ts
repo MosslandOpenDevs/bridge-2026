@@ -69,6 +69,13 @@ export const VoteTallySchema = z.object({
   againstVotes: z.bigint(),
   abstainVotes: z.bigint(),
   totalVotes: z.bigint(),
+  /**
+   * Number of ballots cast. Quorum is a count of votes, not a sum of weights,
+   * so this is what a quorum indicator must be measured against.
+   */
+  voteCount: z.number().int().nonnegative(),
+  /** Share of `for` among decisive (for + against) weight, 0-100. */
+  forPercentage: z.number(),
   participationRate: z.number(),
   quorumReached: z.boolean(),
   passed: z.boolean(),
