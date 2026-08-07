@@ -31,7 +31,10 @@ export function Footer() {
                   <span aria-current="page" className="font-semibold text-gray-900">
                     <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-moss-600 align-middle" />
                     {s.name}{" "}
-                    <span className="ml-1.5 font-normal text-gray-400">{t(s.roleKey)}</span>
+                    {/* Pinned rather than inherited: the parent is text-gray-900,
+                        so dropping the colour would render the role at full
+                        strength and flatten the name/role hierarchy. */}
+                    <span className="ml-1.5 font-normal text-gray-500">{t(s.roleKey)}</span>
                   </span>
                 ) : (
                   <a
@@ -41,8 +44,13 @@ export function Footer() {
                     className="font-medium text-gray-500 hover:text-moss-600 transition-colors"
                   >
                     {s.name}{" "}
-                    <span className="ml-1.5 font-normal text-gray-400">{t(s.roleKey)}</span>
-                    <span aria-hidden="true" className="ml-1 text-gray-400">
+                    {/* No colour class on either: both inherit the link's
+                        text-gray-500 (4.83:1 on white). gray-400 was 2.54:1 —
+                        below the 4.5:1 floor, and the ↗ is the only new-tab
+                        cue a sighted user gets. Inheriting also means both
+                        follow the link's hover instead of sitting inert. */}
+                    <span className="ml-1.5 font-normal">{t(s.roleKey)}</span>
+                    <span aria-hidden="true" className="ml-1">
                       ↗
                     </span>
                     <span className="sr-only">{` (${t("newTab")})`}</span>
