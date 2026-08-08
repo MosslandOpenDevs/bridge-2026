@@ -28,6 +28,7 @@ import {
   decisionHistoryDb,
   issueFollowupDb,
   type IssueRow,
+  issueFingerprint,
   serializeSignal,
   deserializeSignal,
   serializeIssue,
@@ -88,6 +89,7 @@ import {
   type Proposal,
   type VoteTally,
   type TallyPayload,
+  type DetectedIssue,
 } from "@oracle/core";
 
 // Refuse to start on an unsafe auth configuration rather than discovering it
@@ -619,21 +621,7 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
       ...trendDetector.analyze(signals),
     ];
 
-    // Save new issues to database (avoid duplicates)
-    const savedIssues = [];
-    for (const issue of detectedIssues) {
-      // Check if similar issue already exists
-      const existing = issueDb.findSimilar.get({
-        category: issue.category,
-        kind: issue.kind ?? "issue",
-        direction: issue.direction ?? "",
-        window: ISSUE_DEDUPE_WINDOW,
-      });
-      if (!existing) {
-        issueDb.insert.run(serializeIssue(issue));
-        savedIssues.push(issue);
-      }
-    }
+    const { saved: savedIssues } = saveDetectedIssues(detectedIssues);
 
     // Return all active issues
     const allIssues = issueDb.getActive.all(50).map(deserializeIssue);
@@ -660,9 +648,6 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
 });
 
 const VALID_ISSUE_STATUSES = ["detected", "deliberating", "proposed", "resolved"];
-
-// How far back a detection counts as a repeat of one already recorded.
-const ISSUE_DEDUPE_WINDOW = `-${envInt("ISSUE_DEDUPE_MINUTES", 15)} minutes`;
 
 app.patch("/api/issues/:id", requireAdminKey, async (req, res) => {
   try {
@@ -2228,6 +2213,65 @@ async function collectAndSaveSignals() {
   return signals;
 }
 
+// Absent ranks below every real priority, so "never deliberated" always counts
+// as an escalation. That is what lets an issue the per-cycle cap skipped get
+// picked up on a later pass instead of being dropped for good.
+const priorityRank = (p?: string | null) =>
+  p ? (PRIORITY_RANK[p.toLowerCase()] ?? 0) : 0;
+
+/**
+ * Store a detection, folding it into the open issue for the same condition.
+ *
+ * Both detect paths share this so they cannot drift: the HTTP route and the
+ * background scheduler run the same detectors over the same signals, and a
+ * dedupe rule enforced in only one of them is not a dedupe rule.
+ *
+ * Returns the issues that are genuinely new, i.e. the ones worth deliberating.
+ */
+function saveDetectedIssues(detectedIssues: DetectedIssue[]): {
+  saved: DetectedIssue[];
+  recurrences: number;
+  escalations: number;
+} {
+  const saved: DetectedIssue[] = [];
+  let recurrences = 0;
+  let escalations = 0;
+
+  for (const issue of detectedIssues) {
+    const fingerprint = issueFingerprint(issue);
+    const existing = issueDb.findOpenByFingerprint.get({ fingerprint }) as
+      | IssueRow
+      | undefined;
+
+    if (!existing) {
+      issueDb.insert.run(serializeIssue({ ...issue, fingerprint }));
+      saved.push({ ...issue, fingerprint });
+      continue;
+    }
+
+    // Same condition, still open. Record that it is still happening, but do
+    // not mint a new issue — that is what turned one persistent condition into
+    // four paid deliberations an hour.
+    recurrences++;
+    issueDb.recordRecurrence.run({
+      id: existing.id,
+      lastSeenAt: new Date().toISOString(),
+      priority: issue.priority,
+      priorityRank: priorityRank(issue.priority),
+    });
+
+    // An escalation is new information, so it earns a fresh look — but only
+    // once per level, tracked by deliberated_priority rather than by elapsed
+    // time. A condition that merely persists never re-enters this branch.
+    if (priorityRank(issue.priority) > priorityRank(existing.deliberated_priority)) {
+      escalations++;
+      saved.push({ ...issue, id: existing.id, fingerprint });
+    }
+  }
+
+  return { saved, recurrences, escalations };
+}
+
 // Helper function for background issue detection
 async function detectAndSaveIssues() {
   const signalRows = signalDb.getRecent.all(1000);
@@ -2239,21 +2283,9 @@ async function detectAndSaveIssues() {
     ...trendDetector.analyze(signals),
   ];
 
-  let savedCount = 0;
-  const savedIssues = [];
-  for (const issue of detectedIssues) {
-    const existing = issueDb.findSimilar.get({
-        category: issue.category,
-        kind: issue.kind ?? "issue",
-        direction: issue.direction ?? "",
-        window: ISSUE_DEDUPE_WINDOW,
-      });
-    if (!existing) {
-      issueDb.insert.run(serializeIssue(issue));
-      savedIssues.push(issue);
-      savedCount++;
-    }
-  }
+  const { saved: savedIssues, recurrences, escalations } =
+    saveDetectedIssues(detectedIssues);
+  const savedCount = savedIssues.length;
 
   // Emit real-time event if new issues were saved
   if (savedCount > 0) {
@@ -2299,6 +2331,9 @@ async function detectAndSaveIssues() {
           {}
         );
         const decisionPacket = await moderator.deliberate(issue, enrichedContext);
+        // Recorded whatever the outcome, so a failed synthesis is not retried
+        // every five minutes for as long as the condition lasts.
+        issueDb.markDeliberated.run({ id: issue.id, priority: issue.priority });
         if (decisionPacket) {
           const agentOpinions = (decisionPacket.agentOpinions || []).map(
             (op: any) => ({
@@ -2402,6 +2437,11 @@ async function detectAndSaveIssues() {
     promoted: promotedCount,
     skippedSynthetic: skippedSyntheticCount,
     cappedByCycleLimit: cappedCount,
+    // Repeat sightings folded into an existing issue rather than minted as new
+    // ones. Before fingerprint dedupe every one of these was a fresh row and a
+    // fresh five-call deliberation.
+    recurrences,
+    escalations,
   };
 }
 

@@ -49,6 +49,10 @@ export const DetectedIssueSchema = z.object({
   // not carry its signal rows, and the callers that must not act on invented
   // data — automatic deliberation above all — decide before rejoining them.
   synthetic: z.boolean().optional(),
+  // Identity of the condition rather than of this observation of it, so a
+  // situation that simply persists is recognised as the same issue instead of
+  // being re-detected — and re-deliberated — on every pass.
+  fingerprint: z.string().optional(),
 });
 export type DetectedIssue = z.infer<typeof DetectedIssueSchema>;
 
