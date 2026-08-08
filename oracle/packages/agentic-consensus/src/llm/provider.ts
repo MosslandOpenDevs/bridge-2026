@@ -9,6 +9,10 @@ export interface LLMConfig {
   model?: string;
   maxTokens?: number;
   baseURL?: string;
+  /** Per-attempt timeout in ms. See DEFAULT_TIMEOUT_MS. */
+  timeout?: number;
+  /** Retries per call. See DEFAULT_MAX_RETRIES. */
+  maxRetries?: number;
 }
 
 export interface LLMMessage {
@@ -38,6 +42,24 @@ const DEFAULT_MAX_TOKENS: Record<LLMProvider, number> = {
   openai: 4096,
   ollama: 4096,
 };
+
+/**
+ * Per-attempt timeout, in ms.
+ *
+ * Both SDKs default to ten minutes, and that is per *attempt* — with two
+ * retries a single call can hold a slot for half an hour. A deliberation makes
+ * its five calls one after another, from a job on a five-minute timer, so the
+ * defaults let one stuck call outlive several scheduling periods. Two minutes
+ * is generous for a 2-4k token completion and turns a hang into a failure the
+ * caller can fall back from.
+ */
+const DEFAULT_TIMEOUT_MS = 120_000;
+
+/**
+ * Retries are kept: they fire on 429s and 5xx, and a failed attempt returns no
+ * completion, so it costs latency rather than tokens.
+ */
+const DEFAULT_MAX_RETRIES = 2;
 
 export class LLMClient {
   /**
@@ -78,19 +100,26 @@ export class LLMClient {
     this.model = config.model || DEFAULT_MODELS[this.provider];
     this.maxTokens = config.maxTokens || DEFAULT_MAX_TOKENS[this.provider];
 
+    const limits = {
+      timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
+      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+    };
+
     if (this.provider === "ollama") {
       // Ollama exposes an OpenAI-compatible API; apiKey is unused server-side
       this.openaiClient = new OpenAI({
         apiKey: config.apiKey || "ollama",
         baseURL: config.baseURL,
+        ...limits,
       });
     } else if (config.apiKey) {
       if (this.provider === "anthropic") {
-        this.anthropicClient = new Anthropic({ apiKey: config.apiKey });
+        this.anthropicClient = new Anthropic({ apiKey: config.apiKey, ...limits });
       } else {
         this.openaiClient = new OpenAI({
           apiKey: config.apiKey,
           baseURL: config.baseURL,
+          ...limits,
         });
       }
     }

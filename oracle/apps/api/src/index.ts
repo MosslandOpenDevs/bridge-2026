@@ -119,6 +119,39 @@ function envFlag(name: string, fallback: boolean): boolean {
   process.exit(1);
 }
 
+/**
+ * Run an async job on a fixed interval, never concurrently with itself.
+ *
+ * `setInterval` fires on the clock regardless of whether the previous run has
+ * returned. The detection pass issues LLM calls one after another, each with
+ * the SDK's own timeout and retries behind it, so a slow cycle outlasts the
+ * interval and the next pass starts on top of it — passes stack, the same
+ * issues are worked twice, and nothing bounds how many are in flight against a
+ * paid API. Skipping a tick is the correct response: the work is periodic, so
+ * the next tick picks up whatever was missed.
+ */
+function everyInterval(
+  label: string,
+  seconds: number,
+  job: () => Promise<void>,
+): void {
+  let inFlight = false;
+  setInterval(async () => {
+    if (inFlight) {
+      console.warn(`⏭️  ${label}: previous run still in flight, skipping tick`);
+      return;
+    }
+    inFlight = true;
+    try {
+      await job();
+    } catch (error) {
+      console.error(`❌ ${label} failed:`, error);
+    } finally {
+      inFlight = false;
+    }
+  }, seconds * 1000);
+}
+
 // Initialize services
 const signalRegistry = new SignalRegistry();
 
@@ -2510,14 +2543,10 @@ httpServer.listen(PORT, () => {
     });
 
     // Periodic collection
-    setInterval(async () => {
-      try {
-        const signals = await collectAndSaveSignals();
-        console.log(`🔄 Collected ${signals.length} signals at ${new Date().toLocaleTimeString()}`);
-      } catch (error) {
-        console.error("❌ Auto-collection failed:", error);
-      }
-    }, SIGNAL_COLLECT_INTERVAL * 1000);
+    everyInterval("Auto-collection", SIGNAL_COLLECT_INTERVAL, async () => {
+      const signals = await collectAndSaveSignals();
+      console.log(`🔄 Collected ${signals.length} signals at ${new Date().toLocaleTimeString()}`);
+    });
   }
 
   // Auto issue detection
@@ -2535,16 +2564,12 @@ httpServer.listen(PORT, () => {
     }, 5000);
 
     // Periodic detection
-    setInterval(async () => {
-      try {
-        const result = await detectAndSaveIssues();
-        if (result.saved > 0) {
-          console.log(`🔍 Detected ${result.detected} issues, saved ${result.saved} new, ${result.deliberated} deliberated, ${result.promoted} promoted at ${new Date().toLocaleTimeString()}`);
-        }
-      } catch (error) {
-        console.error("❌ Auto-detection failed:", error);
+    everyInterval("Auto-detection", ISSUE_DETECT_INTERVAL, async () => {
+      const result = await detectAndSaveIssues();
+      if (result.saved > 0) {
+        console.log(`🔍 Detected ${result.detected} issues, saved ${result.saved} new, ${result.deliberated} deliberated, ${result.promoted} promoted at ${new Date().toLocaleTimeString()}`);
       }
-    }, ISSUE_DETECT_INTERVAL * 1000);
+    });
   }
 
   if (AUTO_DELIBERATE_ENABLED) {
@@ -2561,16 +2586,12 @@ httpServer.listen(PORT, () => {
 
   if (OUTCOME_EVAL_ENABLED && OUTCOME_EVAL_INTERVAL > 0) {
     console.log(`📈 Outcome evaluation: every ${OUTCOME_EVAL_INTERVAL}s, age threshold ${OUTCOME_EVAL_AGE_HOURS}h, batch ${OUTCOME_EVAL_BATCH}`);
-    setInterval(async () => {
-      try {
-        const result = await evaluatePendingOutcomes();
-        if (result.evaluated > 0) {
-          console.log(`📈 Evaluated ${result.evaluated}/${result.pending} pending decisions at ${new Date().toLocaleTimeString()}`);
-        }
-      } catch (error) {
-        console.error("❌ Outcome evaluation failed:", error);
+    everyInterval("Outcome evaluation", OUTCOME_EVAL_INTERVAL, async () => {
+      const result = await evaluatePendingOutcomes();
+      if (result.evaluated > 0) {
+        console.log(`📈 Evaluated ${result.evaluated}/${result.pending} pending decisions at ${new Date().toLocaleTimeString()}`);
       }
-    }, OUTCOME_EVAL_INTERVAL * 1000);
+    });
   } else {
     console.log(`📈 Outcome evaluation: DISABLED`);
   }
