@@ -145,6 +145,18 @@ async function startServer(overrides: Record<string, string> = {}): Promise<void
       // the suite does not quietly start depending on live Mossland/Medium
       // responses if NODE_ENV here ever changes.
       ENABLE_MOCK_SIGNALS: "1",
+      // No live LLM calls from a test run. src/index.ts starts with
+      // `import "dotenv/config"`, and the README tells contributors to put
+      // their keys in apps/api/.env — so without this, running the suite on a
+      // configured machine bills them for a real deliberation plus a real
+      // debate. Empty rather than deleted: dotenv only fills keys that are
+      // unset, and an empty string is falsy everywhere these are read, so the
+      // agents fall back to their rule-based path. A test that wants the real
+      // thing can still pass a key through startServer's overrides.
+      ANTHROPIC_API_KEY: "",
+      OPENAI_API_KEY: "",
+      LLM_PROVIDER: "",
+      OLLAMA_BASE_URL: "",
       // Background jobs off so the suite observes only what it triggers.
       SIGNAL_COLLECT_INTERVAL: "0",
       ISSUE_DETECT_INTERVAL: "0",
