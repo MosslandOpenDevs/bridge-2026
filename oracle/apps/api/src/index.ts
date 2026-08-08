@@ -2176,12 +2176,27 @@ app.get("/api/blockchain/verify-voter/:address", async (req, res) => {
 // Background processing intervals (in seconds, 0 to disable)
 const SIGNAL_COLLECT_INTERVAL = parseInt(process.env.SIGNAL_COLLECT_INTERVAL || "60", 10);
 const ISSUE_DETECT_INTERVAL = parseInt(process.env.ISSUE_DETECT_INTERVAL || "300", 10); // 5 minutes
-const AUTO_DELIBERATE_ENABLED = process.env.AUTO_DELIBERATE_ENABLED !== "0";
+const AUTO_DELIBERATE_ENABLED = envFlag("AUTO_DELIBERATE_ENABLED", true);
 const AUTO_DELIBERATE_MIN_PRIORITY = (process.env.AUTO_DELIBERATE_MIN_PRIORITY || "high").toLowerCase();
 const PRIORITY_RANK: Record<string, number> = { low: 1, medium: 2, high: 3, urgent: 4, critical: 4 };
 const minPriorityRank = PRIORITY_RANK[AUTO_DELIBERATE_MIN_PRIORITY] ?? 3;
 
-const OUTCOME_EVAL_ENABLED = process.env.OUTCOME_EVAL_ENABLED !== "0";
+// Ceiling on deliberations per detection pass.
+//
+// /api/deliberate is capped at a few calls a minute, with the comment "LLM
+// endpoints are expensive — much stricter cap to protect API credits". The
+// background scheduler calls the same code in-process and so meets no limiter
+// at all: whatever a detector emits in one pass, it pays for. This applies the
+// project's own guard to its own path.
+//
+// A backstop, not a budget — mock exclusion, the fit gate and the priority gate
+// are what set the normal volume. It exists so a detector bug costs one capped
+// cycle rather than an open tab, and it says so in the log when it bites,
+// because an issue dropped here is not retried: its row is already stored, so
+// the next pass no longer sees it as new.
+const AUTO_DELIBERATE_MAX_PER_CYCLE = envInt("AUTO_DELIBERATE_MAX_PER_CYCLE", 10);
+
+const OUTCOME_EVAL_ENABLED = envFlag("OUTCOME_EVAL_ENABLED", true);
 const OUTCOME_EVAL_INTERVAL = parseInt(process.env.OUTCOME_EVAL_INTERVAL || "1800", 10); // 30 min
 const OUTCOME_EVAL_AGE_HOURS = parseInt(process.env.OUTCOME_EVAL_AGE_HOURS || "6", 10);
 const OUTCOME_EVAL_BATCH = parseInt(process.env.OUTCOME_EVAL_BATCH || "20", 10);
@@ -2189,7 +2204,7 @@ const OUTCOME_EVAL_BATCH = parseInt(process.env.OUTCOME_EVAL_BATCH || "20", 10);
 // How often to close out proposals whose voting period has ended (0 disables).
 const AUTO_FINALIZE_INTERVAL = envInt("AUTO_FINALIZE_INTERVAL", 60);
 
-const AUTO_PROPOSAL_ENABLED = process.env.AUTO_PROPOSAL_ENABLED !== "0";
+const AUTO_PROPOSAL_ENABLED = envFlag("AUTO_PROPOSAL_ENABLED", true);
 const AUTO_PROPOSAL_THRESHOLD = parseFloat(process.env.AUTO_PROPOSAL_THRESHOLD || "0.7");
 const AUTO_PROPOSAL_PROPOSER = process.env.AUTO_PROPOSAL_PROPOSER || "auto-system";
 
@@ -2254,6 +2269,7 @@ async function detectAndSaveIssues() {
   let deliberatedCount = 0;
   let promotedCount = 0;
   let skippedSyntheticCount = 0;
+  let cappedCount = 0;
   if (AUTO_DELIBERATE_ENABLED && savedIssues.length > 0) {
     for (const issue of savedIssues) {
       // Never spend on invented data. ENABLE_MOCK_SIGNALS already keeps demo
@@ -2272,6 +2288,10 @@ async function detectAndSaveIssues() {
       }
       const rank = PRIORITY_RANK[(issue.priority || "medium").toLowerCase()] ?? 0;
       if (rank < minPriorityRank) continue;
+      if (deliberatedCount >= AUTO_DELIBERATE_MAX_PER_CYCLE) {
+        cappedCount++;
+        continue;
+      }
       try {
         const enrichedContext = enrichContextWithHistory(
           issue.category || "general",
@@ -2357,6 +2377,14 @@ async function detectAndSaveIssues() {
     );
   }
 
+  if (cappedCount > 0) {
+    console.warn(
+      `⚠️  [auto-deliberate] cycle cap of ${AUTO_DELIBERATE_MAX_PER_CYCLE} reached; ` +
+        `${cappedCount} eligible issue(s) left undeliberated and will NOT be retried ` +
+        `(raise AUTO_DELIBERATE_MAX_PER_CYCLE, or find out why this pass detected so many)`,
+    );
+  }
+
   // Running totals in the log, so the spend is visible to whoever is tailing it
   // rather than only to someone who knows the endpoint exists.
   if (deliberatedCount > 0) {
@@ -2373,6 +2401,7 @@ async function detectAndSaveIssues() {
     deliberated: deliberatedCount,
     promoted: promotedCount,
     skippedSynthetic: skippedSyntheticCount,
+    cappedByCycleLimit: cappedCount,
   };
 }
 

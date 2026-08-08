@@ -144,7 +144,13 @@ pnpm --filter @oracle/web dev             # Next.js web (port 3100)
 ```
 
 Copy `oracle/apps/api/.env.example` → `oracle/apps/api/.env` and fill in the values you need
-(LLM keys, RPC URL, `ADMIN_API_KEY`, etc.). **MOC verification is on by
+(LLM keys, RPC URL, `ADMIN_API_KEY`, etc.). **Adding an LLM key starts an
+autonomous loop that spends money** — the server deliberates on newly detected
+issues by itself, five LLM calls each, every `ISSUE_DETECT_INTERVAL` seconds,
+and promotes the confident ones to live proposals. Without a key it all falls
+back to a rule-based path and costs nothing. Set `AUTO_DELIBERATE_ENABLED=0` to
+keep detection without the spend, and check `GET /api/llm/usage` for what it
+has actually used. **MOC verification is on by
 default** — the API falls back to a public Ethereum RPC for read-only Moss
 Coin balance checks, so votes require a wallet signature and a nonzero MOC
 balance out of the box. Set `MAINNET_RPC_URL=off` for an open demo mode. See
