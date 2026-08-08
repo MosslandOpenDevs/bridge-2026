@@ -11,6 +11,16 @@ export abstract class BaseAdapter implements SignalAdapter {
   abstract readonly name: string;
   abstract readonly source: SignalSource;
 
+  /**
+   * Whether this adapter invents its values instead of observing them.
+   *
+   * Declared once per adapter rather than per signal: a demo adapter that
+   * forgot the flag on one code path would emit synthetic data that reads as
+   * real, and everything downstream — issue detection, the agents' evidence,
+   * the public API — has no other way to tell the difference.
+   */
+  protected readonly synthetic: boolean = false;
+
   abstract fetch(): Promise<RawSignal[]>;
 
   validate(signal: RawSignal): boolean {
@@ -58,6 +68,7 @@ export abstract class BaseAdapter implements SignalAdapter {
       value,
       unit,
       description,
+      synthetic: this.synthetic,
     };
   }
 }
