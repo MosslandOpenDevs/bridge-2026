@@ -248,6 +248,14 @@ for (const [table, column, definition] of [
   // the adapter that produced them was not recorded.
   ["signals", "synthetic", "INTEGER NOT NULL DEFAULT 0"],
   ["issues", "synthetic", "INTEGER NOT NULL DEFAULT 0"],
+  // Identity of the *condition*, as opposed to this observation of it. See
+  // issueFingerprint.
+  ["issues", "fingerprint", "TEXT"],
+  ["issues", "last_seen_at", "TEXT"],
+  ["issues", "occurrence_count", "INTEGER NOT NULL DEFAULT 1"],
+  // Priority the issue was deliberated at, so an escalation can be re-judged
+  // while a steady condition is not paid for twice.
+  ["issues", "deliberated_priority", "TEXT"],
 ] as const) {
   try {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -255,6 +263,40 @@ for (const [table, column, definition] of [
     // Column already present.
   }
 }
+
+/**
+ * Identity of the condition an issue reports, not of the observation.
+ *
+ * Two detections with the same fingerprint are the same ongoing situation seen
+ * twice — "governance participation is falling" does not become a different
+ * problem because fifteen minutes elapsed.
+ *
+ * The parts are exactly the ones the old time-windowed dedupe matched on, so
+ * existing rows can be backfilled from their own columns without guessing.
+ */
+export function issueFingerprint(issue: {
+  category?: string;
+  kind?: string | null;
+  direction?: string | null;
+}): string {
+  return [
+    issue.category ?? "unknown",
+    issue.kind || "issue",
+    issue.direction || "",
+  ].join("|");
+}
+
+// Backfill: every pre-existing row's fingerprint is derivable from the columns
+// the previous dedupe already keyed on, so no history is lost to the change.
+db.exec(`
+  UPDATE issues
+  SET fingerprint = category || '|' || IFNULL(NULLIF(kind, ''), 'issue') || '|' || IFNULL(direction, '')
+  WHERE fingerprint IS NULL
+`);
+
+db.exec(
+  `CREATE INDEX IF NOT EXISTS idx_issues_fingerprint ON issues(fingerprint, status)`,
+);
 
 console.log(`📦 Database initialized at ${DB_PATH}`);
 
@@ -275,6 +317,10 @@ export interface IssueRow {
   suggested_actions: string | null;
   decision_packet: string | null;
   synthetic: number;
+  fingerprint: string | null;
+  last_seen_at: string | null;
+  occurrence_count: number;
+  deliberated_priority: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -332,8 +378,8 @@ try {
 // Issue operations
 export const issueDb = {
   insert: db.prepare(`
-    INSERT INTO issues (id, title, description, category, priority, status, kind, direction, detected_at, signal_ids, evidence, suggested_actions, synthetic)
-    VALUES (@id, @title, @description, @category, @priority, @status, @kind, @direction, @detectedAt, @signalIds, @evidence, @suggestedActions, @synthetic)
+    INSERT INTO issues (id, title, description, category, priority, status, kind, direction, detected_at, signal_ids, evidence, suggested_actions, synthetic, fingerprint, last_seen_at)
+    VALUES (@id, @title, @description, @category, @priority, @status, @kind, @direction, @detectedAt, @signalIds, @evidence, @suggestedActions, @synthetic, @fingerprint, @detectedAt)
   `),
 
   update: db.prepare(`
@@ -389,14 +435,51 @@ export const issueDb = {
    * so a threshold breach and a downward trend in one category are not
    * mistaken for the same detection.
    */
-  findSimilar: db.prepare(`
+  /**
+   * The open issue for a condition, if one exists — with no time window.
+   *
+   * The window this replaces made the dedupe a frequency cap rather than
+   * duplicate prevention: detectors are stateless, so a condition that simply
+   * persisted produced a brand-new row every ISSUE_DEDUPE_MINUTES, and each
+   * new row was deliberated in full. Measured in production on 2026-08-08:
+   * 44 issues over half an hour across 20 distinct conditions, 22 of 24
+   * same-key gaps exactly 900s apart, and 10 escalations that were really only
+   * 5 conditions seen three times each.
+   *
+   * Closing an issue deliberately re-arms detection — a condition that returns
+   * after being resolved is news again.
+   */
+  findOpenByFingerprint: db.prepare(`
     SELECT * FROM issues
-    WHERE category = @category
-      AND IFNULL(kind, 'issue') = IFNULL(@kind, 'issue')
-      AND IFNULL(direction, '') = IFNULL(@direction, '')
+    WHERE fingerprint = @fingerprint
       AND status IN ('detected', 'deliberating', 'proposed')
-      AND julianday(detected_at) > julianday('now', @window)
+    ORDER BY detected_at DESC
     LIMIT 1
+  `),
+
+  /**
+   * Fold a repeat sighting into the issue that already represents it.
+   *
+   * Priority only ever ratchets up: a condition that was urgent an hour ago
+   * and looks merely high right now is still the urgent one being watched, and
+   * letting it drift down would re-escalate it later as if it were new.
+   */
+  recordRecurrence: db.prepare(`
+    UPDATE issues
+    SET occurrence_count = occurrence_count + 1,
+        last_seen_at = @lastSeenAt,
+        priority = CASE
+          WHEN @priorityRank > CASE priority
+            WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END
+          THEN @priority ELSE priority END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id
+  `),
+
+  markDeliberated: db.prepare(`
+    UPDATE issues
+    SET deliberated_priority = @priority, updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id
   `),
 
   clear: db.prepare(`DELETE FROM issues`),
@@ -752,6 +835,7 @@ export function serializeIssue(issue: any) {
     synthetic: (issue.synthetic ?? issue.signals?.some((s: any) => s.synthetic))
       ? 1
       : 0,
+    fingerprint: issue.fingerprint ?? issueFingerprint(issue),
   };
 }
 
@@ -772,6 +856,10 @@ export function deserializeIssue(row: any) {
     suggestedActions: row.suggested_actions ? JSON.parse(row.suggested_actions) : [],
     decisionPacket: row.decision_packet ? JSON.parse(row.decision_packet) : null,
     synthetic: row.synthetic === 1,
+    fingerprint: row.fingerprint ?? null,
+    lastSeenAt: row.last_seen_at ?? row.detected_at,
+    occurrenceCount: row.occurrence_count ?? 1,
+    deliberatedPriority: row.deliberated_priority ?? null,
   };
 }
 
