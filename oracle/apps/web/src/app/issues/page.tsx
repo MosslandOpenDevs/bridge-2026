@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
 import { useAccount } from "@/hooks/useMOC";
-import { AlertTriangle, MessageSquare, Users, Shield, Coins, Code, ChevronRight, Bot, Loader2, RefreshCw, CheckCircle, Clock, MessageCircle } from "lucide-react";
+import { AlertTriangle, MessageSquare, Users, Shield, Coins, Code, ChevronRight, Bot, Loader2, RefreshCw, CheckCircle, Clock, MessageCircle, FlaskConical } from "lucide-react";
 import { cn, timeAgo } from "@/lib/utils";
 import { useToast } from "@/contexts/ToastContext";
 import { api } from "@/lib/api";
@@ -248,6 +248,15 @@ export default function IssuesPage() {
                           <span className="badge bg-blue-50 text-blue-600 text-xs">
                             {issue.status}
                           </span>
+                          {issue.synthetic && (
+                            <span
+                              className="badge bg-amber-100 text-amber-800 flex items-center gap-1 text-xs"
+                              title={t("common.syntheticHint")}
+                            >
+                              <FlaskConical className="w-3 h-3" aria-hidden="true" />
+                              {t("common.synthetic")}
+                            </span>
+                          )}
                         </div>
                         <h3 className="mt-2 font-semibold text-gray-900 text-sm sm:text-base line-clamp-2">{issue.title}</h3>
                         <p className="mt-1 text-xs sm:text-sm text-gray-500 line-clamp-2">{issue.description}</p>

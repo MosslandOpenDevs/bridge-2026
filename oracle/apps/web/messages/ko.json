@@ -20,7 +20,9 @@
     "none": "없음",
     "yes": "예",
     "no": "아니오",
-    "expires": "만료"
+    "expires": "만료",
+    "synthetic": "데모 데이터",
+    "syntheticHint": "실제 소스에서 관측한 값이 아니라 데모용으로 생성된 데이터입니다. 자동 심의에서 제외됩니다."
   },
   "nav": {
     "dashboard": "대시보드",

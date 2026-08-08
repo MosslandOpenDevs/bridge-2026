@@ -20,7 +20,9 @@
     "none": "None",
     "yes": "Yes",
     "no": "No",
-    "expires": "Expires"
+    "expires": "Expires",
+    "synthetic": "demo data",
+    "syntheticHint": "Generated for demonstration, not observed from a real source. Excluded from automatic deliberation."
   },
   "nav": {
     "dashboard": "Dashboard",
