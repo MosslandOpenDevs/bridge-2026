@@ -61,6 +61,86 @@ const DEFAULT_TIMEOUT_MS = 120_000;
  */
 const DEFAULT_MAX_RETRIES = 2;
 
+export interface LLMModelUsage {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** Calls that returned no usage block, so their tokens are unaccounted for. */
+  callsWithoutUsage: number;
+}
+
+export interface LLMUsageSnapshot extends LLMModelUsage {
+  since: string;
+  byModel: Record<string, LLMModelUsage>;
+}
+
+const emptyUsage = (): LLMModelUsage => ({
+  calls: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  callsWithoutUsage: 0,
+});
+
+/**
+ * Process-wide token accounting.
+ *
+ * Both providers already return their usage block and every caller threw it
+ * away, so nothing in this system had ever measured its own spend — every
+ * figure about it was a model of the code rather than an observation of it.
+ *
+ * The totals live here, below the clients, rather than at the call sites:
+ * each agent constructs its own LLMClient and the moderator a fifth, so a
+ * per-instance counter would have to be summed by someone who knows all five
+ * exist. Recording in chat() means a new caller is counted by default instead
+ * of by remembering to.
+ *
+ * In-memory and reset by a restart. That is the right scope for a rate — for
+ * a bill, read the provider's own dashboard.
+ */
+let usageSince = new Date().toISOString();
+const usageTotals = emptyUsage();
+const usageByModel = new Map<string, LLMModelUsage>();
+
+function recordUsage(response: LLMResponse): void {
+  const model = usageByModel.get(response.model) ?? emptyUsage();
+  usageTotals.calls += 1;
+  model.calls += 1;
+  if (response.usage) {
+    usageTotals.inputTokens += response.usage.inputTokens;
+    usageTotals.outputTokens += response.usage.outputTokens;
+    model.inputTokens += response.usage.inputTokens;
+    model.outputTokens += response.usage.outputTokens;
+  } else {
+    usageTotals.callsWithoutUsage += 1;
+    model.callsWithoutUsage += 1;
+  }
+  usageByModel.set(response.model, model);
+}
+
+/**
+ * Totals since process start, or since the last reset.
+ *
+ * `model` is what the provider said it answered with, not what was requested —
+ * the two differ when a model id resolves to a dated snapshot, and the
+ * difference is exactly what a cost question needs to know.
+ */
+export function getLLMUsage(): LLMUsageSnapshot {
+  return {
+    ...usageTotals,
+    since: usageSince,
+    byModel: Object.fromEntries(usageByModel),
+  };
+}
+
+export function resetLLMUsage(): void {
+  usageTotals.calls = 0;
+  usageTotals.inputTokens = 0;
+  usageTotals.outputTokens = 0;
+  usageTotals.callsWithoutUsage = 0;
+  usageByModel.clear();
+  usageSince = new Date().toISOString();
+}
+
 export class LLMClient {
   /**
    * Whether a model wants `max_completion_tokens` rather than `max_tokens`.
@@ -145,16 +225,22 @@ export class LLMClient {
       throw new Error("LLM client not initialized - API key required");
     }
 
+    // Counted here rather than in each branch, so a future provider is
+    // accounted for without anyone remembering to add it.
+    let response: LLMResponse;
     if (this.provider === "anthropic" && this.anthropicClient) {
-      return this.chatWithAnthropic(systemPrompt, userMessage);
+      response = await this.chatWithAnthropic(systemPrompt, userMessage);
     } else if (
       (this.provider === "openai" || this.provider === "ollama") &&
       this.openaiClient
     ) {
-      return this.chatWithOpenAI(systemPrompt, userMessage);
+      response = await this.chatWithOpenAI(systemPrompt, userMessage);
+    } else {
+      throw new Error(`Unknown provider: ${this.provider}`);
     }
 
-    throw new Error(`Unknown provider: ${this.provider}`);
+    recordUsage(response);
+    return response;
   }
 
   private async chatWithAnthropic(

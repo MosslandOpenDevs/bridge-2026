@@ -1,6 +1,17 @@
 // LLM Provider
-export { LLMClient, createLLMClient } from "./llm/index.js";
-export type { LLMConfig, LLMProvider, LLMResponse } from "./llm/index.js";
+export {
+  LLMClient,
+  createLLMClient,
+  getLLMUsage,
+  resetLLMUsage,
+} from "./llm/index.js";
+export type {
+  LLMConfig,
+  LLMProvider,
+  LLMResponse,
+  LLMUsageSnapshot,
+  LLMModelUsage,
+} from "./llm/index.js";
 
 // Agents
 export { BaseAgent } from "./agents/base.js";

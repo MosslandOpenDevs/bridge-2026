@@ -79,6 +79,7 @@ import {
   CommunityAgent,
   ProductAgent,
   Moderator,
+  getLLMUsage,
 } from "@oracle/agentic-consensus";
 import { VotingSystem, DelegationManager } from "@oracle/human-governance";
 import { OutcomeTrackerImpl, TrustManager } from "@oracle/proof-of-outcome";
@@ -2016,6 +2017,48 @@ app.delete("/api/delegations/:id", async (req, res) => {
   }
 });
 
+// LLM token accounting.
+//
+// Admin-gated: it reports how much the deliberation loop is spending, which is
+// operational detail rather than governance record.
+//
+// Prices are read from the environment instead of a table in here. Provider
+// pricing changes without warning, and a stale constant would produce a
+// confident wrong number — the failure this endpoint exists to end. With no
+// prices set it reports tokens only, which are facts.
+app.get("/api/llm/usage", requireAdminKey, (req, res) => {
+  try {
+    const usage = getLLMUsage();
+    const inputPerMTok = Number(process.env.LLM_PRICE_INPUT_PER_MTOK);
+    const outputPerMTok = Number(process.env.LLM_PRICE_OUTPUT_PER_MTOK);
+    const priced =
+      Number.isFinite(inputPerMTok) && Number.isFinite(outputPerMTok);
+
+    res.json({
+      ...usage,
+      configuredProvider: moderator.llmProvider,
+      configuredModel: moderator.llmModel,
+      llmEnabled: moderator.isLLMEnabled,
+      estimatedCostUsd: priced
+        ? Number(
+            (
+              (usage.inputTokens / 1_000_000) * inputPerMTok +
+              (usage.outputTokens / 1_000_000) * outputPerMTok
+            ).toFixed(4),
+          )
+        : null,
+      // Named so nobody mistakes it for a bill: it ignores cached-input
+      // pricing, and any call that returned no usage block is missing from it.
+      costBasis: priced
+        ? { inputPerMTok, outputPerMTok, note: "set from env; excludes cached-input pricing" }
+        : { note: "set LLM_PRICE_INPUT_PER_MTOK and LLM_PRICE_OUTPUT_PER_MTOK to price this" },
+    });
+  } catch (error) {
+    console.error("Failed to read LLM usage:", error);
+    res.status(500).json({ error: "Failed to read LLM usage" });
+  }
+});
+
 // System stats
 app.get("/api/stats", (req, res) => {
   try {
@@ -2314,6 +2357,16 @@ async function detectAndSaveIssues() {
     );
   }
 
+  // Running totals in the log, so the spend is visible to whoever is tailing it
+  // rather than only to someone who knows the endpoint exists.
+  if (deliberatedCount > 0) {
+    const usage = getLLMUsage();
+    console.log(
+      `[auto-deliberate] ${deliberatedCount} deliberated · session totals: ` +
+        `${usage.calls} calls, ${usage.inputTokens} in / ${usage.outputTokens} out tokens`,
+    );
+  }
+
   return {
     detected: detectedIssues.length,
     saved: savedCount,
@@ -2489,6 +2542,7 @@ httpServer.listen(PORT, () => {
    - POST /api/issues/detect   - Detect and save issues
    - PATCH /api/issues/:id     - Update issue status
    - POST /api/deliberate      - Agent deliberation
+   - GET  /api/llm/usage       - LLM token accounting (admin)
    - POST /api/debate          - Multi-round agent debate
    - GET  /api/debate/:id      - Get debate session
    - GET  /api/debates         - List debate sessions
