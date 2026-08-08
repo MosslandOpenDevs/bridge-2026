@@ -231,6 +231,26 @@ ci_conclusion() {
       return 0
     fi
   fi
+  # A rejected credential is not a transient failure, and reporting it as one
+  # is worse than not reporting it at all: "status unavailable (network/API)"
+  # reads like the rate-limit case, which clears itself, so nobody investigates
+  # while every deploy silently stays blocked.
+  #
+  # 401 is always the credential. A 403 that got past the rate-limit branch
+  # above is a token that authenticated but may not read this repo. 404 is the
+  # repository being invisible -- wrong DEPLOY_GITHUB_REPO, or a fine-grained
+  # token without access -- and not a bad ref: GitHub answers 422 for a commit
+  # that does not exist, which correctly stays "unknown" below.
+  #
+  # Verified against the live API: bogus token -> 401, unknown repo -> 404,
+  # unknown sha -> 422.
+  case "${status}" in
+    401 | 403 | 404)
+      rm -f /tmp/bridge-ci-body.$$
+      echo "unauthorized:${status}"
+      return 0
+      ;;
+  esac
   if [ "${status}" != "200" ]; then
     rm -f /tmp/bridge-ci-body.$$
     echo "unknown"
@@ -601,6 +621,20 @@ EOF
         fi
         log "    unauthenticated GitHub allows 60 requests/hour per IP and this"
         log "    box shares one. Set GITHUB_TOKEN in the deploy environment for 5000/hour."
+        exit 0 ;;
+      unauthorized:*)
+        log "CI: GitHub rejected the credential (HTTP ${CI_STATUS#unauthorized:}) for ${DEPLOY_GITHUB_REPO}"
+        if [ -n "${GITHUB_TOKEN:-}" ]; then
+          log "    GITHUB_TOKEN is set but expired, revoked, or cannot read this"
+          log "    repository's check runs."
+        else
+          log "    GITHUB_TOKEN is not set in the deploy environment."
+        fi
+        log "    This does NOT clear on its own -- every deploy stays blocked until"
+        log "    it is fixed. Verify with:"
+        log "    curl -sI -H \"Authorization: Bearer \$GITHUB_TOKEN\" \\"
+        log "      https://api.github.com/repos/${DEPLOY_GITHUB_REPO}/commits/${TARGET}/check-runs"
+        alert "BRIDGE deploy blocked: GitHub rejected GITHUB_TOKEN (HTTP ${CI_STATUS#unauthorized:}) -- deploys are stuck until the token is fixed"
         exit 0 ;;
       *)
         log "CI: status unavailable (network/API) -- deferring to next tick"; exit 0 ;;
