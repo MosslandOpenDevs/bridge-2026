@@ -39,6 +39,10 @@ export const NormalizedSignalSchema = z.object({
   unit: z.string(),
   description: z.string(),
   attestation: z.string().optional(), // Merkle proof or signature
+  // True when the value was generated rather than observed. Demo adapters set
+  // this so downstream consumers — detectors, agents, the public API — can tell
+  // synthetic data from reality instead of having to infer it from the source.
+  synthetic: z.boolean().optional(),
 });
 export type NormalizedSignal = z.infer<typeof NormalizedSignalSchema>;
 

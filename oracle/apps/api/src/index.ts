@@ -79,6 +79,7 @@ import {
   CommunityAgent,
   ProductAgent,
   Moderator,
+  getLLMUsage,
 } from "@oracle/agentic-consensus";
 import { VotingSystem, DelegationManager } from "@oracle/human-governance";
 import { OutcomeTrackerImpl, TrustManager } from "@oracle/proof-of-outcome";
@@ -97,6 +98,61 @@ if (adminAuthError) {
   process.exit(1);
 }
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+/**
+ * Parse a boolean environment variable, refusing anything unrecognised.
+ *
+ * The `!== "0"` idiom this replaces treated `false`, `off` and `no` as *on*,
+ * which is the opposite of what an operator setting them intends. These flags
+ * decide whether the process spends money on LLM calls, so a typo failing
+ * loudly at startup beats one silently leaving the spending switched on.
+ */
+function envFlag(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  console.error(
+    `❌ Refusing to start: ${name} must be a boolean (1/0, true/false, yes/no, on/off), got "${raw}"`,
+  );
+  process.exit(1);
+}
+
+/**
+ * Run an async job on a fixed interval, never concurrently with itself.
+ *
+ * `setInterval` fires on the clock regardless of whether the previous run has
+ * returned. The detection pass issues LLM calls one after another, each with
+ * the SDK's own timeout and retries behind it, so a slow cycle outlasts the
+ * interval and the next pass starts on top of it — passes stack, the same
+ * issues are worked twice, and nothing bounds how many are in flight against a
+ * paid API. Skipping a tick is the correct response: the work is periodic, so
+ * the next tick picks up whatever was missed.
+ */
+function everyInterval(
+  label: string,
+  seconds: number,
+  job: () => Promise<void>,
+): void {
+  let inFlight = false;
+  setInterval(async () => {
+    if (inFlight) {
+      console.warn(`⏭️  ${label}: previous run still in flight, skipping tick`);
+      return;
+    }
+    inFlight = true;
+    try {
+      await job();
+    } catch (error) {
+      console.error(`❌ ${label} failed:`, error);
+    } finally {
+      inFlight = false;
+    }
+  }, seconds * 1000);
+}
+
 // Initialize services
 const signalRegistry = new SignalRegistry();
 
@@ -110,9 +166,22 @@ const MOSSLAND_API_URL = process.env.MOSSLAND_API_URL || "https://disclosure.mos
 const SIGNAL_LANGUAGE = (process.env.SIGNAL_LANGUAGE || "en") as "en" | "ko";
 console.log(`🌐 Signal language: ${SIGNAL_LANGUAGE}`);
 
-// Always register MockAdapter for demo fallback
-const mockAdapter = new MockAdapter({ signalCount: 3, language: SIGNAL_LANGUAGE });
-signalRegistry.registerAdapter(mockAdapter);
+// Synthetic demo signals, off in production unless explicitly asked for.
+//
+// MockAdapter invents three `Math.random() * 100` values a minute. Registered
+// in production those became real issues, real deliberations and real proposals
+// pinned to a real chain snapshot — the detector thresholds were tuned around
+// them, so noise escalated to `urgent` indefinitely. A demo fallback is worth
+// having; one that a production deploy picks up by default is not.
+const ENABLE_MOCK_SIGNALS = envFlag("ENABLE_MOCK_SIGNALS", !IS_PRODUCTION);
+if (ENABLE_MOCK_SIGNALS) {
+  signalRegistry.registerAdapter(
+    new MockAdapter({ signalCount: 3, language: SIGNAL_LANGUAGE }),
+  );
+  console.log("✅ MockAdapter registered (synthetic demo signals)");
+} else {
+  console.log("⏭️  MockAdapter skipped (set ENABLE_MOCK_SIGNALS=1 to enable)");
+}
 
 // Register real data adapters if API keys are available
 if (ETHERSCAN_API_KEY) {
@@ -279,7 +348,6 @@ moderator.registerAgent(productAgent);
 // Governance parameters. The voting-period floor and the execution timelock
 // are relaxed outside production so tests can exercise the full lifecycle
 // without waiting; production keeps real windows.
-const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const DAY_MS = 24 * 60 * 60 * 1000;
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -1949,6 +2017,48 @@ app.delete("/api/delegations/:id", async (req, res) => {
   }
 });
 
+// LLM token accounting.
+//
+// Admin-gated: it reports how much the deliberation loop is spending, which is
+// operational detail rather than governance record.
+//
+// Prices are read from the environment instead of a table in here. Provider
+// pricing changes without warning, and a stale constant would produce a
+// confident wrong number — the failure this endpoint exists to end. With no
+// prices set it reports tokens only, which are facts.
+app.get("/api/llm/usage", requireAdminKey, (req, res) => {
+  try {
+    const usage = getLLMUsage();
+    const inputPerMTok = Number(process.env.LLM_PRICE_INPUT_PER_MTOK);
+    const outputPerMTok = Number(process.env.LLM_PRICE_OUTPUT_PER_MTOK);
+    const priced =
+      Number.isFinite(inputPerMTok) && Number.isFinite(outputPerMTok);
+
+    res.json({
+      ...usage,
+      configuredProvider: moderator.llmProvider,
+      configuredModel: moderator.llmModel,
+      llmEnabled: moderator.isLLMEnabled,
+      estimatedCostUsd: priced
+        ? Number(
+            (
+              (usage.inputTokens / 1_000_000) * inputPerMTok +
+              (usage.outputTokens / 1_000_000) * outputPerMTok
+            ).toFixed(4),
+          )
+        : null,
+      // Named so nobody mistakes it for a bill: it ignores cached-input
+      // pricing, and any call that returned no usage block is missing from it.
+      costBasis: priced
+        ? { inputPerMTok, outputPerMTok, note: "set from env; excludes cached-input pricing" }
+        : { note: "set LLM_PRICE_INPUT_PER_MTOK and LLM_PRICE_OUTPUT_PER_MTOK to price this" },
+    });
+  } catch (error) {
+    console.error("Failed to read LLM usage:", error);
+    res.status(500).json({ error: "Failed to read LLM usage" });
+  }
+});
+
 // System stats
 app.get("/api/stats", (req, res) => {
   try {
@@ -2066,12 +2176,27 @@ app.get("/api/blockchain/verify-voter/:address", async (req, res) => {
 // Background processing intervals (in seconds, 0 to disable)
 const SIGNAL_COLLECT_INTERVAL = parseInt(process.env.SIGNAL_COLLECT_INTERVAL || "60", 10);
 const ISSUE_DETECT_INTERVAL = parseInt(process.env.ISSUE_DETECT_INTERVAL || "300", 10); // 5 minutes
-const AUTO_DELIBERATE_ENABLED = process.env.AUTO_DELIBERATE_ENABLED !== "0";
+const AUTO_DELIBERATE_ENABLED = envFlag("AUTO_DELIBERATE_ENABLED", true);
 const AUTO_DELIBERATE_MIN_PRIORITY = (process.env.AUTO_DELIBERATE_MIN_PRIORITY || "high").toLowerCase();
 const PRIORITY_RANK: Record<string, number> = { low: 1, medium: 2, high: 3, urgent: 4, critical: 4 };
 const minPriorityRank = PRIORITY_RANK[AUTO_DELIBERATE_MIN_PRIORITY] ?? 3;
 
-const OUTCOME_EVAL_ENABLED = process.env.OUTCOME_EVAL_ENABLED !== "0";
+// Ceiling on deliberations per detection pass.
+//
+// /api/deliberate is capped at a few calls a minute, with the comment "LLM
+// endpoints are expensive — much stricter cap to protect API credits". The
+// background scheduler calls the same code in-process and so meets no limiter
+// at all: whatever a detector emits in one pass, it pays for. This applies the
+// project's own guard to its own path.
+//
+// A backstop, not a budget — mock exclusion, the fit gate and the priority gate
+// are what set the normal volume. It exists so a detector bug costs one capped
+// cycle rather than an open tab, and it says so in the log when it bites,
+// because an issue dropped here is not retried: its row is already stored, so
+// the next pass no longer sees it as new.
+const AUTO_DELIBERATE_MAX_PER_CYCLE = envInt("AUTO_DELIBERATE_MAX_PER_CYCLE", 10);
+
+const OUTCOME_EVAL_ENABLED = envFlag("OUTCOME_EVAL_ENABLED", true);
 const OUTCOME_EVAL_INTERVAL = parseInt(process.env.OUTCOME_EVAL_INTERVAL || "1800", 10); // 30 min
 const OUTCOME_EVAL_AGE_HOURS = parseInt(process.env.OUTCOME_EVAL_AGE_HOURS || "6", 10);
 const OUTCOME_EVAL_BATCH = parseInt(process.env.OUTCOME_EVAL_BATCH || "20", 10);
@@ -2079,7 +2204,7 @@ const OUTCOME_EVAL_BATCH = parseInt(process.env.OUTCOME_EVAL_BATCH || "20", 10);
 // How often to close out proposals whose voting period has ended (0 disables).
 const AUTO_FINALIZE_INTERVAL = envInt("AUTO_FINALIZE_INTERVAL", 60);
 
-const AUTO_PROPOSAL_ENABLED = process.env.AUTO_PROPOSAL_ENABLED !== "0";
+const AUTO_PROPOSAL_ENABLED = envFlag("AUTO_PROPOSAL_ENABLED", true);
 const AUTO_PROPOSAL_THRESHOLD = parseFloat(process.env.AUTO_PROPOSAL_THRESHOLD || "0.7");
 const AUTO_PROPOSAL_PROPOSER = process.env.AUTO_PROPOSAL_PROPOSER || "auto-system";
 
@@ -2143,10 +2268,30 @@ async function detectAndSaveIssues() {
   // Auto-deliberate on newly saved high-priority issues
   let deliberatedCount = 0;
   let promotedCount = 0;
+  let skippedSyntheticCount = 0;
+  let cappedCount = 0;
   if (AUTO_DELIBERATE_ENABLED && savedIssues.length > 0) {
     for (const issue of savedIssues) {
+      // Never spend on invented data. ENABLE_MOCK_SIGNALS already keeps demo
+      // signals out of production, but this is the check that costs money, so
+      // it does not rely on the one upstream: turning mock signals back on for
+      // a demo should populate the feed, not open an LLM tab. Deliberating one
+      // by hand still works — that is a deliberate, admin-authenticated act.
+      //
+      // Freshly detected issues carry their signals; ones read back from the
+      // database carry the denormalised column instead. Check both.
+      const isSynthetic =
+        issue.synthetic || issue.signals?.some((s) => s.synthetic);
+      if (isSynthetic) {
+        skippedSyntheticCount++;
+        continue;
+      }
       const rank = PRIORITY_RANK[(issue.priority || "medium").toLowerCase()] ?? 0;
       if (rank < minPriorityRank) continue;
+      if (deliberatedCount >= AUTO_DELIBERATE_MAX_PER_CYCLE) {
+        cappedCount++;
+        continue;
+      }
       try {
         const enrichedContext = enrichContextWithHistory(
           issue.category || "general",
@@ -2224,11 +2369,39 @@ async function detectAndSaveIssues() {
     }
   }
 
+  // Say what was skipped. A silently smaller bill and a broken detector look
+  // identical from the outside.
+  if (skippedSyntheticCount > 0) {
+    console.log(
+      `[auto-deliberate] skipped ${skippedSyntheticCount} synthetic issue(s) — no LLM calls made`,
+    );
+  }
+
+  if (cappedCount > 0) {
+    console.warn(
+      `⚠️  [auto-deliberate] cycle cap of ${AUTO_DELIBERATE_MAX_PER_CYCLE} reached; ` +
+        `${cappedCount} eligible issue(s) left undeliberated and will NOT be retried ` +
+        `(raise AUTO_DELIBERATE_MAX_PER_CYCLE, or find out why this pass detected so many)`,
+    );
+  }
+
+  // Running totals in the log, so the spend is visible to whoever is tailing it
+  // rather than only to someone who knows the endpoint exists.
+  if (deliberatedCount > 0) {
+    const usage = getLLMUsage();
+    console.log(
+      `[auto-deliberate] ${deliberatedCount} deliberated · session totals: ` +
+        `${usage.calls} calls, ${usage.inputTokens} in / ${usage.outputTokens} out tokens`,
+    );
+  }
+
   return {
     detected: detectedIssues.length,
     saved: savedCount,
     deliberated: deliberatedCount,
     promoted: promotedCount,
+    skippedSynthetic: skippedSyntheticCount,
+    cappedByCycleLimit: cappedCount,
   };
 }
 
@@ -2398,6 +2571,7 @@ httpServer.listen(PORT, () => {
    - POST /api/issues/detect   - Detect and save issues
    - PATCH /api/issues/:id     - Update issue status
    - POST /api/deliberate      - Agent deliberation
+   - GET  /api/llm/usage       - LLM token accounting (admin)
    - POST /api/debate          - Multi-round agent debate
    - GET  /api/debate/:id      - Get debate session
    - GET  /api/debates         - List debate sessions
@@ -2452,14 +2626,10 @@ httpServer.listen(PORT, () => {
     });
 
     // Periodic collection
-    setInterval(async () => {
-      try {
-        const signals = await collectAndSaveSignals();
-        console.log(`🔄 Collected ${signals.length} signals at ${new Date().toLocaleTimeString()}`);
-      } catch (error) {
-        console.error("❌ Auto-collection failed:", error);
-      }
-    }, SIGNAL_COLLECT_INTERVAL * 1000);
+    everyInterval("Auto-collection", SIGNAL_COLLECT_INTERVAL, async () => {
+      const signals = await collectAndSaveSignals();
+      console.log(`🔄 Collected ${signals.length} signals at ${new Date().toLocaleTimeString()}`);
+    });
   }
 
   // Auto issue detection
@@ -2477,16 +2647,12 @@ httpServer.listen(PORT, () => {
     }, 5000);
 
     // Periodic detection
-    setInterval(async () => {
-      try {
-        const result = await detectAndSaveIssues();
-        if (result.saved > 0) {
-          console.log(`🔍 Detected ${result.detected} issues, saved ${result.saved} new, ${result.deliberated} deliberated, ${result.promoted} promoted at ${new Date().toLocaleTimeString()}`);
-        }
-      } catch (error) {
-        console.error("❌ Auto-detection failed:", error);
+    everyInterval("Auto-detection", ISSUE_DETECT_INTERVAL, async () => {
+      const result = await detectAndSaveIssues();
+      if (result.saved > 0) {
+        console.log(`🔍 Detected ${result.detected} issues, saved ${result.saved} new, ${result.deliberated} deliberated, ${result.promoted} promoted at ${new Date().toLocaleTimeString()}`);
       }
-    }, ISSUE_DETECT_INTERVAL * 1000);
+    });
   }
 
   if (AUTO_DELIBERATE_ENABLED) {
@@ -2503,16 +2669,12 @@ httpServer.listen(PORT, () => {
 
   if (OUTCOME_EVAL_ENABLED && OUTCOME_EVAL_INTERVAL > 0) {
     console.log(`📈 Outcome evaluation: every ${OUTCOME_EVAL_INTERVAL}s, age threshold ${OUTCOME_EVAL_AGE_HOURS}h, batch ${OUTCOME_EVAL_BATCH}`);
-    setInterval(async () => {
-      try {
-        const result = await evaluatePendingOutcomes();
-        if (result.evaluated > 0) {
-          console.log(`📈 Evaluated ${result.evaluated}/${result.pending} pending decisions at ${new Date().toLocaleTimeString()}`);
-        }
-      } catch (error) {
-        console.error("❌ Outcome evaluation failed:", error);
+    everyInterval("Outcome evaluation", OUTCOME_EVAL_INTERVAL, async () => {
+      const result = await evaluatePendingOutcomes();
+      if (result.evaluated > 0) {
+        console.log(`📈 Evaluated ${result.evaluated}/${result.pending} pending decisions at ${new Date().toLocaleTimeString()}`);
       }
-    }, OUTCOME_EVAL_INTERVAL * 1000);
+    });
   } else {
     console.log(`📈 Outcome evaluation: DISABLED`);
   }

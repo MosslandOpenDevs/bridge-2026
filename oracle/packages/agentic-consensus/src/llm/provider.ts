@@ -9,6 +9,10 @@ export interface LLMConfig {
   model?: string;
   maxTokens?: number;
   baseURL?: string;
+  /** Per-attempt timeout in ms. See DEFAULT_TIMEOUT_MS. */
+  timeout?: number;
+  /** Retries per call. See DEFAULT_MAX_RETRIES. */
+  maxRetries?: number;
 }
 
 export interface LLMMessage {
@@ -38,6 +42,104 @@ const DEFAULT_MAX_TOKENS: Record<LLMProvider, number> = {
   openai: 4096,
   ollama: 4096,
 };
+
+/**
+ * Per-attempt timeout, in ms.
+ *
+ * Both SDKs default to ten minutes, and that is per *attempt* — with two
+ * retries a single call can hold a slot for half an hour. A deliberation makes
+ * its five calls one after another, from a job on a five-minute timer, so the
+ * defaults let one stuck call outlive several scheduling periods. Two minutes
+ * is generous for a 2-4k token completion and turns a hang into a failure the
+ * caller can fall back from.
+ */
+const DEFAULT_TIMEOUT_MS = 120_000;
+
+/**
+ * Retries are kept: they fire on 429s and 5xx, and a failed attempt returns no
+ * completion, so it costs latency rather than tokens.
+ */
+const DEFAULT_MAX_RETRIES = 2;
+
+export interface LLMModelUsage {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** Calls that returned no usage block, so their tokens are unaccounted for. */
+  callsWithoutUsage: number;
+}
+
+export interface LLMUsageSnapshot extends LLMModelUsage {
+  since: string;
+  byModel: Record<string, LLMModelUsage>;
+}
+
+const emptyUsage = (): LLMModelUsage => ({
+  calls: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  callsWithoutUsage: 0,
+});
+
+/**
+ * Process-wide token accounting.
+ *
+ * Both providers already return their usage block and every caller threw it
+ * away, so nothing in this system had ever measured its own spend — every
+ * figure about it was a model of the code rather than an observation of it.
+ *
+ * The totals live here, below the clients, rather than at the call sites:
+ * each agent constructs its own LLMClient and the moderator a fifth, so a
+ * per-instance counter would have to be summed by someone who knows all five
+ * exist. Recording in chat() means a new caller is counted by default instead
+ * of by remembering to.
+ *
+ * In-memory and reset by a restart. That is the right scope for a rate — for
+ * a bill, read the provider's own dashboard.
+ */
+let usageSince = new Date().toISOString();
+const usageTotals = emptyUsage();
+const usageByModel = new Map<string, LLMModelUsage>();
+
+function recordUsage(response: LLMResponse): void {
+  const model = usageByModel.get(response.model) ?? emptyUsage();
+  usageTotals.calls += 1;
+  model.calls += 1;
+  if (response.usage) {
+    usageTotals.inputTokens += response.usage.inputTokens;
+    usageTotals.outputTokens += response.usage.outputTokens;
+    model.inputTokens += response.usage.inputTokens;
+    model.outputTokens += response.usage.outputTokens;
+  } else {
+    usageTotals.callsWithoutUsage += 1;
+    model.callsWithoutUsage += 1;
+  }
+  usageByModel.set(response.model, model);
+}
+
+/**
+ * Totals since process start, or since the last reset.
+ *
+ * `model` is what the provider said it answered with, not what was requested —
+ * the two differ when a model id resolves to a dated snapshot, and the
+ * difference is exactly what a cost question needs to know.
+ */
+export function getLLMUsage(): LLMUsageSnapshot {
+  return {
+    ...usageTotals,
+    since: usageSince,
+    byModel: Object.fromEntries(usageByModel),
+  };
+}
+
+export function resetLLMUsage(): void {
+  usageTotals.calls = 0;
+  usageTotals.inputTokens = 0;
+  usageTotals.outputTokens = 0;
+  usageTotals.callsWithoutUsage = 0;
+  usageByModel.clear();
+  usageSince = new Date().toISOString();
+}
 
 export class LLMClient {
   /**
@@ -78,19 +180,26 @@ export class LLMClient {
     this.model = config.model || DEFAULT_MODELS[this.provider];
     this.maxTokens = config.maxTokens || DEFAULT_MAX_TOKENS[this.provider];
 
+    const limits = {
+      timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
+      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+    };
+
     if (this.provider === "ollama") {
       // Ollama exposes an OpenAI-compatible API; apiKey is unused server-side
       this.openaiClient = new OpenAI({
         apiKey: config.apiKey || "ollama",
         baseURL: config.baseURL,
+        ...limits,
       });
     } else if (config.apiKey) {
       if (this.provider === "anthropic") {
-        this.anthropicClient = new Anthropic({ apiKey: config.apiKey });
+        this.anthropicClient = new Anthropic({ apiKey: config.apiKey, ...limits });
       } else {
         this.openaiClient = new OpenAI({
           apiKey: config.apiKey,
           baseURL: config.baseURL,
+          ...limits,
         });
       }
     }
@@ -116,16 +225,22 @@ export class LLMClient {
       throw new Error("LLM client not initialized - API key required");
     }
 
+    // Counted here rather than in each branch, so a future provider is
+    // accounted for without anyone remembering to add it.
+    let response: LLMResponse;
     if (this.provider === "anthropic" && this.anthropicClient) {
-      return this.chatWithAnthropic(systemPrompt, userMessage);
+      response = await this.chatWithAnthropic(systemPrompt, userMessage);
     } else if (
       (this.provider === "openai" || this.provider === "ollama") &&
       this.openaiClient
     ) {
-      return this.chatWithOpenAI(systemPrompt, userMessage);
+      response = await this.chatWithOpenAI(systemPrompt, userMessage);
+    } else {
+      throw new Error(`Unknown provider: ${this.provider}`);
     }
 
-    throw new Error(`Unknown provider: ${this.provider}`);
+    recordUsage(response);
+    return response;
   }
 
   private async chatWithAnthropic(

@@ -88,17 +88,25 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# Package managers
-# Uncomment the ones you want to ignore
-# package-lock.json
-# yarn.lock
-# pnpm-lock.yaml
+# Lock files are tracked on purpose: CI installs with --frozen-lockfile, which
+# fails without them. Do not add pnpm-lock.yaml here.
 
 # TypeScript
 *.tsbuildinfo
 
-# Optional: Keep lock files for reproducible builds
-# If you want to track lock files, comment out the above lines
+# Build output and tool caches. Build artefacts were committed once already
+# (.next/, since removed) because none of these were listed.
+.next/
+.turbo/
+.vercel/
+dist/
+artifacts/
+cache/
+typechain-types/
+
+# Local agent workspaces. Only .git/info/exclude covered these, which is
+# per-clone and never pushed.
+.claude/
 
 # Secrets and keys (extra safety)
 *.pem

@@ -130,6 +130,7 @@ const MOCK_DESCRIPTIONS: Record<"en" | "ko", Record<string, string[]>> = {
 export class MockAdapter extends BaseAdapter {
   readonly name = "MockAdapter";
   readonly source: SignalSource = "telemetry";
+  protected readonly synthetic = true;
 
   private config: MockAdapterConfig;
 

@@ -26,6 +26,7 @@ import {
   Search,
   X,
   Bell,
+  FlaskConical,
 } from "lucide-react";
 import { cn, getSeverityColor, timeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -148,6 +149,15 @@ function SignalCard({ signal, t }: { signal: any; t: any }) {
               <span className="hidden sm:inline">{signal.category?.replace(/_/g, " ") || "unknown"}</span>
               <span className="sm:hidden">{(signal.category?.split("_")[0]) || "unknown"}</span>
             </span>
+            {signal.synthetic && (
+              <span
+                className="badge bg-amber-100 text-amber-800 flex items-center gap-1 text-xs"
+                title={t("common.syntheticHint")}
+              >
+                <FlaskConical className="w-3 h-3" aria-hidden="true" />
+                {t("common.synthetic")}
+              </span>
+            )}
           </div>
 
           <p className="mt-2 text-sm sm:text-base text-gray-900 font-medium line-clamp-2">
