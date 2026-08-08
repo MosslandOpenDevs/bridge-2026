@@ -2177,8 +2177,23 @@ async function detectAndSaveIssues() {
   // Auto-deliberate on newly saved high-priority issues
   let deliberatedCount = 0;
   let promotedCount = 0;
+  let skippedSyntheticCount = 0;
   if (AUTO_DELIBERATE_ENABLED && savedIssues.length > 0) {
     for (const issue of savedIssues) {
+      // Never spend on invented data. ENABLE_MOCK_SIGNALS already keeps demo
+      // signals out of production, but this is the check that costs money, so
+      // it does not rely on the one upstream: turning mock signals back on for
+      // a demo should populate the feed, not open an LLM tab. Deliberating one
+      // by hand still works — that is a deliberate, admin-authenticated act.
+      //
+      // Freshly detected issues carry their signals; ones read back from the
+      // database carry the denormalised column instead. Check both.
+      const isSynthetic =
+        issue.synthetic || issue.signals?.some((s) => s.synthetic);
+      if (isSynthetic) {
+        skippedSyntheticCount++;
+        continue;
+      }
       const rank = PRIORITY_RANK[(issue.priority || "medium").toLowerCase()] ?? 0;
       if (rank < minPriorityRank) continue;
       try {
@@ -2258,11 +2273,20 @@ async function detectAndSaveIssues() {
     }
   }
 
+  // Say what was skipped. A silently smaller bill and a broken detector look
+  // identical from the outside.
+  if (skippedSyntheticCount > 0) {
+    console.log(
+      `[auto-deliberate] skipped ${skippedSyntheticCount} synthetic issue(s) — no LLM calls made`,
+    );
+  }
+
   return {
     detected: detectedIssues.length,
     saved: savedCount,
     deliberated: deliberatedCount,
     promoted: promotedCount,
+    skippedSynthetic: skippedSyntheticCount,
   };
 }
 

@@ -44,6 +44,11 @@ export const DetectedIssueSchema = z.object({
     })
   ),
   suggestedActions: z.array(z.string()).optional(),
+  // True when any signal behind this issue was generated rather than observed.
+  // Denormalised from `signals` because an issue read back from storage does
+  // not carry its signal rows, and the callers that must not act on invented
+  // data — automatic deliberation above all — decide before rejoining them.
+  synthetic: z.boolean().optional(),
 });
 export type DetectedIssue = z.infer<typeof DetectedIssueSchema>;
 
