@@ -97,6 +97,28 @@ if (adminAuthError) {
   process.exit(1);
 }
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+/**
+ * Parse a boolean environment variable, refusing anything unrecognised.
+ *
+ * The `!== "0"` idiom this replaces treated `false`, `off` and `no` as *on*,
+ * which is the opposite of what an operator setting them intends. These flags
+ * decide whether the process spends money on LLM calls, so a typo failing
+ * loudly at startup beats one silently leaving the spending switched on.
+ */
+function envFlag(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  console.error(
+    `❌ Refusing to start: ${name} must be a boolean (1/0, true/false, yes/no, on/off), got "${raw}"`,
+  );
+  process.exit(1);
+}
+
 // Initialize services
 const signalRegistry = new SignalRegistry();
 
@@ -110,9 +132,22 @@ const MOSSLAND_API_URL = process.env.MOSSLAND_API_URL || "https://disclosure.mos
 const SIGNAL_LANGUAGE = (process.env.SIGNAL_LANGUAGE || "en") as "en" | "ko";
 console.log(`🌐 Signal language: ${SIGNAL_LANGUAGE}`);
 
-// Always register MockAdapter for demo fallback
-const mockAdapter = new MockAdapter({ signalCount: 3, language: SIGNAL_LANGUAGE });
-signalRegistry.registerAdapter(mockAdapter);
+// Synthetic demo signals, off in production unless explicitly asked for.
+//
+// MockAdapter invents three `Math.random() * 100` values a minute. Registered
+// in production those became real issues, real deliberations and real proposals
+// pinned to a real chain snapshot — the detector thresholds were tuned around
+// them, so noise escalated to `urgent` indefinitely. A demo fallback is worth
+// having; one that a production deploy picks up by default is not.
+const ENABLE_MOCK_SIGNALS = envFlag("ENABLE_MOCK_SIGNALS", !IS_PRODUCTION);
+if (ENABLE_MOCK_SIGNALS) {
+  signalRegistry.registerAdapter(
+    new MockAdapter({ signalCount: 3, language: SIGNAL_LANGUAGE }),
+  );
+  console.log("✅ MockAdapter registered (synthetic demo signals)");
+} else {
+  console.log("⏭️  MockAdapter skipped (set ENABLE_MOCK_SIGNALS=1 to enable)");
+}
 
 // Register real data adapters if API keys are available
 if (ETHERSCAN_API_KEY) {
@@ -279,7 +314,6 @@ moderator.registerAgent(productAgent);
 // Governance parameters. The voting-period floor and the execution timelock
 // are relaxed outside production so tests can exercise the full lifecycle
 // without waiting; production keeps real windows.
-const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const DAY_MS = 24 * 60 * 60 * 1000;
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name];

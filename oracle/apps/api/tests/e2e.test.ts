@@ -140,6 +140,11 @@ async function startServer(overrides: Record<string, string> = {}): Promise<void
       DB_PATH: join(dataDir, "e2e.db"),
       ADMIN_API_KEY: ADMIN_KEY,
       NODE_ENV: "test",
+      // The signal assertions need something to collect, and the real adapters
+      // reach the network and swallow their own failures. Stated outright so
+      // the suite does not quietly start depending on live Mossland/Medium
+      // responses if NODE_ENV here ever changes.
+      ENABLE_MOCK_SIGNALS: "1",
       // Background jobs off so the suite observes only what it triggers.
       SIGNAL_COLLECT_INTERVAL: "0",
       ISSUE_DETECT_INTERVAL: "0",
