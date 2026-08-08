@@ -20,7 +20,7 @@
     "@oracle/inference-mining": "workspace:*",
     "@oracle/proof-of-outcome": "workspace:*",
     "@oracle/reality-oracle": "workspace:*",
-    "better-sqlite3": "^12.5.0",
+    "better-sqlite3": "^13.0.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.21.0",

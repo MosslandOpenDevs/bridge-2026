@@ -120,9 +120,10 @@ Each sub-package carries its own `README.md`. The **`oracle/`** tree is the acti
 
 ## Quick start
 
-> Requires **Node.js ≥ 18**. Both trees use **pnpm**: `oracle` with Turborepo,
-> `nexus` as a plain pnpm workspace. npm cannot install `nexus` — its packages
-> depend on each other with `workspace:*`, which npm rejects outright.
+> Requires **Node.js ≥ 22** (CI builds on 22; 24 and 26 also work). Both trees
+> use **pnpm**: `oracle` with Turborepo, `nexus` as a plain pnpm workspace. npm
+> cannot install `nexus` — its packages depend on each other with
+> `workspace:*`, which npm rejects outright.
 
 ### Oracle (production stack)
 
