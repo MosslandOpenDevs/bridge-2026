@@ -93,7 +93,30 @@ export interface TrendDetectorConfig {
   trendThreshold?: number;
   categories?: string[];
   metricConfigs?: Record<string, MetricConfig>;
+  /**
+   * Least of the variance a straight line must explain before the trend is
+   * treated as actionable. See MIN_R_SQUARED.
+   */
+  minRSquared?: number;
 }
+
+/**
+ * A slope alone says nothing about whether there is a trend.
+ *
+ * Escalation used to key on `Math.abs(slope)` while r² was computed, written
+ * into the evidence, and never read. Over a window of 30 uncorrelated values
+ * the standard deviation of the fitted slope is large enough that a meaningful
+ * share of pure noise clears the `urgent` multiplier — so noise escalated
+ * forever, once per category, and each escalation was a candidate for a paid
+ * deliberation. One such issue reached a live, chain-snapshotted proposal to
+ * pause governance changes, carrying `"rSquared": 0.063` in its own evidence.
+ *
+ * 0.5 is deliberately permissive: half the variance explained is a low bar for
+ * a real trend and well clear of what noise reaches. A weak fit is not
+ * discarded — it still surfaces, capped at `low`, which is below the priority
+ * automatic deliberation acts on.
+ */
+const MIN_R_SQUARED = 0.5;
 
 export class TrendDetector extends BaseDetector {
   readonly name = "TrendDetector";
@@ -106,6 +129,7 @@ export class TrendDetector extends BaseDetector {
       minDataPoints: config.minDataPoints ?? 5,
       trendThreshold: config.trendThreshold ?? 0.1,
       categories: config.categories ?? [],
+      minRSquared: config.minRSquared ?? MIN_R_SQUARED,
     };
     this.metricConfigs = {
       ...DEFAULT_METRIC_CONFIGS,
@@ -189,6 +213,14 @@ export class TrendDetector extends BaseDetector {
         }
       }
 
+      // A line that explains nothing about the data is not a trend to act on,
+      // however steep it came out. Kept visible, but held below the priority
+      // automatic deliberation spends money on.
+      const fitIsWeak = trend.rSquared < this.config.minRSquared!;
+      if (fitIsWeak && priority !== "low") {
+        priority = "low";
+      }
+
       const firstValue = sorted[0].value;
       const lastValue = sorted[sorted.length - 1].value;
       const percentChange = ((lastValue - firstValue) / firstValue) * 100;
@@ -242,6 +274,10 @@ export class TrendDetector extends BaseDetector {
               percentChange,
               isPositiveChange,
               kind,
+              // Stated, not just recorded: a reader comparing a steep slope
+              // against a `low` priority needs to see why they disagree.
+              fitIsWeak,
+              minRSquared: this.config.minRSquared,
             },
           },
         ],
