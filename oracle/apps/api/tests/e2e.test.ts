@@ -783,6 +783,40 @@ async function testStats() {
   assertStatus(response, 200, "stats");
   assert(typeof data.signals.total === "number", "stats: signal total");
   assert(typeof data.proposals.total === "number", "stats: proposal total");
+
+  // The demo adapter is on for this suite (see startServer), so every signal
+  // collected here is invented. That makes this the case the endpoint exists to
+  // get right: the demo rows must be reported, and must be reported *beside*
+  // the observed counts rather than inside them.
+  assert(
+    data.signals.synthetic.total > 0,
+    "stats: demo signals should still be reported, not dropped",
+  );
+  const sumCounts = (buckets: { count: number }[]) =>
+    buckets.reduce((total: number, bucket) => total + bucket.count, 0);
+  assert(
+    sumCounts(data.signals.byCategory) === data.signals.total,
+    `stats: observed categories should sum to the observed total, got ${sumCounts(
+      data.signals.byCategory,
+    )} vs ${data.signals.total}`,
+  );
+  assert(
+    sumCounts(data.signals.synthetic.byCategory) === data.signals.synthetic.total,
+    "stats: demo categories should sum to the demo total",
+  );
+  // Compared against the response's own buckets rather than a copy of
+  // MockAdapter's category list, so this keeps testing the boundary and not the
+  // list.
+  const demoCategories = new Set<string>(
+    data.signals.synthetic.byCategory.map((bucket: { category: string }) => bucket.category),
+  );
+  const leaked = data.signals.byCategory
+    .filter((bucket: { category: string }) => demoCategories.has(bucket.category))
+    .map((bucket: { category: string }) => bucket.category);
+  assert(
+    leaked.length === 0,
+    `stats: demo categories counted as observed: ${leaked.join(", ")}`,
+  );
   // Not a unit check on proof.successRate: this field is a ratio of counts
   // (successful proofs / total proofs), structurally in [0,1] whatever unit the
   // proofs carry. The unit is pinned where it actually lives, in

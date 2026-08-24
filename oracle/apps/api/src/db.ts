@@ -244,8 +244,8 @@ for (const [table, column, definition] of [
   ["proposals", "snapshot_block", "INTEGER"],
   ["proposals", "onchain_id", "INTEGER"],
   // Existing rows predate the marker, so they default to 0 — "not known to be
-  // synthetic" rather than "verified real". Backfilling them is not possible:
-  // the adapter that produced them was not recorded.
+  // synthetic" rather than "verified real". The migration below corrects the
+  // ones that are attributable after the fact.
   ["signals", "synthetic", "INTEGER NOT NULL DEFAULT 0"],
   ["issues", "synthetic", "INTEGER NOT NULL DEFAULT 0"],
   // Identity of the *condition*, as opposed to this observation of it. See
@@ -261,6 +261,59 @@ for (const [table, column, definition] of [
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   } catch {
     // Column already present.
+  }
+}
+
+/**
+ * Mark the demo rows that predate the `synthetic` column.
+ *
+ * The adapter *was* recorded, in `signals.source`: MockAdapter is the only
+ * adapter this service registers that emits `source = 'telemetry'`
+ * (reality-oracle/src/adapters/mock.ts), and TelemetryAdapter — the only other
+ * class that could claim that value — has never been registered. Production
+ * bears it out: every one of the 223,074 telemetry rows carries one of
+ * MockAdapter's ten invented categories and its `%` unit, not one of those
+ * categories appears under any other source, and telemetry rows stop within
+ * the hour ENABLE_MOCK_SIGNALS gated the adapter off.
+ *
+ * Left at 0, those rows were published through /api/stats as observations —
+ * 28% of the signal count, 80% of the issue count.
+ *
+ * Issues follow their evidence rather than a second guess at the source: one
+ * synthetic signal behind an issue makes the issue synthetic, the rule the
+ * column comment already states. An issue whose signal_ids no longer resolve
+ * keeps its 0 — unattributable, which is not the same as verified real.
+ *
+ * Gated on user_version so it runs exactly once, and so it can never
+ * reclassify a row written after the marker existed. Only the marker changes;
+ * no row is removed, and the demo history stays queryable.
+ */
+const SYNTHETIC_BACKFILL_VERSION = 1;
+if ((db.pragma("user_version", { simple: true }) as number) < SYNTHETIC_BACKFILL_VERSION) {
+  const backfill = db.transaction(() => {
+    const signals = db
+      .prepare(`UPDATE signals SET synthetic = 1 WHERE synthetic = 0 AND source = 'telemetry'`)
+      .run().changes;
+    const issues = db
+      .prepare(
+        `UPDATE issues SET synthetic = 1
+           WHERE synthetic = 0
+             AND EXISTS (
+               SELECT 1 FROM json_each(COALESCE(issues.signal_ids, '[]')) AS signal_ref
+               JOIN signals ON signals.id = signal_ref.value
+               WHERE signals.synthetic = 1
+             )`,
+      )
+      .run().changes;
+    db.pragma(`user_version = ${SYNTHETIC_BACKFILL_VERSION}`);
+    return { signals, issues };
+  });
+
+  const marked = backfill();
+  if (marked.signals > 0 || marked.issues > 0) {
+    console.log(
+      `🔖 Marked pre-existing demo rows synthetic: ${marked.signals} signals, ${marked.issues} issues`,
+    );
   }
 }
 
@@ -325,6 +378,19 @@ export interface IssueRow {
   updated_at: string;
 }
 
+/**
+ * Observed and invented rows counted apart, never as a single number.
+ *
+ * Every caller of these counts publishes its figure, over HTTP or a socket. A
+ * lone total is the defect this shape exists to prevent: it reported 223,074
+ * invented signals as observations. Adding the two is still available, but it
+ * has to be written at the call site — a decision instead of an accident.
+ */
+export interface SyntheticSplit {
+  observed: number;
+  synthetic: number;
+}
+
 // Signal operations
 export const signalDb = {
   insert: db.prepare(`
@@ -350,10 +416,16 @@ export const signalDb = {
     SELECT * FROM signals WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC
   `),
 
-  count: db.prepare(`SELECT COUNT(*) as count FROM signals`),
+  counts: db.prepare(`
+    SELECT
+      COUNT(*) FILTER (WHERE synthetic = 0) as observed,
+      COUNT(*) FILTER (WHERE synthetic = 1) as synthetic
+    FROM signals
+  `),
 
+  /** Pass 0 for observed categories, 1 for the demo adapter's. */
   countByCategory: db.prepare(`
-    SELECT category, COUNT(*) as count FROM signals GROUP BY category
+    SELECT category, COUNT(*) as count FROM signals WHERE synthetic = ? GROUP BY category
   `),
 
   deleteOld: db.prepare(`
@@ -418,10 +490,16 @@ export const issueDb = {
     LIMIT ?
   `),
 
-  count: db.prepare(`SELECT COUNT(*) as count FROM issues`),
+  counts: db.prepare(`
+    SELECT
+      COUNT(*) FILTER (WHERE synthetic = 0) as observed,
+      COUNT(*) FILTER (WHERE synthetic = 1) as synthetic
+    FROM issues
+  `),
 
+  /** Pass 0 for observed issues, 1 for those detected on demo signals. */
   countByStatus: db.prepare(`
-    SELECT status, COUNT(*) as count FROM issues GROUP BY status
+    SELECT status, COUNT(*) as count FROM issues WHERE synthetic = ? GROUP BY status
   `),
 
   /**
@@ -505,6 +583,21 @@ export const proposalDb = {
   countByStatus: db.prepare(`SELECT status, COUNT(*) as count FROM proposals GROUP BY status`),
 
   existsByIssueId: db.prepare(`SELECT id FROM proposals WHERE issue_id = ? LIMIT 1`),
+
+  /**
+   * Proposals whose originating issue was detected on invented signals.
+   *
+   * Read from the issue rather than stored on the proposal: the link is
+   * already a foreign key, and one marker that everything derives from cannot
+   * drift out of step with a copy of itself. A proposal with no linkable issue
+   * (see linkableIssueId) is absent here — unattributable, not verified real.
+   */
+  syntheticIds: db.prepare(`
+    SELECT proposals.id
+    FROM proposals
+    JOIN issues ON issues.id = proposals.issue_id
+    WHERE issues.synthetic = 1
+  `),
 };
 
 /** Whether an issue id refers to a stored issue (proposals.issue_id is a FK). */
