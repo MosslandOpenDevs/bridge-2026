@@ -168,14 +168,19 @@ const MOSSLAND_API_URL = process.env.MOSSLAND_API_URL || "https://disclosure.mos
 const SIGNAL_LANGUAGE = (process.env.SIGNAL_LANGUAGE || "en") as "en" | "ko";
 console.log(`🌐 Signal language: ${SIGNAL_LANGUAGE}`);
 
-// Synthetic demo signals, off in production unless explicitly asked for.
+// Synthetic demo signals, off unless explicitly asked for.
 //
 // MockAdapter invents three `Math.random() * 100` values a minute. Registered
 // in production those became real issues, real deliberations and real proposals
 // pinned to a real chain snapshot — the detector thresholds were tuned around
 // them, so noise escalated to `urgent` indefinitely. A demo fallback is worth
-// having; one that a production deploy picks up by default is not.
-const ENABLE_MOCK_SIGNALS = envFlag("ENABLE_MOCK_SIGNALS", !IS_PRODUCTION);
+// having; one that a deploy picks up by default is not.
+//
+// The default is a flat `false` rather than `!IS_PRODUCTION`: keying it to
+// NODE_ENV meant a box that merely forgot to set that variable invented data
+// and published it, which is the failure this guards against. A demo asks for
+// the demo adapter by name.
+const ENABLE_MOCK_SIGNALS = envFlag("ENABLE_MOCK_SIGNALS", false);
 if (ENABLE_MOCK_SIGNALS) {
   signalRegistry.registerAdapter(
     new MockAdapter({ signalCount: 3, language: SIGNAL_LANGUAGE }),
