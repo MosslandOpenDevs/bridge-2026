@@ -454,12 +454,6 @@ export const signalDb = {
   countByCategory: db.prepare(`
     SELECT category, COUNT(*) as count FROM signals WHERE synthetic = ? GROUP BY category
   `),
-
-  deleteOld: db.prepare(`
-    DELETE FROM signals WHERE timestamp < ?
-  `),
-
-  clear: db.prepare(`DELETE FROM signals`),
 };
 
 // Migrate existing database: add kind and direction columns if they don't exist
@@ -586,8 +580,6 @@ export const issueDb = {
     SET deliberated_priority = @priority, updated_at = CURRENT_TIMESTAMP
     WHERE id = @id
   `),
-
-  clear: db.prepare(`DELETE FROM issues`),
 };
 
 // Proposal operations (persisted alongside in-memory VotingSystem)
