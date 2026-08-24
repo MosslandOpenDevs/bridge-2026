@@ -18,6 +18,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
+import Database from "better-sqlite3";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const API_ROOT = join(__dirname, "..");
@@ -571,6 +572,41 @@ async function testDeliberationContract() {
     stored.data.issues.some((i: any) => i.id === "40000000-0000-4000-8000-000000000001"),
     "the inline issue should have been stored",
   );
+
+  // A decision taken on invented evidence has to be recorded as such, or the
+  // agents read it back as precedent in a real deliberation. There is no
+  // endpoint for decision history — it only ever feeds the agent prompts — so
+  // this reads the row the server wrote.
+  const syntheticIssueId = "40000000-0000-4000-8000-000000000002";
+  const onSynthetic = await post("/api/deliberate", {
+    issue: {
+      id: syntheticIssueId,
+      title: "Inline issue from demo signals",
+      description: "supplied by the caller, marked invented",
+      category: "governance",
+      priority: "high",
+      synthetic: true,
+    },
+  });
+  assertStatus(onSynthetic.response, 200, "deliberate on a synthetic inline issue");
+
+  const db = new Database(join(dataDir, "e2e.db"), { readonly: true });
+  try {
+    const marker = (id: string) =>
+      db
+        .prepare("SELECT synthetic FROM decision_history WHERE issue_id = ? ORDER BY created_at DESC LIMIT 1")
+        .get(id) as { synthetic: number } | undefined;
+    assert(
+      marker(syntheticIssueId)?.synthetic === 1,
+      "a decision on a synthetic issue should be recorded as synthetic",
+    );
+    assert(
+      marker("40000000-0000-4000-8000-000000000001")?.synthetic === 0,
+      "a decision on an observed issue should not be recorded as synthetic",
+    );
+  } finally {
+    db.close();
+  }
 }
 
 async function testDebateRoundsAreBounded() {

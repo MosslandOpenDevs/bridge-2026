@@ -105,6 +105,10 @@ db.exec(`
     -- 0-100 value here would silently mark every past decision a success.
     outcome_success_rate REAL,
     kpi_results TEXT,
+    -- 1 when the issue this decision was taken on was synthetic. Denormalised
+    -- from issues so the learning reads can exclude invented history without a
+    -- join, and so the marker survives the issue being pruned.
+    synthetic INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     outcome_recorded_at TEXT,
     FOREIGN KEY (issue_id) REFERENCES issues(id)
@@ -248,6 +252,7 @@ for (const [table, column, definition] of [
   // ones that are attributable after the fact.
   ["signals", "synthetic", "INTEGER NOT NULL DEFAULT 0"],
   ["issues", "synthetic", "INTEGER NOT NULL DEFAULT 0"],
+  ["decision_history", "synthetic", "INTEGER NOT NULL DEFAULT 0"],
   // Identity of the *condition*, as opposed to this observation of it. See
   // issueFingerprint.
   ["issues", "fingerprint", "TEXT"],
@@ -279,10 +284,17 @@ for (const [table, column, definition] of [
  * Left at 0, those rows were published through /api/stats as observations —
  * 28% of the signal count, 80% of the issue count.
  *
- * Issues follow their evidence rather than a second guess at the source: one
- * synthetic signal behind an issue makes the issue synthetic, the rule the
- * column comment already states. An issue whose signal_ids no longer resolve
- * keeps its 0 — unattributable, which is not the same as verified real.
+ * Everything derived from those rows is marked with them, because the demo
+ * data did not stop at the signals table: it produced 3,057 of the 3,810
+ * issues, and 859 of the 987 decisions the agents read back as precedent.
+ *
+ * Issues follow their evidence — one synthetic signal behind an issue makes
+ * the issue synthetic, the rule the column comment already states — and then
+ * their category, for the handful whose signal_ids no longer resolve. That
+ * second clause names no categories: it asks which ones the demo adapter
+ * produced and no real adapter ever did, so it stays a statement about this
+ * database rather than a copy of MockAdapter's list. Decisions follow their
+ * issue.
  *
  * Gated on user_version so it runs exactly once, and so it can never
  * reclassify a row written after the marker existed. Only the marker changes;
@@ -298,21 +310,36 @@ if ((db.pragma("user_version", { simple: true }) as number) < SYNTHETIC_BACKFILL
       .prepare(
         `UPDATE issues SET synthetic = 1
            WHERE synthetic = 0
-             AND EXISTS (
-               SELECT 1 FROM json_each(COALESCE(issues.signal_ids, '[]')) AS signal_ref
-               JOIN signals ON signals.id = signal_ref.value
-               WHERE signals.synthetic = 1
+             AND (
+               EXISTS (
+                 SELECT 1 FROM json_each(COALESCE(issues.signal_ids, '[]')) AS signal_ref
+                 JOIN signals ON signals.id = signal_ref.value
+                 WHERE signals.synthetic = 1
+               )
+               OR issues.category IN (
+                 SELECT category FROM signals WHERE synthetic = 1
+                 EXCEPT
+                 SELECT category FROM signals WHERE synthetic = 0
+               )
              )`,
       )
       .run().changes;
+    const decisions = db
+      .prepare(
+        `UPDATE decision_history SET synthetic = 1
+           WHERE synthetic = 0
+             AND issue_id IN (SELECT id FROM issues WHERE synthetic = 1)`,
+      )
+      .run().changes;
     db.pragma(`user_version = ${SYNTHETIC_BACKFILL_VERSION}`);
-    return { signals, issues };
+    return { signals, issues, decisions };
   });
 
   const marked = backfill();
-  if (marked.signals > 0 || marked.issues > 0) {
+  if (marked.signals > 0 || marked.issues > 0 || marked.decisions > 0) {
     console.log(
-      `🔖 Marked pre-existing demo rows synthetic: ${marked.signals} signals, ${marked.issues} issues`,
+      `🔖 Marked pre-existing demo rows synthetic: ${marked.signals} signals,` +
+        ` ${marked.issues} issues, ${marked.decisions} decisions`,
     );
   }
 }
@@ -603,6 +630,17 @@ export const proposalDb = {
 /** Whether an issue id refers to a stored issue (proposals.issue_id is a FK). */
 export const issueExists = db.prepare(`SELECT 1 FROM issues WHERE id = ? LIMIT 1`);
 
+/**
+ * Whether an issue was detected on invented signals.
+ *
+ * Returns undefined for an id that is not stored — an ad-hoc deliberation
+ * carries no issue row, and that is unattributable rather than verified real,
+ * so callers treat it as 0.
+ */
+export const issueIsSynthetic = db.prepare(
+  `SELECT synthetic FROM issues WHERE id = ? LIMIT 1`,
+);
+
 // Governance state operations. See the table comments above: these rows are
 // the source of truth for proposals, votes, delegations and outcomes.
 export const governanceDb = {
@@ -729,8 +767,8 @@ export function inTransaction<T>(fn: () => T): T {
 // Decision history operations (for agent learning)
 export const decisionHistoryDb = {
   insert: db.prepare(`
-    INSERT INTO decision_history (id, issue_id, category, priority, consensus_score, recommendation_type, agent_opinions, outcome_status)
-    VALUES (@id, @issueId, @category, @priority, @consensusScore, @recommendationType, @agentOpinions, @outcomeStatus)
+    INSERT INTO decision_history (id, issue_id, category, priority, consensus_score, recommendation_type, agent_opinions, outcome_status, synthetic)
+    VALUES (@id, @issueId, @category, @priority, @consensusScore, @recommendationType, @agentOpinions, @outcomeStatus, @synthetic)
   `),
 
   updateOutcome: db.prepare(`
@@ -754,9 +792,17 @@ export const decisionHistoryDb = {
     ORDER BY created_at DESC LIMIT ?
   `),
 
+  /**
+   * Precedent the agents are shown before they deliberate.
+   *
+   * Observed decisions only. A decision taken on invented signals is not
+   * evidence of how anything turned out, and quoting it back into a real
+   * deliberation launders the invention into the reasoning — which is what
+   * 859 of the 987 stored decisions would have done.
+   */
   getSimilar: db.prepare(`
     SELECT * FROM decision_history
-    WHERE category = ? AND outcome_status = 'completed'
+    WHERE category = ? AND outcome_status = 'completed' AND synthetic = 0
     ORDER BY created_at DESC LIMIT ?
   `),
 
@@ -770,21 +816,27 @@ export const decisionHistoryDb = {
     ORDER BY created_at DESC LIMIT ?
   `),
 
+  /** Observed decisions only — see getSimilar. */
   getCategorySuccessRate: db.prepare(`
     SELECT
       category,
       COUNT(*) as total,
       AVG(outcome_success_rate) as avg_success_rate
     FROM decision_history
-    WHERE outcome_status = 'completed'
+    WHERE outcome_status = 'completed' AND synthetic = 0
     GROUP BY category
   `),
 
   count: db.prepare(`SELECT COUNT(*) as count FROM decision_history`),
 
+  /**
+   * Decisions still waiting on a measured outcome. Synthetic ones are excluded
+   * rather than swept: there is no real result to measure against an invented
+   * signal, so evaluating them only writes noise back into the trust scores.
+   */
   getPendingOlderThan: db.prepare(`
     SELECT * FROM decision_history
-    WHERE outcome_status = 'pending' AND created_at < datetime('now', ?)
+    WHERE outcome_status = 'pending' AND created_at < datetime('now', ?) AND synthetic = 0
     ORDER BY created_at ASC LIMIT ?
   `),
 };
@@ -814,16 +866,27 @@ export const agentPerformanceDb = {
     SELECT * FROM agent_performance WHERE agent_role = ? ORDER BY recorded_at DESC LIMIT ?
   `),
 
+  /**
+   * Accuracy an agent earned on observed evidence.
+   *
+   * Joined to decision_history rather than carrying its own marker: the
+   * decision already records whether it was taken on invented signals, and one
+   * marker everything derives from cannot drift out of step with a copy of
+   * itself. This feeds getAgentFeedback and the stored trust scores, so an
+   * agent that was graded on a Math.random() value would otherwise carry that
+   * grade into every real deliberation afterwards.
+   */
   getAgentAccuracy: db.prepare(`
     SELECT
-      agent_role,
+      agent_performance.agent_role,
       COUNT(*) as total_decisions,
       SUM(CASE WHEN outcome_correct = 1 THEN 1 ELSE 0 END) as correct_decisions,
       AVG(confidence) as avg_confidence,
       AVG(CASE WHEN outcome_correct IS NOT NULL THEN accuracy_delta ELSE NULL END) as avg_accuracy_delta
     FROM agent_performance
-    WHERE agent_role = ?
-    GROUP BY agent_role
+    JOIN decision_history ON decision_history.id = agent_performance.decision_id
+    WHERE agent_performance.agent_role = ? AND decision_history.synthetic = 0
+    GROUP BY agent_performance.agent_role
   `),
 
   getAgentAccuracyByCategory: db.prepare(`
