@@ -31,11 +31,20 @@ export const SOCKET_EVENTS = {
 export type SocketEventName =
   (typeof SOCKET_EVENTS)[keyof typeof SOCKET_EVENTS];
 
+/**
+ * Counts of what the service observed. Values the demo adapter invented are
+ * reported in `synthetic` and are never folded into the fields above it.
+ */
 export interface StatsUpdateEvent {
   signals: number;
   issues: number;
   proposals: number;
   activeProposals: number;
+  synthetic: {
+    signals: number;
+    issues: number;
+    proposals: number;
+  };
 }
 
 export interface SignalsCollectedEvent {

@@ -245,18 +245,36 @@ class APIClient {
   }
 
   // Stats
+  //
+  // Every `total` here counts what the service observed. What the demo adapter
+  // invented is served alongside under `synthetic`, so it stays inspectable
+  // without being counted as an observation.
   async getStats() {
     return this.fetch<{
       signals: {
         total: number;
         byCategory: { category: string; count: number }[];
         adapterCount: number;
+        synthetic: {
+          total: number;
+          byCategory: { category: string; count: number }[];
+        };
       };
       issues: {
         total: number;
         byStatus: { status: string; count: number }[];
+        synthetic: {
+          total: number;
+          byStatus: { status: string; count: number }[];
+        };
       };
-      proposals: { total: number; active: number; passed: number; rejected: number };
+      proposals: {
+        total: number;
+        active: number;
+        passed: number;
+        rejected: number;
+        synthetic: { total: number; active: number; passed: number; rejected: number };
+      };
       outcomes: { totalProofs: number; successRate: number };
     }>("/api/stats");
   }

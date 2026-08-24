@@ -10,6 +10,7 @@ import {
   decisionHistoryDb,
   agentPerformanceDb,
   agentTrustDb,
+  issueIsSynthetic,
 } from "./db.js";
 
 // Types
@@ -225,6 +226,11 @@ export function recordDecision(
     confidence: op.confidence,
   }));
 
+  // Read from the issue rather than taken as an argument: every caller already
+  // passes an issue id, and a marker derived at the point of writing cannot be
+  // forgotten by a new call site the way a seventh parameter can.
+  const issue = issueIsSynthetic.get(issueId) as { synthetic: number } | undefined;
+
   decisionHistoryDb.insert.run({
     id,
     issueId,
@@ -234,6 +240,7 @@ export function recordDecision(
     recommendationType,
     agentOpinions: JSON.stringify(opinionSummaries),
     outcomeStatus: "pending",
+    synthetic: issue?.synthetic === 1 ? 1 : 0,
   });
 
   return id;

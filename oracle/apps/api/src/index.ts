@@ -28,6 +28,7 @@ import {
   decisionHistoryDb,
   issueFollowupDb,
   type IssueRow,
+  type SyntheticSplit,
   issueFingerprint,
   serializeSignal,
   deserializeSignal,
@@ -168,14 +169,19 @@ const MOSSLAND_API_URL = process.env.MOSSLAND_API_URL || "https://disclosure.mos
 const SIGNAL_LANGUAGE = (process.env.SIGNAL_LANGUAGE || "en") as "en" | "ko";
 console.log(`🌐 Signal language: ${SIGNAL_LANGUAGE}`);
 
-// Synthetic demo signals, off in production unless explicitly asked for.
+// Synthetic demo signals, off unless explicitly asked for.
 //
 // MockAdapter invents three `Math.random() * 100` values a minute. Registered
 // in production those became real issues, real deliberations and real proposals
 // pinned to a real chain snapshot — the detector thresholds were tuned around
 // them, so noise escalated to `urgent` indefinitely. A demo fallback is worth
-// having; one that a production deploy picks up by default is not.
-const ENABLE_MOCK_SIGNALS = envFlag("ENABLE_MOCK_SIGNALS", !IS_PRODUCTION);
+// having; one that a deploy picks up by default is not.
+//
+// The default is a flat `false` rather than `!IS_PRODUCTION`: keying it to
+// NODE_ENV meant a box that merely forgot to set that variable invented data
+// and published it, which is the failure this guards against. A demo asks for
+// the demo adapter by name.
+const ENABLE_MOCK_SIGNALS = envFlag("ENABLE_MOCK_SIGNALS", false);
 if (ENABLE_MOCK_SIGNALS) {
   signalRegistry.registerAdapter(
     new MockAdapter({ signalCount: 3, language: SIGNAL_LANGUAGE }),
@@ -476,16 +482,26 @@ app.use(
 io.on("connection", (socket) => {
   console.log(`🔌 Client connected: ${socket.id}`);
 
-  // Send current stats on connection
-  const signalCount = signalDb.count.get() as { count: number };
-  const issueCount = issueDb.count.get() as { count: number };
+  // Send current stats on connection. Same rule as GET /api/stats: the headline
+  // counts are observations, the demo totals travel separately.
+  const signalCounts = signalDb.counts.get() as SyntheticSplit;
+  const issueCounts = issueDb.counts.get() as SyntheticSplit;
+  const syntheticProposalIds = new Set(
+    (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
+  );
   const proposals = votingSystem.listProposals();
+  const realProposals = proposals.filter((p) => !syntheticProposalIds.has(p.id));
 
   socket.emit("stats:update", {
-    signals: signalCount.count,
-    issues: issueCount.count,
-    proposals: proposals.length,
-    activeProposals: proposals.filter(p => p.status === "active").length,
+    signals: signalCounts.observed,
+    issues: issueCounts.observed,
+    proposals: realProposals.length,
+    activeProposals: realProposals.filter((p) => p.status === "active").length,
+    synthetic: {
+      signals: signalCounts.synthetic,
+      issues: issueCounts.synthetic,
+      proposals: proposals.length - realProposals.length,
+    },
   });
 
   socket.on("disconnect", () => {
@@ -552,10 +568,10 @@ app.post("/api/signals/collect", requireAdminKey, async (req, res) => {
     }
 
     // Emit real-time event
-    const signalCount = signalDb.count.get() as { count: number };
+    const signalCounts = signalDb.counts.get() as SyntheticSplit;
     io.emit("signals:collected", {
       count: signals.length,
-      total: signalCount.count,
+      total: signalCounts.observed,
       signals: signals.slice(0, 5), // Send latest 5 for preview
     });
 
@@ -2044,35 +2060,63 @@ app.get("/api/llm/usage", requireAdminKey, (req, res) => {
   }
 });
 
-// System stats
+/**
+ * System stats, with the demo data reported beside the real data and never
+ * inside it.
+ *
+ * `total` on each section counts observed rows only. The synthetic counts are
+ * still served — the demo history is not hidden, and a caller that wants a
+ * grand total can add the two — but a reader who takes `signals.total` at face
+ * value now gets the number of things this service actually observed. It used
+ * to get that plus 223,074 values MockAdapter invented, with nothing in the
+ * response to say so.
+ */
 app.get("/api/stats", (req, res) => {
   try {
-    // Get signal stats from database
-    const signalCount = signalDb.count.get() as { count: number };
-    const categoryStats = signalDb.countByCategory.all() as { category: string; count: number }[];
+    const signalCounts = signalDb.counts.get() as SyntheticSplit;
+    const issueCounts = issueDb.counts.get() as SyntheticSplit;
 
-    // Get issue stats from database
-    const issueCount = issueDb.count.get() as { count: number };
-    const issueStatusStats = issueDb.countByStatus.all() as { status: string; count: number }[];
+    const byCategory = (synthetic: 0 | 1) =>
+      signalDb.countByCategory.all(synthetic) as { category: string; count: number }[];
+    const byStatus = (synthetic: 0 | 1) =>
+      issueDb.countByStatus.all(synthetic) as { status: string; count: number }[];
 
-    const proposals = votingSystem.listProposals();
+    const syntheticProposalIds = new Set(
+      (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
+    );
+    const allProposals = votingSystem.listProposals();
+    const tallyProposals = (proposals: typeof allProposals) => ({
+      total: proposals.length,
+      active: proposals.filter((p) => p.status === "active").length,
+      passed: proposals.filter((p) => p.status === "passed").length,
+      rejected: proposals.filter((p) => p.status === "rejected").length,
+    });
+
     const proofs = outcomeTracker.listProofs();
 
     res.json({
       signals: {
-        total: signalCount.count,
-        byCategory: categoryStats,
+        total: signalCounts.observed,
+        byCategory: byCategory(0),
         adapterCount: signalRegistry.listAdapters().length,
+        synthetic: {
+          total: signalCounts.synthetic,
+          byCategory: byCategory(1),
+        },
       },
       issues: {
-        total: issueCount.count,
-        byStatus: issueStatusStats,
+        total: issueCounts.observed,
+        byStatus: byStatus(0),
+        synthetic: {
+          total: issueCounts.synthetic,
+          byStatus: byStatus(1),
+        },
       },
       proposals: {
-        total: proposals.length,
-        active: proposals.filter((p) => p.status === "active").length,
-        passed: proposals.filter((p) => p.status === "passed").length,
-        rejected: proposals.filter((p) => p.status === "rejected").length,
+        ...tallyProposals(allProposals.filter((p) => !syntheticProposalIds.has(p.id))),
+        synthetic: tallyProposals(
+          allProposals.filter((p) => syntheticProposalIds.has(p.id)),
+        ),
       },
       outcomes: {
         totalProofs: proofs.length,
@@ -2202,10 +2246,10 @@ async function collectAndSaveSignals() {
 
   // Emit real-time event
   if (signals.length > 0) {
-    const signalCount = signalDb.count.get() as { count: number };
+    const signalCounts = signalDb.counts.get() as SyntheticSplit;
     io.emit("signals:collected", {
       count: signals.length,
-      total: signalCount.count,
+      total: signalCounts.observed,
       signals: signals.slice(0, 5),
     });
   }
@@ -2289,10 +2333,10 @@ async function detectAndSaveIssues() {
 
   // Emit real-time event if new issues were saved
   if (savedCount > 0) {
-    const issueCount = issueDb.count.get() as { count: number };
+    const issueCounts = issueDb.counts.get() as SyntheticSplit;
     io.emit("issues:detected", {
       newCount: savedCount,
-      totalCount: issueCount.count,
+      totalCount: issueCounts.observed,
       issues: savedIssues,
     });
   }
@@ -2637,9 +2681,12 @@ httpServer.listen(PORT, () => {
   `);
 
   // Get current DB stats
-  const signalCount = signalDb.count.get() as { count: number };
-  const issueCount = issueDb.count.get() as { count: number };
-  console.log(`📊 Database: ${signalCount.count} signals, ${issueCount.count} issues stored`);
+  const signalCounts = signalDb.counts.get() as SyntheticSplit;
+  const issueCounts = issueDb.counts.get() as SyntheticSplit;
+  console.log(
+    `📊 Database: ${signalCounts.observed} signals, ${issueCounts.observed} issues observed` +
+      ` (plus ${signalCounts.synthetic} signals, ${issueCounts.synthetic} issues from the demo adapter)`,
+  );
   if (adminAuthMode === "enforced") {
     console.log("🔐 Admin auth: enforced (ADMIN_API_KEY set)");
   } else if (adminAuthMode === "demo-open") {
