@@ -42,6 +42,8 @@ import {
   recordDecision,
   recordOutcome,
   recordOutcomeByIssueId,
+  updateAgentTrustScores,
+  getAgentTrustScores,
 } from "./learning.js";
 
 // Import blockchain service
@@ -2695,6 +2697,22 @@ httpServer.listen(PORT, () => {
   console.log(
     `📊 Database: ${signalCounts.observed} signals, ${issueCounts.observed} issues observed` +
       ` (plus ${signalCounts.synthetic} signals, ${issueCounts.synthetic} issues from the demo adapter)`,
+  );
+
+  // agent_trust_scores is derived, and until now it was only ever rewritten by
+  // recordOutcome. That left it stating whatever was true the last time an
+  // outcome happened to land: when the learning reads narrowed to observed and
+  // then to measured decisions, the stored scores kept quoting the evidence
+  // those reads had just dropped, and there was no path that would recompute
+  // them. Recomputing at boot costs four queries and makes the table say what
+  // the reads behind it currently say.
+  updateAgentTrustScores();
+  const trustScores = getAgentTrustScores();
+  const graded = trustScores.filter((score) => (score.total_decisions ?? 0) > 0).length;
+  console.log(
+    graded > 0
+      ? `🎓 Agent trust: ${graded} of ${trustScores.length} roles graded on measured outcomes`
+      : `🎓 Agent trust: no measured outcomes yet, all roles at the neutral score`,
   );
   if (adminAuthMode === "enforced") {
     console.log("🔐 Admin auth: enforced (ADMIN_API_KEY set)");
