@@ -1539,7 +1539,9 @@ app.post("/api/outcomes/:executionId/measurements", requireAdminKey, async (req,
     const issueId = dp?.issue?.id;
     if (issueId) {
       try {
-        if (recordOutcomeByIssueId(issueId, proof.successRate, proof.kpiResults)) {
+        if (
+          recordOutcomeByIssueId(issueId, proof.successRate, proof.kpiResults, "measured")
+        ) {
           console.log(
             `📊 Recorded learning outcome for issue ${issueId}: ` +
               `${(proof.successRate * 100).toFixed(0)}% of KPIs met`,
@@ -2120,10 +2122,14 @@ app.get("/api/stats", (req, res) => {
       },
       outcomes: {
         totalProofs: proofs.length,
+        // null, not 0, when nothing has been measured yet. Zero proofs is not
+        // a zero success rate — it is the absence of one — and the dashboard
+        // rendered the difference as "0%", which reads as a service that tries
+        // and fails rather than one that has not yet measured anything.
         successRate:
           proofs.length > 0
             ? proofs.filter((p) => p.overallSuccess).length / proofs.length
-            : 0,
+            : null,
       },
     });
   } catch (error) {
@@ -2503,7 +2509,10 @@ async function evaluatePendingOutcomes() {
       ) as { count: number };
 
       const newIssueCount = followup?.count ?? 0;
-      // Heuristic: fewer follow-up high-priority issues in this category = better outcome
+      // A proxy, not a measurement: nobody checked the decision's own KPIs, so
+      // this counts high-priority issues that turned up in the same category
+      // afterwards and reads fewer as better. Recorded as "estimated" below,
+      // which keeps it out of the queries the agents learn from.
       let successRate: number;
       if (newIssueCount === 0) successRate = 0.85;
       else if (newIssueCount === 1) successRate = 0.55;
@@ -2519,7 +2528,7 @@ async function evaluatePendingOutcomes() {
         },
       ];
 
-      recordOutcome(decision.id, successRate, kpiResults);
+      recordOutcome(decision.id, successRate, kpiResults, "estimated");
       evaluated++;
     } catch (error) {
       console.error(`[outcome-eval] failed for decision ${decision.id}:`, error);

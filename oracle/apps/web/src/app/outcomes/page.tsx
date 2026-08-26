@@ -73,7 +73,9 @@ export default function OutcomesPage() {
 
   const outcomes = outcomesData?.outcomes ?? [];
   const completedCount = statsData?.outcomes.totalProofs ?? 0;
-  const successRate = (statsData?.outcomes.successRate ?? 0) * 100;
+  // Null until a proof has been measured. Shown as "—" rather than 0%, which
+  // would claim a result nobody has taken yet.
+  const successRate = statsData?.outcomes.successRate ?? null;
   const successCount = outcomes.filter((o: any) => o.overallSuccess).length;
   const trustScores = leaderboardData?.leaderboard ?? [];
 
@@ -106,7 +108,13 @@ export default function OutcomesPage() {
         <div className="card p-4 sm:p-6">
           <p className="text-xs sm:text-sm text-gray-500 truncate">{t("dashboard.successRate")}</p>
           <p className="text-xl sm:text-2xl font-bold text-moss-600">
-            {statsLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : `${successRate.toFixed(0)}%`}
+            {statsLoading ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : successRate === null ? (
+              "—"
+            ) : (
+              `${(successRate * 100).toFixed(0)}%`
+            )}
           </p>
         </div>
       </div>

@@ -275,7 +275,9 @@ class APIClient {
         rejected: number;
         synthetic: { total: number; active: number; passed: number; rejected: number };
       };
-      outcomes: { totalProofs: number; successRate: number };
+      // successRate is null until something has actually been measured —
+      // render it as "no data", not as zero.
+      outcomes: { totalProofs: number; successRate: number | null };
     }>("/api/stats");
   }
 }

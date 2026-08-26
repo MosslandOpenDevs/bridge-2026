@@ -206,7 +206,13 @@ export default function Dashboard() {
         />
         <StatCard
           title={t("dashboard.successRate")}
-          value={statsLoading ? "..." : `${((stats?.outcomes.successRate ?? 0) * 100).toFixed(0)}%`}
+          value={
+            statsLoading
+              ? "..."
+              : stats?.outcomes.successRate == null
+                ? "—"
+                : `${(stats.outcomes.successRate * 100).toFixed(0)}%`
+          }
           icon={Users}
           href="/outcomes"
         />

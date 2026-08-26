@@ -247,6 +247,18 @@ export function recordDecision(
 }
 
 /**
+ * Where a success rate came from.
+ *
+ * "measured" means it was checked against the decision's declared KPIs.
+ * "estimated" means it was inferred from a proxy — evaluatePendingOutcomes
+ * reads follow-up issue counts and picks one of four fixed numbers, which is a
+ * guess about the result rather than the result. Both land in the same column
+ * and the same [0,1] unit, so the only thing keeping them apart is this
+ * argument; it has no default for that reason.
+ */
+export type OutcomeProvenance = "measured" | "estimated";
+
+/**
  * Record outcome for a decision by issue ID (feedback loop)
  * Looks up the most recent decision for the given issue and records outcome
  *
@@ -255,7 +267,8 @@ export function recordDecision(
 export function recordOutcomeByIssueId(
   issueId: string,
   successRate: number,
-  kpiResults: any[]
+  kpiResults: any[],
+  provenance: OutcomeProvenance
 ): boolean {
   // Find the most recent decision for this issue
   const decision = decisionHistoryDb.getByIssueId.get(issueId) as any;
@@ -264,7 +277,7 @@ export function recordOutcomeByIssueId(
     return false;
   }
 
-  recordOutcome(decision.id, successRate, kpiResults);
+  recordOutcome(decision.id, successRate, kpiResults, provenance);
   return true;
 }
 
@@ -274,17 +287,22 @@ export function recordOutcomeByIssueId(
  * @param successRate Fraction of declared KPIs met, in [0,1]. Compared against
  *   0.7 to decide whether the decision was correct, and subtracted from agent
  *   confidence — which is also [0,1] — to score each agent's accuracy.
+ * @param provenance Whether that rate was measured or inferred. An estimated
+ *   outcome is still recorded and still readable, but the learning queries
+ *   skip it, so it cannot become evidence the agents are graded on.
  */
 export function recordOutcome(
   decisionId: string,
   successRate: number,
-  kpiResults: any[]
+  kpiResults: any[],
+  provenance: OutcomeProvenance
 ): void {
   // 1. Update decision history
   decisionHistoryDb.updateOutcome.run({
     id: decisionId,
     outcomeStatus: "completed",
     outcomeSuccessRate: successRate,
+    outcomeEstimated: provenance === "estimated" ? 1 : 0,
     kpiResults: JSON.stringify(kpiResults),
   });
 

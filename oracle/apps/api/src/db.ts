@@ -103,7 +103,12 @@ db.exec(`
     -- Fraction in [0,1], same unit as outcome_proofs.success_rate. Averaged by
     -- getCategorySuccessRate and compared against 0.7 in learning.ts, so a
     -- 0-100 value here would silently mark every past decision a success.
+    --
+    -- Same unit, but not always the same provenance: outcome_estimated says
+    -- whether this was measured against the decision's KPIs or inferred from a
+    -- proxy. Only the measured ones are evidence.
     outcome_success_rate REAL,
+    outcome_estimated INTEGER NOT NULL DEFAULT 0,
     kpi_results TEXT,
     -- 1 when the issue this decision was taken on was synthetic. Denormalised
     -- from issues so the learning reads can exclude invented history without a
@@ -261,12 +266,37 @@ for (const [table, column, definition] of [
   // Priority the issue was deliberated at, so an escalation can be re-judged
   // while a steady condition is not paid for twice.
   ["issues", "deliberated_priority", "TEXT"],
+  // 1 when outcome_success_rate was inferred from a proxy rather than measured
+  // against the decision's declared KPIs. See recordOutcome's provenance
+  // argument.
+  ["decision_history", "outcome_estimated", "INTEGER NOT NULL DEFAULT 0"],
 ] as const) {
   try {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   } catch {
     // Column already present.
   }
+}
+
+/**
+ * Run a one-time correction to rows that predate a column, gated on the
+ * database's user_version.
+ *
+ * The gate is what makes a backfill safe to write as a plain UPDATE: it runs
+ * against the rows that existed when the marker was introduced and never sees
+ * one written afterwards, so a predicate that is true of this history cannot
+ * later be applied to live data that happens to match it.
+ *
+ * `work` returns a summary to log, or null when it changed nothing.
+ */
+function migrateOnce(version: number, label: string, work: () => string | null): void {
+  if ((db.pragma("user_version", { simple: true }) as number) >= version) return;
+  const summary = db.transaction(() => {
+    const result = work();
+    db.pragma(`user_version = ${version}`);
+    return result;
+  })();
+  if (summary) console.log(`🔖 ${label}: ${summary}`);
 }
 
 /**
@@ -300,9 +330,7 @@ for (const [table, column, definition] of [
  * reclassify a row written after the marker existed. Only the marker changes;
  * no row is removed, and the demo history stays queryable.
  */
-const SYNTHETIC_BACKFILL_VERSION = 1;
-if ((db.pragma("user_version", { simple: true }) as number) < SYNTHETIC_BACKFILL_VERSION) {
-  const backfill = db.transaction(() => {
+migrateOnce(1, "Marked pre-existing demo rows synthetic", () => {
     const signals = db
       .prepare(`UPDATE signals SET synthetic = 1 WHERE synthetic = 0 AND source = 'telemetry'`)
       .run().changes;
@@ -331,18 +359,37 @@ if ((db.pragma("user_version", { simple: true }) as number) < SYNTHETIC_BACKFILL
              AND issue_id IN (SELECT id FROM issues WHERE synthetic = 1)`,
       )
       .run().changes;
-    db.pragma(`user_version = ${SYNTHETIC_BACKFILL_VERSION}`);
-    return { signals, issues, decisions };
-  });
+  return signals + issues + decisions > 0
+    ? `${signals} signals, ${issues} issues, ${decisions} decisions`
+    : null;
+});
 
-  const marked = backfill();
-  if (marked.signals > 0 || marked.issues > 0 || marked.decisions > 0) {
-    console.log(
-      `🔖 Marked pre-existing demo rows synthetic: ${marked.signals} signals,` +
-        ` ${marked.issues} issues, ${marked.decisions} decisions`,
-    );
-  }
-}
+/**
+ * Mark the outcomes that were recorded before provenance was.
+ *
+ * An outcome written before the column existed did not say which path wrote
+ * it, so none of them can be called measured. `estimated` is the weaker claim
+ * and the one that keeps a rate out of the learning reads, which is the right
+ * direction to be wrong in: an estimate mistaken for a measurement teaches the
+ * agents something nobody checked.
+ *
+ * Here it is not even a close call. This database's outcomes all came from
+ * evaluatePendingOutcomes — `outcome_proofs` is empty, so the measured path
+ * has never run, and the 126 observed decisions carry exactly four distinct
+ * success rates, 0.85/0.55/0.35/0.2, which is that function's ladder rather
+ * than a measurement of anything.
+ *
+ * Same gate as above: runs once, changes only the marker.
+ */
+migrateOnce(2, "Marked pre-existing outcomes estimated", () => {
+  const decisions = db
+    .prepare(
+      `UPDATE decision_history SET outcome_estimated = 1
+         WHERE outcome_estimated = 0 AND outcome_status = 'completed'`,
+    )
+    .run().changes;
+  return decisions > 0 ? `${decisions} decisions` : null;
+});
 
 /**
  * Identity of the condition an issue reports, not of the observation.
@@ -735,6 +782,7 @@ export const decisionHistoryDb = {
     UPDATE decision_history SET
       outcome_status = @outcomeStatus,
       outcome_success_rate = @outcomeSuccessRate,
+      outcome_estimated = @outcomeEstimated,
       kpi_results = @kpiResults,
       outcome_recorded_at = CURRENT_TIMESTAMP
     WHERE id = @id
@@ -753,21 +801,29 @@ export const decisionHistoryDb = {
    * evidence of how anything turned out, and quoting it back into a real
    * deliberation launders the invention into the reasoning — which is what
    * 859 of the 987 stored decisions would have done.
+   *
+   * Measured outcomes only, for the same reason one step further on. "This
+   * worked out at 85%" is worth quoting when something checked; the ladder in
+   * evaluatePendingOutcomes checked nothing, it counted follow-up issues and
+   * picked one of four numbers.
    */
   getSimilar: db.prepare(`
     SELECT * FROM decision_history
-    WHERE category = ? AND outcome_status = 'completed' AND synthetic = 0
+    WHERE category = ?
+      AND outcome_status = 'completed'
+      AND synthetic = 0
+      AND outcome_estimated = 0
     ORDER BY created_at DESC LIMIT ?
   `),
 
-  /** Observed decisions only — see getSimilar. */
+  /** Observed, measured decisions only — see getSimilar. */
   getCategorySuccessRate: db.prepare(`
     SELECT
       category,
       COUNT(*) as total,
       AVG(outcome_success_rate) as avg_success_rate
     FROM decision_history
-    WHERE outcome_status = 'completed' AND synthetic = 0
+    WHERE outcome_status = 'completed' AND synthetic = 0 AND outcome_estimated = 0
     GROUP BY category
   `),
 
@@ -809,6 +865,11 @@ export const agentPerformanceDb = {
    * itself. This feeds getAgentFeedback and the stored trust scores, so an
    * agent that was graded on a Math.random() value would otherwise carry that
    * grade into every real deliberation afterwards.
+   *
+   * Measured outcomes only, on the same argument: a grade is only earned if
+   * something checked the result. With none stored yet this returns no rows,
+   * and updateAgentTrustScores falls back to its neutral 50 — which is the
+   * truthful state, not a gap to be filled.
    */
   getAgentAccuracy: db.prepare(`
     SELECT
@@ -819,7 +880,9 @@ export const agentPerformanceDb = {
       AVG(CASE WHEN outcome_correct IS NOT NULL THEN accuracy_delta ELSE NULL END) as avg_accuracy_delta
     FROM agent_performance
     JOIN decision_history ON decision_history.id = agent_performance.decision_id
-    WHERE agent_performance.agent_role = ? AND decision_history.synthetic = 0
+    WHERE agent_performance.agent_role = ?
+      AND decision_history.synthetic = 0
+      AND decision_history.outcome_estimated = 0
     GROUP BY agent_performance.agent_role
   `),
 };

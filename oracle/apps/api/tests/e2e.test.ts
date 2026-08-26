@@ -283,6 +283,27 @@ async function testHealthCheck() {
   assert(typeof data.version === "string", "health: version should be a string");
 }
 
+/**
+ * Runs before anything is executed or measured, which is the only window in
+ * the suite where nothing has been. The endpoint has to say so rather than
+ * reporting a rate: 0% is a claim about how the service performed, and until a
+ * proof exists there is nothing to make that claim about.
+ */
+async function testStatsBeforeAnyOutcome() {
+  const { response, data } = await get("/api/stats");
+  assertStatus(response, 200, "stats before any outcome");
+  assert(
+    data.outcomes.totalProofs === 0,
+    `stats: expected no proofs yet, got ${data.outcomes.totalProofs}`,
+  );
+  assert(
+    data.outcomes.successRate === null,
+    `stats: success rate with no proofs should be null, got ${JSON.stringify(
+      data.outcomes.successRate,
+    )}`,
+  );
+}
+
 async function testAdminAuthRequired() {
   const anonymous = await post("/api/signals/collect", undefined, false);
   assertStatus(anonymous.response, 401, "anonymous admin call");
@@ -889,6 +910,7 @@ async function main() {
 
   try {
     await runTest("Health check", testHealthCheck);
+    await runTest("No success rate before anything is measured", testStatsBeforeAnyOutcome);
     await runTest("Admin endpoints require the key", testAdminAuthRequired);
     await runTest("Signals and issues", testSignalsAndIssues);
     await runTest("Proposal settings are validated", testProposalValidation);
