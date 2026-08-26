@@ -435,14 +435,6 @@ export const signalDb = {
     SELECT * FROM signals WHERE category = ? ORDER BY timestamp DESC LIMIT ?
   `),
 
-  getBySeverity: db.prepare(`
-    SELECT * FROM signals WHERE severity = ? ORDER BY timestamp DESC LIMIT ?
-  `),
-
-  getByTimeRange: db.prepare(`
-    SELECT * FROM signals WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC
-  `),
-
   counts: db.prepare(`
     SELECT
       COUNT(*) FILTER (WHERE synthetic = 0) as observed,
@@ -486,16 +478,8 @@ export const issueDb = {
 
   getById: db.prepare(`SELECT * FROM issues WHERE id = ?`),
 
-  getRecent: db.prepare(`
-    SELECT * FROM issues ORDER BY detected_at DESC LIMIT ?
-  `),
-
   getByStatus: db.prepare(`
     SELECT * FROM issues WHERE status = ? ORDER BY detected_at DESC LIMIT ?
-  `),
-
-  getByPriority: db.prepare(`
-    SELECT * FROM issues WHERE priority = ? ORDER BY detected_at DESC LIMIT ?
   `),
 
   getActive: db.prepare(`
@@ -582,25 +566,9 @@ export const issueDb = {
   `),
 };
 
-// Proposal operations (persisted alongside in-memory VotingSystem)
+// Proposal lookups. Writes go through governanceDb.upsertProposal, which owns
+// the full row; these two only ask the table questions.
 export const proposalDb = {
-  insert: db.prepare(`
-    INSERT INTO proposals (id, title, description, proposer, status, voting_starts, voting_ends, issue_id, decision_packet)
-    VALUES (@id, @title, @description, @proposer, @status, @votingStarts, @votingEnds, @issueId, @decisionPacket)
-  `),
-
-  updateStatus: db.prepare(`
-    UPDATE proposals SET status = @status, tally = @tally, updated_at = CURRENT_TIMESTAMP WHERE id = @id
-  `),
-
-  getById: db.prepare(`SELECT * FROM proposals WHERE id = ?`),
-
-  getRecent: db.prepare(`SELECT * FROM proposals ORDER BY created_at DESC LIMIT ?`),
-
-  count: db.prepare(`SELECT COUNT(*) as count FROM proposals`),
-
-  countByStatus: db.prepare(`SELECT status, COUNT(*) as count FROM proposals GROUP BY status`),
-
   existsByIssueId: db.prepare(`SELECT id FROM proposals WHERE issue_id = ? LIMIT 1`),
 
   /**
@@ -778,12 +746,6 @@ export const decisionHistoryDb = {
     SELECT * FROM decision_history WHERE issue_id = ? ORDER BY created_at DESC LIMIT 1
   `),
 
-  getByCategory: db.prepare(`
-    SELECT * FROM decision_history
-    WHERE category = ? AND outcome_status = 'completed'
-    ORDER BY created_at DESC LIMIT ?
-  `),
-
   /**
    * Precedent the agents are shown before they deliberate.
    *
@@ -798,16 +760,6 @@ export const decisionHistoryDb = {
     ORDER BY created_at DESC LIMIT ?
   `),
 
-  getRecent: db.prepare(`
-    SELECT * FROM decision_history ORDER BY created_at DESC LIMIT ?
-  `),
-
-  getWithOutcomes: db.prepare(`
-    SELECT * FROM decision_history
-    WHERE outcome_status = 'completed'
-    ORDER BY created_at DESC LIMIT ?
-  `),
-
   /** Observed decisions only — see getSimilar. */
   getCategorySuccessRate: db.prepare(`
     SELECT
@@ -818,8 +770,6 @@ export const decisionHistoryDb = {
     WHERE outcome_status = 'completed' AND synthetic = 0
     GROUP BY category
   `),
-
-  count: db.prepare(`SELECT COUNT(*) as count FROM decision_history`),
 
   /**
    * Decisions still waiting on a measured outcome. Synthetic ones are excluded
@@ -850,14 +800,6 @@ export const agentPerformanceDb = {
     VALUES (@id, @agentId, @agentRole, @decisionId, @category, @stance, @confidence, @outcomeCorrect, @accuracyDelta)
   `),
 
-  getByAgent: db.prepare(`
-    SELECT * FROM agent_performance WHERE agent_id = ? ORDER BY recorded_at DESC LIMIT ?
-  `),
-
-  getByRole: db.prepare(`
-    SELECT * FROM agent_performance WHERE agent_role = ? ORDER BY recorded_at DESC LIMIT ?
-  `),
-
   /**
    * Accuracy an agent earned on observed evidence.
    *
@@ -880,29 +822,6 @@ export const agentPerformanceDb = {
     WHERE agent_performance.agent_role = ? AND decision_history.synthetic = 0
     GROUP BY agent_performance.agent_role
   `),
-
-  getAgentAccuracyByCategory: db.prepare(`
-    SELECT
-      agent_role,
-      category,
-      COUNT(*) as total_decisions,
-      SUM(CASE WHEN outcome_correct = 1 THEN 1 ELSE 0 END) as correct_decisions,
-      AVG(confidence) as avg_confidence
-    FROM agent_performance
-    WHERE agent_role = ? AND category = ?
-    GROUP BY agent_role, category
-  `),
-
-  getRoleStats: db.prepare(`
-    SELECT
-      agent_role,
-      COUNT(*) as total_decisions,
-      SUM(CASE WHEN outcome_correct = 1 THEN 1 ELSE 0 END) as correct_decisions,
-      AVG(confidence) as avg_confidence
-    FROM agent_performance
-    WHERE outcome_correct IS NOT NULL
-    GROUP BY agent_role
-  `),
 };
 
 // Agent trust scores operations
@@ -918,15 +837,7 @@ export const agentTrustDb = {
       last_updated = CURRENT_TIMESTAMP
   `),
 
-  getByAgent: db.prepare(`SELECT * FROM agent_trust_scores WHERE agent_id = ?`),
-
-  getByRole: db.prepare(`SELECT * FROM agent_trust_scores WHERE agent_role = ?`),
-
   getAll: db.prepare(`SELECT * FROM agent_trust_scores ORDER BY overall_score DESC`),
-
-  getLeaderboard: db.prepare(`
-    SELECT * FROM agent_trust_scores ORDER BY overall_score DESC LIMIT ?
-  `),
 };
 
 // Helper to serialize/deserialize JSON fields
