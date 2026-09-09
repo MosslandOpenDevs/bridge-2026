@@ -15,7 +15,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:net";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import Database from "better-sqlite3";
@@ -452,6 +452,104 @@ async function testDetectionCountsOnlyNewRows() {
     } finally {
       db.close();
     }
+  }
+}
+
+/**
+ * Opening a database that predates the `synthetic` column must migrate it,
+ * and must leave /health's query with an efficient plan.
+ *
+ * Two regressions, both from adding an index over that column:
+ *
+ *   - Created alongside the other signals indexes, it ran before the ALTER
+ *     TABLE that adds the column, so upgrading an existing deployment died at
+ *     startup with "no such column: synthetic" and never reached the
+ *     migration. Every test above runs against a fresh database, where the
+ *     CREATE TABLE already has the column — so none of them saw it.
+ *
+ *   - With only (synthetic, category) present, the planner preferred it for
+ *     /health's "newest observed signal" and sorted every observed row in a
+ *     temp b-tree: 0.01ms -> 184ms on 628k observed rows, and better-sqlite3
+ *     is synchronous, so every other request waited too.
+ *
+ * Runs db.js in its own process against a hand-built legacy schema, which is
+ * the actual upgrade path and needs no server.
+ */
+async function testLegacyDatabaseUpgrade() {
+  const legacyDir = mkdtempSync(join(tmpdir(), "oracle-legacy-"));
+  const legacyDb = join(legacyDir, "legacy.db");
+
+  try {
+    // The signals table as it was before the synthetic marker existed.
+    const seed = new Database(legacyDb);
+    try {
+      seed.exec(
+        `CREATE TABLE signals (
+           id TEXT PRIMARY KEY, original_id TEXT NOT NULL, source TEXT NOT NULL,
+           timestamp TEXT NOT NULL, category TEXT NOT NULL, severity TEXT NOT NULL,
+           value REAL NOT NULL, unit TEXT NOT NULL, description TEXT NOT NULL,
+           metadata TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+         )`,
+      );
+      seed
+        .prepare(
+          `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description)
+           VALUES ('legacy', 'legacy', 'api', '2026-09-01T00:00:00.000Z', 'moc_price', 'low', 1, 'n/a', 'predates synthetic')`,
+        )
+        .run();
+    } finally {
+      seed.close();
+    }
+
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        ["--input-type=module", "-e", `import(${JSON.stringify(pathToFileURL(join(API_ROOT, "dist", "db.js")).href)})`],
+        { cwd: API_ROOT, env: { ...process.env, DB_PATH: legacyDb }, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      const out: string[] = [];
+      child.stdout?.on("data", (c) => out.push(String(c)));
+      child.stderr?.on("data", (c) => out.push(String(c)));
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code !== 0) {
+          reject(new Error(`db.js exited ${code} on a pre-synthetic database:\n${out.join("")}`));
+          return;
+        }
+        resolve(code ?? 0);
+      });
+    });
+    assert(exitCode === 0, "legacy upgrade: db.js should open a pre-synthetic database");
+
+    const upgraded = new Database(legacyDb, { readonly: true });
+    try {
+      const columns = upgraded
+        .prepare(`PRAGMA table_info(signals)`)
+        .all() as { name: string }[];
+      assert(
+        columns.some((c) => c.name === "synthetic"),
+        "legacy upgrade: the synthetic column should have been added",
+      );
+
+      // The exact query /health runs. A plan that sorts is the regression.
+      const plan = (
+        upgraded
+          .prepare(
+            `EXPLAIN QUERY PLAN SELECT timestamp FROM signals WHERE synthetic = 0 ORDER BY timestamp DESC LIMIT 1`,
+          )
+          .all() as { detail: string }[]
+      )
+        .map((r) => r.detail)
+        .join(" | ");
+      assert(
+        !/TEMP B-TREE/i.test(plan),
+        `health query should not sort; plan was: ${plan}`,
+      );
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    rmSync(legacyDir, { recursive: true, force: true });
   }
 }
 
@@ -1030,6 +1128,7 @@ async function main() {
     await runTest("Admin endpoints require the key", testAdminAuthRequired);
     await runTest("Signals and issues", testSignalsAndIssues);
     await runTest("Detection counts only new rows", testDetectionCountsOnlyNewRows);
+    await runTest("Legacy database upgrades and keeps health fast", testLegacyDatabaseUpgrade);
     await runTest("Proposal settings are validated", testProposalValidation);
     await runTest("Voting integrity", testVotingIntegrity);
     await runTest("Proposal responses carry a tally", testProposalListIncludesTally);
