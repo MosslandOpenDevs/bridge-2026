@@ -41,6 +41,13 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp DESC);
   CREATE INDEX IF NOT EXISTS idx_signals_category ON signals(category);
   CREATE INDEX IF NOT EXISTS idx_signals_severity ON signals(severity);
+  -- Covers the two GROUP BYs behind /api/stats. Without it each one is a full
+  -- scan of the signals table, and better-sqlite3 is synchronous: the ~0.9s
+  -- those scans took on 942k rows blocked the whole event loop, so every other
+  -- request in flight -- /api/health included -- waited that long. The
+  -- dashboard polls /api/stats every 30s per open tab. Measured on the
+  -- production copy: 414ms + 411ms + 54ms -> 19ms + 6ms + 19ms.
+  CREATE INDEX IF NOT EXISTS idx_signals_synthetic_category ON signals(synthetic, category);
 
   -- Issues table
   CREATE TABLE IF NOT EXISTS issues (
