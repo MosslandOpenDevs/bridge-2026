@@ -669,15 +669,19 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
       ...trendDetector.analyze(signals),
     ];
 
-    const { saved: savedIssues } = saveDetectedIssues(detectedIssues);
+    const { saved: savedIssues, inserted, escalations } =
+      saveDetectedIssues(detectedIssues);
 
     // Return all active issues
     const allIssues = issueDb.getActive.all(50).map(deserializeIssue);
 
-    // Emit real-time event if new issues were saved
-    if (savedIssues.length > 0) {
+    // Same rule as the background scheduler: only rows that did not exist are
+    // new. Both paths run the same detectors over the same signals, so a count
+    // that means one thing here and another there is worse than no count.
+    if (inserted > 0) {
       io.emit("issues:detected", {
-        newCount: savedIssues.length,
+        newCount: inserted,
+        escalatedCount: escalations,
         totalCount: allIssues.length,
         issues: savedIssues,
       });
@@ -685,6 +689,8 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
 
     res.json({
       detected: detectedIssues.length,
+      inserted,
+      escalated: escalations,
       saved: savedIssues.length,
       issues: allIssues,
       count: allIssues.length,
@@ -2312,10 +2318,12 @@ const priorityRank = (p?: string | null) =>
  */
 function saveDetectedIssues(detectedIssues: DetectedIssue[]): {
   saved: DetectedIssue[];
+  inserted: number;
   recurrences: number;
   escalations: number;
 } {
   const saved: DetectedIssue[] = [];
+  let inserted = 0;
   let recurrences = 0;
   let escalations = 0;
 
@@ -2328,6 +2336,7 @@ function saveDetectedIssues(detectedIssues: DetectedIssue[]): {
     if (!existing) {
       issueDb.insert.run(serializeIssue({ ...issue, fingerprint }));
       saved.push({ ...issue, fingerprint });
+      inserted++;
       continue;
     }
 
@@ -2351,7 +2360,7 @@ function saveDetectedIssues(detectedIssues: DetectedIssue[]): {
     }
   }
 
-  return { saved, recurrences, escalations };
+  return { saved, inserted, recurrences, escalations };
 }
 
 // Helper function for background issue detection
@@ -2365,15 +2374,22 @@ async function detectAndSaveIssues() {
     ...trendDetector.analyze(signals),
   ];
 
-  const { saved: savedIssues, recurrences, escalations } =
+  const { saved: savedIssues, inserted: insertedCount, recurrences, escalations } =
     saveDetectedIssues(detectedIssues);
   const savedCount = savedIssues.length;
 
-  // Emit real-time event if new issues were saved
-  if (savedCount > 0) {
+  // "New" means a row that did not exist. savedIssues also carries escalations
+  // -- existing rows re-opened for another look -- and reporting those as new
+  // made the feed announce issues nobody could find: an issue below
+  // AUTO_DELIBERATE_MIN_PRIORITY re-escalates on every pass (the floor at
+  // :continue skips markDeliberated, so deliberated_priority stays NULL), so
+  // production emitted "2 new" every five minutes while the newest row was
+  // weeks old.
+  if (insertedCount > 0) {
     const issueCounts = issueDb.counts.get() as SyntheticSplit;
     io.emit("issues:detected", {
-      newCount: savedCount,
+      newCount: insertedCount,
+      escalatedCount: escalations,
       totalCount: issueCounts.observed,
       issues: savedIssues,
     });
@@ -2514,6 +2530,9 @@ async function detectAndSaveIssues() {
 
   return {
     detected: detectedIssues.length,
+    // Rows actually created. `saved` is this plus escalations, i.e. everything
+    // handed to deliberation -- do not report it as "new".
+    inserted: insertedCount,
     saved: savedCount,
     deliberated: deliberatedCount,
     promoted: promotedCount,
@@ -2784,7 +2803,7 @@ httpServer.listen(PORT, () => {
     setTimeout(async () => {
       try {
         const result = await detectAndSaveIssues();
-        console.log(`   ✅ Initial detection: ${result.detected} found, ${result.saved} new, ${result.deliberated} deliberated, ${result.promoted} promoted`);
+        console.log(`   ✅ Initial detection: ${result.detected} found, ${result.inserted} new, ${result.escalations} escalated, ${result.deliberated} deliberated, ${result.promoted} promoted`);
       } catch (error) {
         console.error("   ❌ Initial issue detection failed:", error);
       }
@@ -2793,8 +2812,10 @@ httpServer.listen(PORT, () => {
     // Periodic detection
     everyInterval("Auto-detection", ISSUE_DETECT_INTERVAL, async () => {
       const result = await detectAndSaveIssues();
-      if (result.saved > 0) {
-        console.log(`🔍 Detected ${result.detected} issues, saved ${result.saved} new, ${result.deliberated} deliberated, ${result.promoted} promoted at ${new Date().toLocaleTimeString()}`);
+      // Only speak when something actually changed. Gating on `saved` meant a
+      // line every cycle for escalations that the priority floor then dropped.
+      if (result.inserted > 0 || result.deliberated > 0) {
+        console.log(`🔍 Detected ${result.detected} issues, ${result.inserted} new, ${result.escalations} escalated, ${result.deliberated} deliberated, ${result.promoted} promoted at ${new Date().toLocaleTimeString()}`);
       }
     });
   }

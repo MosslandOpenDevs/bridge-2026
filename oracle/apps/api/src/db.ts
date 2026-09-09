@@ -18,6 +18,22 @@ if (!fs.existsSync(dataDir)) {
 const db: SqliteDatabase = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 
+// Reclaim the write-ahead log at startup. SQLite reuses the WAL file rather
+// than shrinking it, and nothing here ever asked it to, so the file only grows:
+// production reached 145MB against a 355MB database, all of it already
+// checkpointed and none of it reachable again. TRUNCATE is the only checkpoint
+// mode that returns the space.
+//
+// Safe here and nowhere else: this runs before the process accepts traffic, so
+// there is no reader to block and no writer to starve the checkpoint. Measured
+// on the production copy -- 6ms, 145MB -> 0, all 943,206 rows intact.
+try {
+  db.pragma("wal_checkpoint(TRUNCATE)");
+} catch (error) {
+  // Never fatal. A WAL that could not be reclaimed costs disk, not data.
+  console.warn("⚠️  WAL checkpoint at startup failed (continuing):", error);
+}
+
 // Create tables
 db.exec(`
   -- Signals table
@@ -41,6 +57,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp DESC);
   CREATE INDEX IF NOT EXISTS idx_signals_category ON signals(category);
   CREATE INDEX IF NOT EXISTS idx_signals_severity ON signals(severity);
+  -- Indexes over the synthetic column are NOT here: it is added by the ALTER
+  -- TABLE migrations below, so on a database predating it such a statement
+  -- would run first and abort startup with "no such column: synthetic".
+  -- They are created after those migrations instead.
 
   -- Issues table
   CREATE TABLE IF NOT EXISTS issues (
@@ -424,6 +444,35 @@ db.exec(`
 db.exec(
   `CREATE INDEX IF NOT EXISTS idx_issues_fingerprint ON issues(fingerprint, status)`,
 );
+
+// Indexes over signals.synthetic. They live here, after the ALTER TABLE
+// migrations, because the column does not exist on a database created before
+// the marker was introduced -- creating them alongside the other signals
+// indexes aborted startup with "no such column: synthetic".
+//
+// Two, not one, and both are needed:
+//
+//   (synthetic, category)  covers the two GROUP BYs behind /api/stats. Each was
+//                          a full scan of the table; better-sqlite3 is
+//                          synchronous, so the ~0.9s they took on 942k rows
+//                          blocked the event loop and every request in flight
+//                          waited it out. The dashboard polls /api/stats every
+//                          30s per open tab. 414ms + 411ms -> 14ms + 7ms.
+//
+//   (synthetic, timestamp) is what /health's "newest observed signal" reads.
+//                          That query used idx_signals_timestamp and stopped at
+//                          the first matching row; adding only the index above
+//                          made the planner prefer it and then sort every
+//                          observed row in a temp b-tree -- 0.01ms -> 184ms on
+//                          628k observed rows, on the endpoint the uptime
+//                          registry polls. With this one it is a covering
+//                          index scan again: 0.01ms.
+//
+// Measured on a 942k-row database shaped like production.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_signals_synthetic_category ON signals(synthetic, category);
+  CREATE INDEX IF NOT EXISTS idx_signals_synthetic_timestamp ON signals(synthetic, timestamp DESC);
+`);
 
 console.log(`📦 Database initialized at ${DB_PATH}`);
 

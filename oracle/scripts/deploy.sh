@@ -656,23 +656,34 @@ deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED} infra=${INFRA_CHANGED})"
   # -------------------------------------------------------------------------
 
   # Pre-deploy snapshot of the SQLite DB (non-fatal): a restore point from
-  # immediately before this change. Uses sqlite3's online .backup when
-  # available. Retries of a commit that already failed do NOT snapshot again:
-  # the copy from the first attempt is the meaningful restore point, and one
-  # more copy per retry tick would rotate the pre-incident snapshots out
-  # within ~25 minutes. Rotation also always spares the snapshot recorded by
-  # the last successful deploy (see record_success).
+  # immediately before this change. Retries of a commit that already failed do
+  # NOT snapshot again: the copy from the first attempt is the meaningful
+  # restore point, and one more copy per retry tick would rotate the
+  # pre-incident snapshots out within ~25 minutes. Rotation also always spares
+  # the snapshot recorded by the last successful deploy (see record_success).
+  #
+  # Taken with apps/api/scripts/db-snapshot.cjs (better-sqlite3, VACUUM INTO),
+  # not the sqlite3 CLI. The CLI is not installed on the app server, and it used
+  # to be tested as part of this `if` -- so the snapshot was skipped without a
+  # word and had never run once: no backup directory, and nothing in the log to
+  # say so. Whether a snapshot happened is now always stated.
   DB_FILE="${APP_ROOT}/apps/api/data/oracle.db"
   BACKUP_DIR="${APP_ROOT}/apps/api/data/backup"
+  SNAPSHOT_JS="${APP_ROOT}/apps/api/scripts/db-snapshot.cjs"
   SNAP_TAKEN=""
-  if [ "${API_CHANGED}" = "1" ] && [ -f "${DB_FILE}" ] && command -v sqlite3 >/dev/null 2>&1; then
+  if [ "${API_CHANGED}" = "1" ] && [ -f "${DB_FILE}" ]; then
     if [ "${FAILED_COUNT}" -gt 0 ]; then
       log "skipping DB snapshot (retry of ${TARGET:0:8} -- keeping pre-incident restore points)"
+    elif [ ! -f "${SNAPSHOT_JS}" ]; then
+      # Deploying a commit from before the script existed. Say so; the deploy
+      # is still safe to run, it just has no restore point.
+      log "WARN no DB snapshot: ${SNAPSHOT_JS#"${REPO_ROOT}/"} not in this commit (continuing)"
     else
       mkdir -p "${BACKUP_DIR}"
       SNAP_FILE="${BACKUP_DIR}/pre-deploy-$(date +%Y%m%d-%H%M%S).db"
-      if sqlite3 "${DB_FILE}" ".backup '${SNAP_FILE}'" 2>/dev/null; then
-        log "pre-deploy DB snapshot written to apps/api/data/backup/"
+      SNAP_ERR=$(cd "${APP_ROOT}/apps/api" && node "${SNAPSHOT_JS}" "${DB_FILE}" "${SNAP_FILE}" 2>&1) && SNAP_OK=1 || SNAP_OK=0
+      if [ "${SNAP_OK}" = "1" ] && [ -f "${SNAP_FILE}" ]; then
+        log "pre-deploy DB snapshot written to apps/api/data/backup/ ($(du -h "${SNAP_FILE}" 2>/dev/null | cut -f1))"
         SNAP_TAKEN="${SNAP_FILE}"
         KEEP=$(cat "${BACKUP_DIR}/.last-success-snapshot" 2>/dev/null || true)
         # shellcheck disable=SC2012  # names are our own timestamped pattern
@@ -680,7 +691,9 @@ deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED} infra=${INFRA_CHANGED})"
           | { if [ -n "${KEEP}" ]; then grep -vxF "${KEEP}"; else cat; fi; } \
           | tail -n +6 | xargs -r rm -f || true
       else
-        log "WARN pre-deploy DB snapshot failed (continuing)"
+        # A half-written file would masquerade as a restore point.
+        rm -f "${SNAP_FILE}"
+        log "WARN pre-deploy DB snapshot failed (continuing): ${SNAP_ERR%%$'\n'*}"
       fi
     fi
   fi
