@@ -392,6 +392,69 @@ async function testSignalsAndIssues() {
   assert(Array.isArray(issues.data.issues), "list issues: should be an array");
 }
 
+/**
+ * A second detection over the same signals must report zero NEW issues.
+ *
+ * The condition is still open, so it folds into the existing row — but
+ * `savedIssues` also carries escalations, and reporting its length as "new" is
+ * what made production announce issues that were never created: an issue below
+ * AUTO_DELIBERATE_MIN_PRIORITY re-escalates on every pass, so the log said
+ * "saved 2 new" every five minutes while the newest row was three weeks old.
+ *
+ * Asserted on `inserted`, the count of rows that did not exist. Reverting the
+ * fix fails this: `saved` is 1 on the second pass, not 0.
+ */
+async function testDetectionCountsOnlyNewRows() {
+  const category = "dedupe_probe";
+  const ids: string[] = [];
+  const seed = (db: InstanceType<typeof Database>) => {
+    const insert = db.prepare(
+      `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic)
+       VALUES (?, ?, 'dedupe-probe', ?, ?, 'high', ?, 'n/a', 'probe', 0)`,
+    );
+    // A flat baseline plus one far outlier: a z-score the anomaly detector
+    // cannot miss, so the first pass is guaranteed to create a row.
+    for (let i = 0; i < 12; i++) {
+      const id = `dp-${i}`;
+      ids.push(id);
+      const at = new Date(Date.now() - (12 - i) * 1000).toISOString();
+      insert.run(id, id, at, category, i === 11 ? 100000 : 10);
+    }
+  };
+
+  let db = new Database(join(dataDir, "e2e.db"));
+  try {
+    seed(db);
+  } finally {
+    db.close();
+  }
+
+  try {
+    const first = await post("/api/issues/detect");
+    assertStatus(first.response, 200, "first detection");
+    assert(
+      first.data.inserted > 0,
+      `detect: the probe anomaly should create a row, got inserted=${first.data.inserted}`,
+    );
+
+    const second = await post("/api/issues/detect");
+    assertStatus(second.response, 200, "second detection");
+    assert(
+      second.data.inserted === 0,
+      `detect: re-detecting an open condition is not new, got inserted=${second.data.inserted}`,
+    );
+  } finally {
+    // Leave no trace: the Stats test asserts on category counts.
+    db = new Database(join(dataDir, "e2e.db"));
+    try {
+      db.prepare(`DELETE FROM signals WHERE category = ?`).run(category);
+      db.prepare(`DELETE FROM issues WHERE category = ?`).run(category);
+    } finally {
+      db.close();
+    }
+  }
+}
+
 async function testProposalValidation() {
   const packet = decisionPacket();
   const proposer = voterAddress(0xbeef);
@@ -966,6 +1029,7 @@ async function main() {
     await runTest("No success rate before anything is measured", testStatsBeforeAnyOutcome);
     await runTest("Admin endpoints require the key", testAdminAuthRequired);
     await runTest("Signals and issues", testSignalsAndIssues);
+    await runTest("Detection counts only new rows", testDetectionCountsOnlyNewRows);
     await runTest("Proposal settings are validated", testProposalValidation);
     await runTest("Voting integrity", testVotingIntegrity);
     await runTest("Proposal responses carry a tally", testProposalListIncludesTally);
