@@ -85,3 +85,56 @@ tail -f ~/bridge-2026/oracle/logs/deploy.log
 `bridge.moss.land` proxies `/api` and `/socket.io` to the app server's port
 3101 and everything else to port 3100. The API's health endpoint is exposed at
 `/api/health` for external uptime monitoring.
+
+Two known gaps, both in nginx rather than in this repo:
+
+- **No `listen 80` block**, so `http://bridge.moss.land` returns nginx's default
+  404 instead of redirecting. Every other vhost on that box has one. HSTS
+  (`preload`) covers anyone who has already visited over https; a first-time
+  visitor typing the bare host does not get redirected.
+- **API responses are not compressed.** `gzip on` is set globally but
+  `gzip_types` and `gzip_proxied` are commented out in `nginx.conf`, and the
+  defaults cover neither `application/json` nor proxied responses — so
+  `GET /api/proposals` ships 3.36MB uncompressed (873KB gzipped). Fixing it in
+  the API instead was tried and rejected: adding the `compression` package makes
+  pnpm re-resolve peers across the workspace, moving `ws` 7→8 and `zod` 4→3 in
+  the wallet stack, which is not a trade worth making for one endpoint. It also
+  spends event-loop time this process does not have (see the /api/stats note in
+  `db.ts`). Scoped to the bridge server block so the other ~20 sites on that box
+  are untouched:
+
+  ```nginx
+  gzip_proxied any;
+  gzip_types application/json;
+  gzip_min_length 1024;
+  ```
+
+  Apply with `sudo nginx -t && sudo systemctl reload nginx`.
+
+## Governance loop: issues have to be closed
+
+Detection folds a repeat sighting into the open issue for the same condition and
+only re-deliberates on an escalation — the loop is designed to stay quiet while
+a condition persists, and to treat it as news again once the issue is
+**resolved** (see `findOpenByFingerprint` in `apps/api/src/db.ts`).
+
+Nothing in production ever resolves one. There is no scheduled job for it, and
+the only writer of that status is the admin-gated route below. The result, as of
+2026-09-09: 753 issues all in `detected`, one new issue row since 2026-08-08 and
+one new proposal since 2026-08-14, while recurrence folding runs about a
+thousand times a day. Signal collection is unaffected and healthy.
+
+To re-arm detection for a condition:
+
+```bash
+curl -X PATCH https://bridge.moss.land/api/issues/<id> \
+  -H "x-admin-api-key: $ADMIN_API_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"status":"resolved"}'
+```
+
+The next detection pass then mints a fresh row for that condition and
+deliberates it. **This re-opens recurring LLM spend** — five calls per
+deliberation — which is what the fingerprint dedupe was written to stop. Decide
+the policy before reaching for it; `GET /api/llm/usage` (admin) is how to see
+what it actually costs, rather than estimating.
