@@ -561,6 +561,10 @@ const healthHandler = (req: express.Request, res: express.Response) => {
 
   res.json({
     status: "ok",
+    // The registry id from ecosystem-registry.json, not the display name
+    // "BRIDGE" — a collector polling several services keys off this to
+    // attribute the payload.
+    service: "bridge",
     version: "0.1.0",
     timestamp: new Date().toISOString(),
     lastObservedSignalAt,

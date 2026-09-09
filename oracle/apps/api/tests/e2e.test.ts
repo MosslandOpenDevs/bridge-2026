@@ -281,6 +281,15 @@ async function testHealthCheck() {
   assertStatus(response, 200, "health");
   assert(data.status === "ok", "health: status should be ok");
   assert(typeof data.version === "string", "health: version should be a string");
+  // The ecosystem health contract's three required fields. `service` is the
+  // registry id, so a collector can attribute the payload; `timestamp` is when
+  // this response was produced, which is what makes a repeated poll tell you
+  // the process is still answering.
+  assert(data.service === "bridge", "health: service should be the registry id 'bridge'");
+  assert(
+    typeof data.timestamp === "string" && !Number.isNaN(Date.parse(data.timestamp)),
+    "health: timestamp should be an RFC 3339 instant",
+  );
   // null is "unknown", never "just now" — callers must be able to tell.
   assert(
     data.lastObservedSignalAt === null || typeof data.lastObservedSignalAt === "string",
