@@ -529,11 +529,36 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
 
 // Health check
 // Registered under /api as well, since nginx only proxies /api/* to this app
+//
+// `lastSignalAt` is what makes this answer "is the pipeline running?" rather
+// than just "is the web process up?". `timestamp` is our own clock, so it ticks
+// forward even when ingestion has been dead for days; `/api/stats` only has
+// cumulative totals, which likewise never fall. This endpoint is listed in the
+// links.moss.land registry as this service's status endpoint, and the 2026 Q2
+// report named exactly this gap: "cumulative figures alone cannot establish
+// whether a pipeline is running."
+//
+// Never throws: a health check that 500s on a bad DB read is worse than one
+// that reports what it does know. `lastSignalAt` is null when unknown — callers
+// must not read null as "just now".
 const healthHandler = (req: express.Request, res: express.Response) => {
+  let lastSignalAt: string | null = null;
+  try {
+    const [latest] = signalDb.getRecent.all(1).map(deserializeSignal);
+    // deserializeSignal gives a Date; serialise it explicitly rather than
+    // leaning on res.json, and drop an unparseable row instead of emitting
+    // "Invalid Date".
+    const at = latest?.timestamp;
+    lastSignalAt = at instanceof Date && !Number.isNaN(at.getTime()) ? at.toISOString() : null;
+  } catch (error) {
+    console.error("health: could not read the latest signal timestamp:", error);
+  }
+
   res.json({
     status: "ok",
     version: "0.1.0",
     timestamp: new Date().toISOString(),
+    lastSignalAt,
   });
 };
 app.get("/health", healthHandler);
