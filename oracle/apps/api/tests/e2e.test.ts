@@ -281,6 +281,58 @@ async function testHealthCheck() {
   assertStatus(response, 200, "health");
   assert(data.status === "ok", "health: status should be ok");
   assert(typeof data.version === "string", "health: version should be a string");
+  // null is "unknown", never "just now" — callers must be able to tell.
+  assert(
+    data.lastObservedSignalAt === null || typeof data.lastObservedSignalAt === "string",
+    "health: lastObservedSignalAt should be an ISO string or null",
+  );
+}
+
+/**
+ * The failure this field exists to catch: real collection dies, the demo
+ * adapter keeps writing, and every other health field stays put. `status` is
+ * always "ok", `timestamp` is our own clock, and /api/stats only has
+ * cumulative totals that never fall — so if `lastObservedSignalAt` counted
+ * synthetic rows too, a dead pipeline would look perfectly healthy.
+ *
+ * Roughly a third of stored signals are synthetic in production, so this is
+ * not a hypothetical.
+ */
+async function testHealthIgnoresSyntheticSignals() {
+  const seed = (db: InstanceType<typeof Database>) => {
+    const insert = db.prepare(
+      `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic)
+       VALUES (?, ?, 'health-probe', ?, ?, 'low', 0, 'n/a', ?, ?)`,
+    );
+    // Observed signal a week old; synthetic signal from today.
+    insert.run("hp-obs", "hp-obs", "2026-09-01T00:00:00.000Z", "health_probe_obs", "observed", 0);
+    insert.run("hp-syn", "hp-syn", "2026-09-09T00:00:00.000Z", "health_probe_syn", "demo", 1);
+  };
+
+  let db = new Database(join(dataDir, "e2e.db"));
+  try {
+    seed(db);
+  } finally {
+    db.close();
+  }
+
+  try {
+    const { response, data } = await get("/health");
+    assertStatus(response, 200, "health with a newer synthetic signal");
+    assert(
+      data.lastObservedSignalAt === "2026-09-01T00:00:00.000Z",
+      `health: lastObservedSignalAt should ignore synthetic rows, got ${data.lastObservedSignalAt}`,
+    );
+  } finally {
+    // Leave no trace: later tests assert on category counts, and these probe
+    // rows would otherwise show up there as real signal categories.
+    db = new Database(join(dataDir, "e2e.db"));
+    try {
+      db.prepare("DELETE FROM signals WHERE id IN ('hp-obs', 'hp-syn')").run();
+    } finally {
+      db.close();
+    }
+  }
 }
 
 /**
@@ -910,6 +962,7 @@ async function main() {
 
   try {
     await runTest("Health check", testHealthCheck);
+    await runTest("Health ignores synthetic signals", testHealthIgnoresSyntheticSignals);
     await runTest("No success rate before anything is measured", testStatsBeforeAnyOutcome);
     await runTest("Admin endpoints require the key", testAdminAuthRequired);
     await runTest("Signals and issues", testSignalsAndIssues);

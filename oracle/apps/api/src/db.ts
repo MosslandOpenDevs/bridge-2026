@@ -482,6 +482,13 @@ export const signalDb = {
     SELECT * FROM signals WHERE category = ? ORDER BY timestamp DESC LIMIT ?
   `),
 
+  /** Newest *observed* signal time. Excludes the demo adapter on purpose:
+   *  synthetic rows keep arriving when real collection is dead, so including
+   *  them makes a stalled pipeline look healthy. Used by /health. */
+  getLatestObservedTimestamp: db.prepare(`
+    SELECT timestamp FROM signals WHERE synthetic = 0 ORDER BY timestamp DESC LIMIT 1
+  `),
+
   counts: db.prepare(`
     SELECT
       COUNT(*) FILTER (WHERE synthetic = 0) as observed,
