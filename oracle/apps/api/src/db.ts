@@ -18,6 +18,22 @@ if (!fs.existsSync(dataDir)) {
 const db: SqliteDatabase = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 
+// Reclaim the write-ahead log at startup. SQLite reuses the WAL file rather
+// than shrinking it, and nothing here ever asked it to, so the file only grows:
+// production reached 145MB against a 355MB database, all of it already
+// checkpointed and none of it reachable again. TRUNCATE is the only checkpoint
+// mode that returns the space.
+//
+// Safe here and nowhere else: this runs before the process accepts traffic, so
+// there is no reader to block and no writer to starve the checkpoint. Measured
+// on the production copy -- 6ms, 145MB -> 0, all 943,206 rows intact.
+try {
+  db.pragma("wal_checkpoint(TRUNCATE)");
+} catch (error) {
+  // Never fatal. A WAL that could not be reclaimed costs disk, not data.
+  console.warn("⚠️  WAL checkpoint at startup failed (continuing):", error);
+}
+
 // Create tables
 db.exec(`
   -- Signals table
