@@ -1,18 +1,17 @@
 # BRIDGE 2026
 
+<!-- opendevs-badges:start -->
+[![Lifecycle: Lab](https://img.shields.io/badge/Lifecycle-Lab-eab308?style=flat)](https://links.moss.land/ecosystem-registry.json)
+[![CI](https://github.com/MosslandOpenDevs/bridge-2026/actions/workflows/ci.yml/badge.svg)](https://github.com/MosslandOpenDevs/bridge-2026/actions/workflows/ci.yml)
+[![Website: bridge.moss.land](https://img.shields.io/badge/Website-bridge.moss.land-2563eb?style=flat)](https://bridge.moss.land/)
+[![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-64748b?style=flat)](https://github.com/MosslandOpenDevs/bridge-2026/blob/main/LICENSE)
+<!-- opendevs-badges:end -->
+
 > **Status of this repository:** **`Lifecycle: Lab`** (실험, best-effort) — per [MIP-1](https://agora.moss.land/proposals/6a85129f8be190cf5d2ebcc1), ratified 2026-09-02, and the [links.moss.land registry](https://links.moss.land/ecosystem-registry.json) entry `bridge`. May change or stop without notice.
 
 > **Where agents propose, people decide, reality updates.**
 
-### 🟢 Live: [bridge.moss.land](https://bridge.moss.land)
-
-<p>
-  <img alt="Status" src="https://img.shields.io/badge/status-live%20MVP%20%2B%20spec-16a34a" />
-  <img alt="License" src="https://img.shields.io/badge/license-BUSL--1.1-052e16" />
-  <img alt="Next.js" src="https://img.shields.io/badge/Next.js-14-black" />
-  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178c6" />
-  <a href="https://bridge.moss.land"><img alt="Live" src="https://img.shields.io/badge/live-bridge.moss.land-22c55e" /></a>
-</p>
+### MVP: [bridge.moss.land](https://bridge.moss.land)
 
 **BRIDGE 2026** is a **Physical AI governance OS** where **reality signals become proposals**, **agents reach consensus**, **humans decide**, **execution happens atomically**, and **outcomes are proven on-chain**.
 
