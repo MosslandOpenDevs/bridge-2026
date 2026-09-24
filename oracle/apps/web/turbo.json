@@ -1,0 +1,15 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "build": {
+      // The root's dist/** matches nothing `next build` writes, so a cache hit
+      // restored nothing and left whatever .next was on disk, stale or absent.
+      "outputs": [".next/**", "!.next/cache/**", "!.next/dev/**"],
+      // Next bakes NEXT_PUBLIC_* from .env* files in at build time, but those
+      // files are gitignored and so left out of the default inputs: editing
+      // one alone was a cache hit. Listing them explicitly brings them back.
+      "inputs": ["$TURBO_DEFAULT$", ".env*"]
+    }
+  }
+}
