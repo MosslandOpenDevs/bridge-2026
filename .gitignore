@@ -39,6 +39,8 @@ dmypy.json
 .env.*.local
 *.env
 .envrc
+.env.*
+!.env.example
 
 # IDE
 .vscode/
