@@ -551,6 +551,9 @@ async function testHealthWhileIngestionStalls() {
   const lastObserved = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const setUp = (db: InstanceType<typeof Database>) => {
     db.prepare("DELETE FROM signals WHERE synthetic = 0").run();
+    // Earlier passes recorded when they last observed; a day-old signal is
+    // only the last observation once that record is gone too.
+    db.prepare("DELETE FROM collector_state").run();
     db.prepare(
       `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic)
        VALUES ('stall-obs', 'stall-obs', 'health-probe', ?, 'health_probe_obs', 'low', 0, 'n/a', 'observed', 0)`,
@@ -721,6 +724,9 @@ async function testSignalChangeFilterRule() {
     `writes: the new stream, then the synthetic row with no stream, got ${plan1.writes.map((w) => w.stream)}`,
   );
   assert(plan1.observedAt === at(1).toISOString(), "observedAt: newest observed reading, synthetic ignored");
+  assert(plan1.lastObservedAt === at(1).toISOString(), "lastObservedAt: what to record once the pass commits");
+  const demoOnly = filter.plan([reading("token_price", 1, "demo", 1, { synthetic: true })], streamOf);
+  assert(demoOnly.lastObservedAt === null, "a pass that observed nothing records no observation");
 
   // The write failed: nothing is learned, and the next pass stores it again.
   const retry = filter.plan(pass1, streamOf);
@@ -815,10 +821,16 @@ async function testUnchangedSignalsAreNotStored() {
     return result.data;
   };
 
+  // No demo adapter: its rows are written on every pass, so with it on no
+  // pass is ever one with nothing to store, and the locked-database step
+  // below would fail on the demo insert whether or not an unchanged pass
+  // still writes.
+  const env = { MOSSLAND_API_URL: stubUrl, ENABLE_MOCK_SIGNALS: "0" };
+
   stopServer(true);
   await sleep(500);
   try {
-    await startServer({ MOSSLAND_API_URL: stubUrl });
+    await startServer(env);
 
     await collect("first collection");
     const first = ours();
@@ -851,6 +863,30 @@ async function testUnchangedSignalsAreNotStored() {
       "health: freshness should move past the newest stored disclosure row",
     );
 
+    // A database that refuses writes has to fail a pass with nothing to store
+    // as well, or health reports it fresh until some stream happens to move.
+    // Holding the write lock from here is such a database whatever table the
+    // pass touches: an unchanged pass used to commit an empty transaction,
+    // which takes no lock, and advanced lastObservedSignalAt regardless.
+    const observedBeforeLock = health.data.lastObservedSignalAt;
+    const locker = new Database(dbPath);
+    try {
+      locker.exec("BEGIN IMMEDIATE");
+      const blocked = await post("/api/signals/collect");
+      assert(
+        blocked.response.status === 500,
+        `locked database: an unchanged pass should fail, got ${blocked.response.status}`,
+      );
+    } finally {
+      if (locker.inTransaction) locker.exec("ROLLBACK");
+      locker.close();
+    }
+    const afterLock = await get("/api/health");
+    assert(
+      afterLock.data.lastObservedSignalAt === observedBeforeLock,
+      `locked database: a pass that could not write is not an observation, got ${afterLock.data.lastObservedSignalAt}`,
+    );
+
     disclosures = [
       { title: "E2E disclosure D", date: "2026-09-04", url: "https://example.invalid/d" },
       ...disclosures,
@@ -868,7 +904,7 @@ async function testUnchangedSignalsAreNotStored() {
     // new again. The filter, seeded from the database, knows it is stored.
     stopServer(true);
     await sleep(500);
-    await startServer({ MOSSLAND_API_URL: stubUrl });
+    await startServer(env);
     const afterRestart = await collect("collection after a restart");
     assert(
       afterRestart.signals.some(

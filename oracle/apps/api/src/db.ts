@@ -261,6 +261,18 @@ db.exec(`
     recorded_at TEXT NOT NULL,
     PRIMARY KEY (entity_id, proof_id)
   );
+
+  -- One row: when a collection pass last returned an observed reading, stored
+  -- or not. Written in the same transaction as that pass's signal rows, so a
+  -- pass that changed nothing still has to write something, and a database
+  -- that refuses writes fails every pass instead of only the ones with a
+  -- change. Also what the change filter's freshness is seeded from at boot,
+  -- since the newest signal row now dates the last change. See
+  -- signal-dedupe.ts.
+  CREATE TABLE IF NOT EXISTS collector_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_observed_at TEXT NOT NULL
+  );
 `);
 
 // Columns added after their table shipped. SQLite has no
@@ -546,6 +558,18 @@ export const signalDb = {
   latestInStream: db.prepare(`
     SELECT stream, value, description, severity FROM signals
     WHERE stream = ? ORDER BY timestamp DESC LIMIT 1
+  `),
+
+  /** When a pass last observed the world; null row before the first one. */
+  getLastObservedAt: db.prepare(`
+    SELECT last_observed_at FROM collector_state WHERE id = 1
+  `),
+
+  /** Unconditional on purpose: a no-op write would not prove the database
+   *  still takes writes. */
+  setLastObservedAt: db.prepare(`
+    INSERT INTO collector_state (id, last_observed_at) VALUES (1, ?)
+    ON CONFLICT(id) DO UPDATE SET last_observed_at = excluded.last_observed_at
   `),
 
   getById: db.prepare(`SELECT * FROM signals WHERE id = ?`),

@@ -2407,8 +2407,16 @@ const signalChanges = (() => {
         severity: string;
       },
   );
+  // The recorded last observation, or the newest observed row for a database
+  // that predates it. The row alone would date the last change, and a boot
+  // after a quiet stretch would start out reporting that as the last time the
+  // world was seen.
   const latest = signalDb.getLatestObservedTimestamp.get() as { timestamp?: string } | undefined;
-  const filter = new SignalChangeFilter(seed, latest?.timestamp ?? null);
+  const recorded = signalDb.getLastObservedAt.get() as { last_observed_at?: string } | undefined;
+  const filter = new SignalChangeFilter(
+    seed,
+    laterTimestamp(recorded?.last_observed_at, latest?.timestamp),
+  );
   console.log(
     `🧮 Signal change filter: ${filter.streamCount} stream(s) seeded in ` +
       `${(performance.now() - started).toFixed(1)}ms`,
@@ -2427,6 +2435,12 @@ const signalChanges = (() => {
  * commits: a pass that cannot write leaves the filter as it was and does not
  * count as an observation, so /api/health goes stale on a database that
  * refuses writes instead of reporting the readings it dropped as seen.
+ *
+ * The transaction always records the observation time as well, even when no
+ * reading changed. Otherwise a pass with nothing to store would commit an
+ * empty transaction — which succeeds on a read-only or locked database — and
+ * health would keep saying "ok" until some stream happened to move, up to
+ * ~2.5 h on the production series instead of staleAfter.
  */
 async function collectAndSaveSignals() {
   const signals = await signalRegistry.collectSignals();
@@ -2438,6 +2452,7 @@ async function collectAndSaveSignals() {
     for (const { signal, stream } of plan.writes) {
       signalDb.insert.run({ ...serializeSignal(signal), stream });
     }
+    if (plan.lastObservedAt) signalDb.setLastObservedAt.run(plan.lastObservedAt);
   });
   signalChanges.commit(plan);
 

@@ -96,6 +96,12 @@ export interface SignalWritePlan<T extends CollectedSignal> {
   synthetic: number;
   /** Newest observed reading in the pass, stored or skipped. */
   observedAt: string | null;
+  /**
+   * What to persist as the last observation, in the same transaction as
+   * `writes`: the filter's freshness as it will be once this pass commits.
+   * Null when the pass observed nothing, which must not look like freshness.
+   */
+  lastObservedAt: string | null;
   updates: Map<string, Reading>;
 }
 
@@ -173,7 +179,8 @@ export class SignalChangeFilter {
       stored++;
     }
 
-    return { writes, stored, skipped, synthetic, observedAt, updates };
+    const lastObservedAt = observedAt ? laterTimestamp(this.observedAt, observedAt) : null;
+    return { writes, stored, skipped, synthetic, observedAt, lastObservedAt, updates };
   }
 
   /** Call once the plan's writes are committed. */
