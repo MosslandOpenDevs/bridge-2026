@@ -1294,7 +1294,7 @@ async function resolveVotingWeight(
   return balance;
 }
 
-app.post("/api/proposals/:id/vote", async (req, res) => {
+app.post("/api/proposals/:id/vote", requireVotingEnabled, async (req, res) => {
   try {
     const { voter, choice, weight, reason, signature, nonce, timestamp } = req.body;
     if (!voter || !choice) {
@@ -1960,7 +1960,7 @@ const createDelegationSchema = z
   })
   .strict();
 
-app.post("/api/delegations", async (req, res) => {
+app.post("/api/delegations", requireVotingEnabled, async (req, res) => {
   try {
     const parsed = createDelegationSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -2077,7 +2077,7 @@ app.get("/api/delegations/:id", (req, res) => {
   }
 });
 
-app.delete("/api/delegations/:id", async (req, res) => {
+app.delete("/api/delegations/:id", requireVotingEnabled, async (req, res) => {
   try {
     const policy = delegationManager.getPolicy(req.params.id);
     if (!policy) {
@@ -2385,6 +2385,39 @@ const AUTO_FINALIZE_INTERVAL = envInt("AUTO_FINALIZE_INTERVAL", 60);
 const AUTO_PROPOSAL_ENABLED = envFlag("AUTO_PROPOSAL_ENABLED", false);
 const AUTO_PROPOSAL_THRESHOLD = parseFloat(process.env.AUTO_PROPOSAL_THRESHOLD || "0.7");
 const AUTO_PROPOSAL_PROPOSER = process.env.AUTO_PROPOSAL_PROPOSER || "auto-system";
+
+// BRIDGE's own voting and delegation are off unless VOTING_ENABLED=1.
+//
+// Mossland DAO decides on Agora (agora.moss.land), and BRIDGE's proposals are
+// non-binding. In production no vote and no delegation was ever recorded here:
+// only two vote requests ever arrived, both refused, and snapshot-weighted
+// voting needs historical balances the free non-archive RPC cannot serve, so a
+// holder who tried could not have been counted anyway. Offering a vote nobody
+// can complete only suggests these proposals are decided here.
+//
+// Off means writes answer 410 Gone and point at Agora; reads keep serving the
+// (empty) history, and admin proposal creation and auto-finalize are untouched.
+// The voting code stays behind the flag, and the e2e suite keeps running it
+// with the flag on, until the 2026-11-20 review decides whether to delete it.
+const VOTING_ENABLED = envFlag("VOTING_ENABLED", false);
+const AGORA_URL = "https://agora.moss.land";
+
+/**
+ * Refuse a vote or delegation write while voting is off. A function
+ * declaration so the routes registered above this point can name it.
+ */
+function requireVotingEnabled(
+  _req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+) {
+  if (VOTING_ENABLED) return next();
+  res.status(410).json({
+    error: "Voting and delegation on BRIDGE are closed. Mossland DAO votes on Agora.",
+    code: "VOTING_MOVED_TO_AGORA",
+    agoraUrl: AGORA_URL,
+  });
+}
 
 // Helper function for background signal collection
 async function collectAndSaveSignals() {
@@ -2943,6 +2976,12 @@ httpServer.listen(PORT, () => {
     console.log(`📝 Auto proposal promotion: ENABLED (consensus ≥ ${AUTO_PROPOSAL_THRESHOLD}, proposer ${AUTO_PROPOSAL_PROPOSER})`);
   } else {
     console.log(`📝 Auto proposal promotion: DISABLED (set AUTO_PROPOSAL_ENABLED=1 to enable)`);
+  }
+
+  if (VOTING_ENABLED) {
+    console.log(`🗳️  Voting and delegation: ENABLED`);
+  } else {
+    console.log(`🗳️  Voting and delegation: DISABLED — writes answer 410 and point to ${AGORA_URL} (set VOTING_ENABLED=1 to enable)`);
   }
 
   if (OUTCOME_EVAL_ENABLED && OUTCOME_EVAL_INTERVAL > 0) {
