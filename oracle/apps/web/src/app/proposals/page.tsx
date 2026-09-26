@@ -33,6 +33,16 @@ function displayStatus(proposal: ProposalListItem): DisplayStatus {
   return proposal.status;
 }
 
+/**
+ * The `status` to ask the API for, given the status filter picked on the page.
+ * "expired" has none: it covers stored "expired" rows and legacy no-quorum
+ * "rejected" ones, which one status param cannot select together, so that
+ * filter fetches every status and displayStatus() sorts it out.
+ */
+function serverStatusFilter(filter: string): string | undefined {
+  return filter === "active" || filter === "passed" || filter === "rejected" ? filter : undefined;
+}
+
 /** Whether an active proposal can still take votes; the API refuses them after votingEndsAt. */
 function isOpenForVoting(proposal: ProposalListItem, now: number): boolean {
   return proposal.status === "active" && new Date(proposal.votingEndsAt).getTime() > now;
@@ -264,20 +274,33 @@ export default function ProposalsPage() {
   const [votingProposal, setVotingProposal] = useState<any>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // One request for everything, filtered here: the status filter works on the
-  // displayed status (a legacy no-quorum "rejected" belongs under "expired"),
-  // and the toggle needs the number of demo proposals it is hiding.
+  // The server does the filtering. Unfiltered, this poll pulled every row
+  // (3.36MB uncompressed in production, mostly demo data the page then hid)
+  // every 30s, and the API tallied each one. Only the legacy remap stays
+  // client-side, below.
   const { data, isLoading } = useQuery({
-    queryKey: ["proposals"],
-    queryFn: () => api.getProposals(),
+    queryKey: ["proposals", { filter, showSynthetic }],
+    queryFn: () =>
+      api.getProposals({
+        status: serverStatusFilter(filter),
+        synthetic: showSynthetic ? "include" : "exclude",
+      }),
     refetchInterval: 30000,
+  });
+
+  // With demo rows excluded server-side, how many were left out comes from
+  // /api/stats, which splits its proposal totals on the same query the list
+  // filters on. Same key as the dashboard, so it shares that cache.
+  const { data: stats } = useQuery({
+    queryKey: ["stats"],
+    queryFn: () => api.getStats(),
+    refetchInterval: 60000,
+    enabled: !showSynthetic,
   });
 
   const now = Date.now();
   const allProposals = data?.proposals ?? [];
-  const hiddenSyntheticCount = showSynthetic
-    ? 0
-    : allProposals.filter((p) => p.synthetic).length;
+  const hiddenSyntheticCount = showSynthetic ? 0 : (stats?.proposals.synthetic.total ?? 0);
   const proposals = allProposals
     .filter((p) => showSynthetic || !p.synthetic)
     .filter((p) => filter === "all" || displayStatus(p) === filter)

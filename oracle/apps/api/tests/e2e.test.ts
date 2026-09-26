@@ -735,6 +735,15 @@ async function testProposalListMarksSynthetic() {
   const included = await list("?synthetic=include");
   assert(included.length === all.length, "synthetic=include should be the default");
 
+  // The proposals page filters on both at once, so they must combine.
+  const activeObserved = await list("?status=active&synthetic=exclude");
+  assert(
+    activeObserved.every((p) => p.synthetic === false) &&
+      ids(activeObserved).has(observedId) &&
+      !ids(activeObserved).has(syntheticId),
+    "status and synthetic filters should apply together",
+  );
+
   const stats = await get("/api/stats");
   assertStatus(stats.response, 200, "stats");
   assert(
