@@ -70,9 +70,16 @@ onto every app):
 ```bash
 cd ~/bridge-2026/oracle
 pnpm --filter "@oracle/api..." build   # oracle-api runs apps/api/dist
-pm2 restart ecosystem.config.cjs --update-env
+pm2 restart ecosystem.config.cjs --only oracle-api,oracle-web,bridge-deploy --update-env
 pm2 save
 ```
+
+Always name the apps with `--only` (add `bridge-db-backup` once it is
+enabled): given the whole file, pm2 restarts the apps that are running and
+then **starts every other app in the file** ("Applications … not running,
+starting…" — `_startJson` in pm2's `lib/API.js`), which would switch on
+opt-in apps such as `bridge-db-backup` as a side effect. The command the
+deploy log's NOTE prints does not have `--only` yet; use this one.
 
 Useful invocations on the server:
 
@@ -145,11 +152,11 @@ runs `pm2 ls` shows it `stopped` — that is normal for a one-shot cron app, as
 for `bridge-deploy`.
 
 `pm2 start ecosystem.config.cjs --only oracle-api,oracle-web` (the README Quick
-start) does not register it. Commands given the whole file without `--only`
-can: pm2 starts apps from the file that are not running, so the
-`pm2 restart ecosystem.config.cjs --update-env` re-registration step above may
-switch backups on as a side effect. Add
-`--only oracle-api,oracle-web,bridge-deploy` there if that is not wanted yet.
+start) and the `--only` re-registration command above do not register it. Any
+pm2 command given the whole file **without** `--only` does — pm2 starts every
+app in the file that is not running, which takes a backup at once and
+schedules the daily one. Once it is enabled, add `bridge-db-backup` to that
+`--only` list so re-registration picks up changes to its definition.
 
 Off-host copy (optional): add to `apps/api/.env`
 
@@ -199,7 +206,10 @@ boot: backup taken while the API was running, database then damaged
 `pm2 stop`/`start` and `shasum -a 256` for `sha256sum`); afterwards
 `/api/health` was `ok`, `?strict=1` answered 200, and `/api/stats` matched the
 pre-backup numbers exactly (signals 881,519, issues 754, proposals 21).
-gunzip took 0.6s and the quick_check under a second.
+gunzip took 0.6s and the quick_check under a second. The auto-deployer pause
+in steps 2 and 6 was not part of that rehearsal (no pm2 on the test machine);
+it follows pm2's source: `pm2 stop` leaves a cron app's job registered and the
+job restarts the app, while `pm2 delete` removes it.
 
 ```bash
 cd ~/bridge-2026/oracle/apps/api
@@ -209,9 +219,16 @@ B=data/backup/daily-YYYYMMDD-HHMMSS.db.gz          # the backup to restore
 # 1. Check the file before taking anything down.
 (cd data/backup && sha256sum -c "$(basename "$B").sha256")
 
-# 2. Stop the API only -- never `pm2 stop all` on this shared box. Avoid doing
-#    this while a merge is deploying (tail logs/deploy.log): a deploy tick
-#    that changes the API restarts oracle-api.
+# 2. Pause the auto-deployer, then stop the API -- never `pm2 stop all` on
+#    this shared box. A deploy tick that changes the API runs
+#    `pm2 restart oracle-api`, and with oracle.db moved aside the API would
+#    create a fresh, empty database. `pm2 stop` does not pause a cron app
+#    (pm2 keeps its cron job and restarts it on schedule), so deregister it
+#    with `pm2 delete` -- after checking no deploy is running right now, and
+#    without `pm2 save`, so a reboot mid-restore still brings it back.
+#    bridge-db-backup can stay: it opens the database read-only and fails
+#    cleanly if the file is missing.
+if [ -d ../../logs/.deploy.lock ]; then echo "deploy running -- retry shortly"; else pm2 delete bridge-deploy; fi
 pm2 stop oracle-api
 
 # 3. Move the live database AND its -wal/-shm aside, together. A -wal left
@@ -228,12 +245,22 @@ gunzip -c "$B" > data/oracle.db.restoring          # for a .db.gz
 # 5. Check the restored file (no sqlite3 CLI on the server; this uses the
 #    API's own better-sqlite3), then put it in place. Must print: ok
 node -e 'const D=require("better-sqlite3");const d=new D(process.argv[1],{readonly:true});console.log(d.pragma("quick_check",{simple:true}));d.close()' data/oracle.db.restoring
+#    Before the mv: oracle-api must still be stopped and the only oracle.db*
+#    file must be oracle.db.restoring. If the API was started meanwhile, it
+#    has created an empty oracle.db with its own -wal/-shm: `pm2 stop
+#    oracle-api` and move those aside too (a foreign -wal next to the
+#    restored file would be replayed onto it).
+pm2 ls | grep oracle-api; ls -la data/oracle.db*
 mv data/oracle.db.restoring data/oracle.db
 
-# 6. Start it and check.
+# 6. Start it (`pm2 restart oracle-api` instead if `pm2 ls` shows it online
+#    here -- a running API would keep using the file it opened before the
+#    mv), check, then re-register the auto-deployer, which runs one tick at
+#    once.
 pm2 start oracle-api
 curl -s localhost:3101/api/health; echo
 curl -s localhost:3101/api/stats | head -c 300; echo
+(cd ../.. && pm2 start ecosystem.config.cjs --only bridge-deploy)
 ```
 
 `/api/health` may say `degraded` (no signal within the staleness window) until
