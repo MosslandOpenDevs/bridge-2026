@@ -5,6 +5,7 @@ import { getMessages, getLocale } from "next-intl/server";
 import { Providers } from "@/components/Providers";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
+import { AiContentNotice } from "@/components/AiContentNotice";
 import { ExperimentalBanner } from "@/components/ExperimentalBanner";
 import { ExperimentalWarningModal } from "@/components/ExperimentalWarningModal";
 import { NpcCityStrip } from "@/components/NpcCityStrip";
@@ -97,6 +98,9 @@ export default async function RootLayout({
               {/* NPC city cross-link — read-side fetch with 10-min
                   revalidate; renders nothing if npc.moss.land is down. */}
               <NpcCityStrip />
+              {/* Below the NPC strip on purpose: those headlines are AI
+                  output too, and the notice should cover everything above. */}
+              <AiContentNotice />
               <Footer />
             </div>
           </Providers>
