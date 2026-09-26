@@ -136,7 +136,7 @@
     "debateInProgress": "Multi-round debate in progress...",
     "selectIssue": "Select an issue to see its decision packet",
     "firstDetected": "First detected {time}",
-    "occurrences": "Seen {count, plural, one {# time} other {# times}} · last {time}",
+    "occurrences": "Seen {count, plural, one {# time} other {# times}} · last seen {time}",
     "priorityLabel": "Priority",
     "priorityHint": "Set automatically by the rule-based detector from the severity of the signals involved. Not a human assessment.",
     "priorityLevels": {

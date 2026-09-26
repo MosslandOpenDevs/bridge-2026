@@ -136,7 +136,7 @@
     "debateInProgress": "여러 라운드에 걸친 토론 진행 중...",
     "selectIssue": "이슈를 선택하면 결정 패킷을 볼 수 있습니다",
     "firstDetected": "최초 감지 {time}",
-    "occurrences": "{count, number}회 감지 · 마지막 {time}",
+    "occurrences": "{count, number}회 감지 · 마지막 감지 {time}",
     "priorityLabel": "우선순위",
     "priorityHint": "규칙 기반 탐지기가 관련 신호의 중요도로 자동 지정한 값입니다. 사람이 평가한 것이 아닙니다.",
     "priorityLevels": {
