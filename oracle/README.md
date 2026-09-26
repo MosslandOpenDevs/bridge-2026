@@ -1,12 +1,30 @@
-# BRIDGE — Physical AI Expansion
+# BRIDGE Oracle — 현실 신호 거버넌스 실험실
 
-> **"Where agents propose, people decide, reality updates."**
+> **상태 (2026-09-26):** MIP-1 `Lab` 서비스. 저장소 전체의 현황과 수치는
+> [루트 README 의 Status](../README.md#status), 단계별 표는
+> [`PROGRESS.md`](PROGRESS.md) 에 있습니다.
 
-BRIDGE는 **모스랜드(Mossland)** 의 차세대 거버넌스 프레임워크입니다. 현실 신호가 자동으로 의제화되고, AI 에이전트들이 토론/합의안을 만들며, MOC 홀더가 승인/위임으로 실행하는 **Reality Ops** 시스템입니다.
+BRIDGE 는 **모스랜드(Mossland)** 의 공개 신호를 모아 이상·추세를 이슈로 표시하는
+실험 서비스이고, 이 디렉터리가 [bridge.moss.land](https://bridge.moss.land) 에
+배포되는 코드입니다. 지금 운영에서 도는 것은 다음과 같습니다.
 
-🔗 **Live Demo**: [https://bridge.moss.land](https://bridge.moss.land)
+- **자동:** 신호 수집(60초마다: MOC 시세·시장·온체인, 모스랜드 공시·로드맵,
+  GitHub 커밋, Medium), 규칙 기반 이슈 탐지(300초마다), 마감된 제안 확정.
+- **관리자 요청 시에만:** AI 에이전트 심의·토론, 제안 생성.
+- **꺼짐:** 자동 심의·자동 제안·결과 평가([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)), BRIDGE 자체 투표·위임([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)).
+  모스랜드 DAO 의 구속력 있는 결정은 [Agora](https://agora.moss.land) 에서
+  내려지고, BRIDGE 제안은 구속력이 없습니다.
+- **없음:** 실행과 온체인 기록. `OracleGovernance` 는 배포된 적이 없습니다.
 
-## 핵심 비전
+앞으로의 방향(Agora 결정·공시의 날짜 있는 약속을 읽기 전용으로 추적하는 시범
+운영과 2026-10-20 / 11-20 / 12-21 의 판단 시점)은
+[루트 README](../README.md#direction-under-review) 에 적혀 있고, 확정된 계획이
+아닙니다.
+
+## 핵심 비전 (설계 개념)
+
+아래는 BRIDGE 가 처음 설계된 방향입니다. 위 목록에서 보듯 운영에서는 앞의 두
+단계만 자동으로 돕니다.
 
 **기존 DAO**: 사람이 제안 → 사람 토론 → 투표
 
@@ -36,13 +54,15 @@ BRIDGE는 **모스랜드(Mossland)** 의 차세대 거버넌스 프레임워크�
 | 속성 | 값 |
 |------|------|
 | 네트워크 | Ethereum Mainnet |
-| 표준 | ERC-20 |
+| 표준 | ERC-20 + `ERC20Votes` 체크포인트 ([on-chain-state](docs/on-chain-state.md)) |
 | 컨트랙트 | `0x8bbfe65e31b348cd823c62e02ad8c19a84dd0dab` |
 
-MOC 홀더의 3가지 역할:
-1. **Direct Voter** - 직접 투표/토론 참여
-2. **Delegator** - 정책 기반으로 에이전트에게 위임
-3. **Oracle Contributor** - 현실 신호 제공 (체크인/리포트)
+설계상 MOC 홀더의 3가지 역할 (지금은 셋 다 운영되지 않습니다):
+1. **Direct Voter** - 직접 투표/토론 참여 — BRIDGE 투표는 기본으로 꺼져 있고
+   ([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)), 모스랜드 DAO 투표는 Agora 에서 합니다.
+2. **Delegator** - 정책 기반으로 에이전트에게 위임 — 위임도 함께 꺼져 있습니다.
+   위임은 운영에서 한 번도 만들어진 적이 없습니다.
+3. **Oracle Contributor** - 현실 신호 제공 (체크인/리포트) — 구현되지 않았습니다.
 
 ## Quick Start
 
@@ -73,15 +93,20 @@ PORT=3101 pnpm --filter @oracle/api dev   # API (PORT 미지정 시 4000)
 pnpm --filter @oracle/web dev             # Web (port 3100)
 ```
 
-> **MOC 검증 기본 활성화**: API는 별도 설정 없이 공개 이더리움 RPC로 MOC 잔고를
-> 검증합니다 — 투표에는 지갑 서명(EIP-191)과 MOC 보유가 필요하고, 잔고가 곧
-> 투표 가중치입니다. 로컬 탐색용 오픈 데모 모드는 `apps/api/.env`에
-> `MAINNET_RPC_URL=off`를 설정하세요.
+> **투표·위임은 기본으로 꺼져 있습니다** ([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)): 투표·위임 쓰기 요청은 `410`
+> (`VOTING_MOVED_TO_AGORA`) 으로 답하고, 웹은 지갑 버튼·투표 UI 를 숨기고
+> `/delegation` 을 Agora 안내로 바꿉니다. 로컬에서 실험하려면 API 에 `VOTING_ENABLED=1`, 웹 빌드에
+> `NEXT_PUBLIC_VOTING_ENABLED=1` 을 함께 두세요(절차는 `apps/api/.env.example`).
+> 켜면 공개 이더리움 RPC 로 MOC 잔고를 검증하고, 투표에는 지갑 서명(EIP-191)과
+> 제안 스냅샷 블록 시점의 MOC 잔고가 필요합니다. 기본값인 스냅샷 가중치는
+> 아카이브 RPC 가 있어야 동작합니다. 오픈 데모 모드는 `MAINNET_RPC_URL=off`.
 
 ## 배포 (Production)
 
 bridge.moss.land는 nginx(SSL) 뒤에서 pm2로 `oracle-api`(3101) /
-`oracle-web`(3100)을 실행하며, 헬스체크는 `GET /api/health` 입니다.
+`oracle-web`(3100)을 실행하며, 헬스체크는 `GET /api/health` 입니다(`ok` /
+`degraded` / `down` 을 파생해 답하고, 상태코드만 보는 모니터는
+`?strict=1` — `down` 일 때만 503).
 
 배포는 **pull 방식 자동배포**입니다: pm2 앱 `bridge-deploy`가 5분마다
 [`scripts/deploy.sh`](scripts/deploy.sh)를 실행해 `origin/main`이 움직였을 때만
@@ -93,16 +118,16 @@ bridge.moss.land는 nginx(SSL) 뒤에서 pm2로 `oracle-api`(3101) /
 
 ## 2026 H1 MVP 범위
 
-### 포함
+### 포함 (계획 → 2026-09-26 운영 상태)
 
-| 레이어 | 기능 |
-|--------|------|
-| Reality Oracle v0 | 온체인 이벤트, Agora 활동, Proof-of-Presence 체크인 |
-| Inference Mining v0 | 규칙 기반 트리거 + LLM 이슈 요약, 제안 초안 생성 |
-| Agentic Consensus v0 | 5 에이전트 토론, Decision Packet 생성 |
-| Human Governance | MOC 토큰 가중치 투표, AI Assisted Proposal |
-| Delegation v0 | 정책 기반 위임 (카테고리/상한/거부권) |
-| Proof of Outcome v0 | KPI 측정, 에이전트 평판 업데이트 |
+| 레이어 | 계획한 기능 | 운영 상태 |
+|--------|------|------|
+| Reality Oracle v0 | 온체인 이벤트, Agora 활동, Proof-of-Presence 체크인 | MOC·공시·로드맵·GitHub·Medium 수집만 자동. Agora 활동·체크인은 없음 |
+| Inference Mining v0 | 규칙 기반 트리거 + LLM 이슈 요약, 제안 초안 생성 | 규칙 기반 탐지 자동. 제안 초안 자동 승격은 꺼짐 |
+| Agentic Consensus v0 | 5 에이전트 토론, Decision Packet 생성 | 관리자 요청 시에만 |
+| Human Governance | MOC 토큰 가중치 투표, AI Assisted Proposal | 꺼짐 ([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)). 투표 0건 |
+| Delegation v0 | 정책 기반 위임 (카테고리/상한/거부권) | 꺼짐 ([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)). 위임 0건 |
+| Proof of Outcome v0 | KPI 측정, 에이전트 평판 업데이트 | 꺼짐. 실행 0건, 결과 증명 0건 |
 
 ### 제외 (2027+)
 
@@ -121,7 +146,7 @@ oracle/
 │   ├── agentic-consensus/    # L2: AI 에이전트 + Moderator
 │   ├── human-governance/     # L3: 투표 + 위임
 │   ├── proof-of-outcome/     # L4: 결과 추적
-│   └── contracts/            # Solidity 컨트랙트
+│   └── contracts/            # Solidity 컨트랙트 (배포된 적 없음)
 ├── apps/
 │   ├── web/                  # Next.js 웹 프론트엔드
 │   └── api/                  # Express REST API
@@ -133,11 +158,13 @@ oracle/
 |--------|------|
 | Reality Feed | 실시간 신호 스트림, 이상징후 하이라이트 |
 | Issues | 탐지된 이슈, 에이전트 토론 로그, Decision Packet |
-| Proposals | AI Assisted Proposal 목록, 투표 |
-| Delegation | 위임 설정, 정책 관리, 투표 리포트 |
-| Outcomes | 실행 결과, KPI 변화, 증명 |
+| Proposals | 제안 목록 (비구속). 데모 제안은 기본으로 숨기고, 정족수 없이 끝난 제안은 "만료"로 표시. 투표 UI 는 꺼져 있음 ([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)) |
+| Delegation | Agora 안내 페이지 ([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)). 위임 설정 UI 는 `NEXT_PUBLIC_VOTING_ENABLED=1` 빌드에서만 |
+| Outcomes | 실행 결과, KPI 변화, 증명 — 운영에는 아직 한 건도 없음 |
 
-## 5-레이어 아키텍처
+## 5-레이어 아키텍처 (설계 개념)
+
+각 레이어가 설계상 하는 일입니다. 운영 상태는 위 MVP 범위 표를 보세요.
 
 ### L0. Reality Oracle (Signal → Verified Data)
 
@@ -189,16 +216,18 @@ oracle/
 
 - **Frontend**: Next.js 14, TailwindCSS, next-intl
 - **Backend**: Node.js, Express, TypeScript, SQLite
-- **Blockchain**: Ethereum, ERC-20 (MOC), viem
+- **Blockchain**: Ethereum, viem (MOC 잔고 읽기 전용 — 체인에 쓰는 경로는 없음)
 - **AI**: Claude API, OpenAI GPT-4 (하이브리드)
 - **DevOps**: pm2, nginx
 - **Monorepo**: pnpm + Turborepo
 
 ## 성공 기준 (2026 H1)
 
-- AI Assisted Proposal 10개 생성 / 3개 이상 투표 진행
-- 체크인 오라클 참여 지갑 1,000+
-- 제안 작성/읽기 시간 30% 감소
+| 기준 | 결과 (2026-09-26) |
+|------|------|
+| AI Assisted Proposal 10개 생성 / 3개 이상 투표 진행 | 실제 제안 21개가 생겼지만 18개는 수집기 결함([#37](https://github.com/MosslandOpenDevs/bridge-2026/pull/37))에서 나왔고, 투표는 0건 |
+| 체크인 오라클 참여 지갑 1,000+ | 체크인 오라클은 구현되지 않음 |
+| 제안 작성/읽기 시간 30% 감소 | 측정한 적 없음 |
 
 ## 스크린샷
 
