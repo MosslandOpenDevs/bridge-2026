@@ -1,5 +1,17 @@
 # BRIDGE 2026 블록체인 연동 가이드
 
+> **이 경로는 배포되지 않았고, 로드맵에도 없습니다 (2026-09-26).**
+> `OracleGovernance` 컨트랙트는 어느 네트워크에도 배포된 적이 없고, API 에서
+> 체인에 쓰는 메서드를 부르는 곳은 없습니다. BRIDGE 자체 투표·위임은 기본으로
+> 꺼져 있으며([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)), 모스랜드 DAO 의 구속력 있는 투표는
+> [Agora](https://agora.moss.land) 에서 합니다. BRIDGE 의 방향이 정해지는
+> 판단 시점(2026-10-20, 11-20, 12-21 — [루트 README](../../README.md#direction-under-review))
+> 전에는 이 경로를 다시 열 계획이 없습니다. 아래 절차는 기록과 로컬 실험용으로
+> 남겨 둡니다.
+>
+> MOC 는 `ERC20Votes` 를 구현합니다 — 이 문서가 전제하는 "잔고 = 투표 가중치"
+> 와 다른 점은 [on-chain-state.md](on-chain-state.md) 를 보세요.
+
 이 문서는 BRIDGE 2026 Oracle의 블록체인 연동 설정 방법을 설명합니다.
 
 ---
