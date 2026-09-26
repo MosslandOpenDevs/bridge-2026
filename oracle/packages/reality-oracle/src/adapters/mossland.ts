@@ -4,6 +4,57 @@ import { BaseAdapter } from "./base.js";
 export interface MosslandAdapterConfig {
   apiUrl?: string;
   language?: "en" | "ko";
+  /** What earlier runs already reported; see MosslandAdapterState. */
+  state?: MosslandAdapterState;
+}
+
+/**
+ * What the adapter has already reported, carried across restarts.
+ *
+ * This used to live in memory only, so every deploy or crash-restart announced
+ * the newest disclosure as "new" again. The API seeds it from the rows it has
+ * stored (MosslandAdapter.stateFromStoredSignals) before the first fetch.
+ */
+export interface MosslandAdapterState {
+  /**
+   * disclosureKey() of every disclosure already announced. Bare titles are
+   * accepted too: rows written before keys were stored carry only the title.
+   */
+  announcedDisclosures?: Iterable<string>;
+}
+
+/** A stored signal row, as much of it as seeding the state needs. */
+export interface StoredMosslandSignal {
+  category: string;
+  value: number;
+  description: string;
+  /** The JSON column as stored, or already parsed. */
+  metadata?: string | Record<string, unknown> | null;
+}
+
+/** A normalized signal plus the metadata the API persists alongside it. */
+export type MosslandNormalizedSignal = NormalizedSignal & {
+  metadata?: Record<string, unknown>;
+};
+
+/**
+ * One event per disclosure document, value 1. Kept out of the total's
+ * category on purpose: the two used to share `mossland_disclosure`, so the
+ * anomaly detector z-scored a stream of ~53s against the occasional 1 and
+ * reported the announcement as an outlier of the total.
+ */
+export const DISCLOSURE_EVENT_CATEGORY = "mossland_disclosure_published";
+/** The running number of published disclosures, a gauge. */
+export const DISCLOSURE_TOTAL_CATEGORY = "mossland_disclosure";
+
+/**
+ * Identity of a disclosure document that survives restarts and list reorders.
+ * The list's `date` is month-granular ("2026.09"), so it cannot tell two
+ * documents from the same month apart; the URL can.
+ */
+export function disclosureKey(doc: { url?: string; title: string; date: string }): string {
+  const url = doc.url?.trim();
+  return url ? url : `${doc.title}|${doc.date}`;
 }
 
 const translations = {
@@ -100,7 +151,9 @@ export class MosslandAdapter extends BaseAdapter {
   readonly source: SignalSource = "api";
 
   private config: MosslandAdapterConfig;
-  private lastDisclosureDate: string = "";
+  private announcedDisclosures: Set<string>;
+  /** False until one disclosure list has been read since construction. */
+  private disclosuresBaselined = false;
   private lastPrice: number = 0;
 
   constructor(config: MosslandAdapterConfig = {}) {
@@ -109,6 +162,36 @@ export class MosslandAdapter extends BaseAdapter {
       apiUrl: config.apiUrl || DEFAULT_API_URL,
       language: config.language || "ko",
     };
+    this.announcedDisclosures = new Set(config.state?.announcedDisclosures ?? []);
+  }
+
+  /**
+   * Rebuild the adapter's state from the signals an earlier run stored.
+   *
+   * Reads new-style events by their metadata key and, for the transition,
+   * the legacy events that shared the total's category (value 1, described as
+   * "New disclosure: <title>" in either language). Rows it does not recognise
+   * are ignored rather than guessed at.
+   */
+  static stateFromStoredSignals(rows: Iterable<StoredMosslandSignal>): MosslandAdapterState {
+    const announced = new Set<string>();
+    for (const row of rows) {
+      if (row.category === DISCLOSURE_EVENT_CATEGORY) {
+        const key = parseMetadata(row.metadata)?.key;
+        if (typeof key === "string" && key) {
+          announced.add(key);
+          continue;
+        }
+      }
+      if (
+        row.category === DISCLOSURE_EVENT_CATEGORY ||
+        (row.category === DISCLOSURE_TOTAL_CATEGORY && row.value === 1)
+      ) {
+        const title = legacyDisclosureTitle(row.description);
+        if (title) announced.add(title);
+      }
+    }
+    return { announcedDisclosures: announced };
   }
 
   async fetch(): Promise<RawSignal[]> {
@@ -147,20 +230,17 @@ export class MosslandAdapter extends BaseAdapter {
       const data = await response.json() as Disclosure[];
 
       if (Array.isArray(data) && data.length > 0) {
-        // Check for new disclosures
-        const latestDate = data[0].date;
-        if (latestDate !== this.lastDisclosureDate) {
-          this.lastDisclosureDate = latestDate;
-
-          // Create signal for new disclosure
-          const latest = data[0];
+        // Oldest first, so a batch found after downtime is stored in the
+        // order it was published.
+        for (const doc of this.takeNewDisclosures(data).reverse()) {
           signals.push(this.createRawSignal(
             `mossland-disclosure-${Date.now()}`,
             {
               type: "disclosure",
-              title: latest.title,
-              date: latest.date,
-              url: latest.url,
+              title: doc.title,
+              date: doc.date,
+              url: doc.url,
+              key: disclosureKey(doc),
               isNew: true,
             },
             {
@@ -188,6 +268,36 @@ export class MosslandAdapter extends BaseAdapter {
     }
 
     return signals;
+  }
+
+  /**
+   * The documents on this list that have not been announced, newest first.
+   *
+   * After the first read every unannounced document is new. The first read
+   * after construction is different: the list holds the whole history (53
+   * documents, back to 2020), most of which was never announced because it
+   * predates the collector. So on that read only the documents listed above
+   * the newest one already known count as new — those were published while
+   * the process was down. If nothing on the list is known there is nothing to
+   * tell new from old by, and the list is taken as the baseline silently:
+   * missing one announcement on a fresh install beats announcing fifty.
+   */
+  private takeNewDisclosures(docs: Disclosure[]): Disclosure[] {
+    const listed = docs.filter((d) => d && typeof d.title === "string");
+    const known = (d: Disclosure) =>
+      this.announcedDisclosures.has(disclosureKey(d)) || this.announcedDisclosures.has(d.title);
+
+    let fresh: Disclosure[];
+    if (this.disclosuresBaselined) {
+      fresh = listed.filter((d) => !known(d));
+    } else {
+      const newestKnown = listed.findIndex(known);
+      fresh = newestKnown === -1 ? [] : listed.slice(0, newestKnown);
+      this.disclosuresBaselined = true;
+    }
+
+    for (const doc of listed) this.announcedDisclosures.add(disclosureKey(doc));
+    return fresh;
   }
 
   private async fetchMarketData(): Promise<RawSignal[]> {
@@ -375,12 +485,13 @@ export class MosslandAdapter extends BaseAdapter {
     return signals;
   }
 
-  normalize(signal: RawSignal): NormalizedSignal {
+  normalize(signal: RawSignal): MosslandNormalizedSignal {
     const data = signal.data as {
       type: string;
       title?: string;
       date?: string;
       url?: string;
+      key?: string;
       isNew?: boolean;
       price?: number;
       changeRate?: number;
@@ -406,18 +517,22 @@ export class MosslandAdapter extends BaseAdapter {
     let value: number;
     let unit: string;
     let description: string;
+    let metadata: Record<string, unknown> | undefined;
 
     switch (data.type) {
       case "disclosure":
-        category = "mossland_disclosure";
+        category = DISCLOSURE_EVENT_CATEGORY;
         severity = "high";
         value = 1;
         unit = t.unit.count;
         description = `${t.newDisclosure}: ${data.title}`;
+        // Stored with the row, which is what lets the next process know this
+        // document has already been announced.
+        metadata = { key: data.key, url: data.url, title: data.title, date: data.date };
         break;
 
       case "disclosure_stats":
-        category = "mossland_disclosure";
+        category = DISCLOSURE_TOTAL_CATEGORY;
         severity = "low";
         value = data.totalCount || 0;
         unit = t.unit.count;
@@ -502,7 +617,8 @@ export class MosslandAdapter extends BaseAdapter {
         description = "Unknown Mossland signal";
     }
 
-    return this.createNormalizedSignal(signal, category, severity, value, unit, description);
+    const normalized = this.createNormalizedSignal(signal, category, severity, value, unit, description);
+    return metadata ? { ...normalized, metadata } : normalized;
   }
 
   private formatKrw(amount: number): string {
@@ -524,4 +640,29 @@ export class MosslandAdapter extends BaseAdapter {
     if (amount >= 1000) return "$" + (amount / 1000).toFixed(1) + "K";
     return "$" + amount.toFixed(0);
   }
+}
+
+function parseMetadata(
+  metadata: StoredMosslandSignal["metadata"],
+): Record<string, unknown> | null {
+  if (!metadata) return null;
+  if (typeof metadata !== "string") return metadata;
+  try {
+    const parsed = JSON.parse(metadata);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The title out of "New disclosure: <title>" / "새 공시: <title>", else null. */
+function legacyDisclosureTitle(description: string): string | null {
+  for (const t of Object.values(translations)) {
+    const prefix = `${t.newDisclosure}: `;
+    if (description.startsWith(prefix)) {
+      const title = description.slice(prefix.length);
+      return title || null;
+    }
+  }
+  return null;
 }
