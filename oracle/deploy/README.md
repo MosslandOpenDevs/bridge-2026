@@ -104,7 +104,8 @@ What one run of
    pre-deploy snapshot; safe while the API is writing)
 3. `PRAGMA quick_check` on the **copy**; anything but `ok` deletes the copy,
    rotates nothing, and exits non-zero
-4. Optional gzip, then `data/backup/daily-YYYYMMDD-HHMMSS.db[.gz]` (UTC) with a
+4. gzip (on by default; `BACKUP_GZIP=0` keeps a plain `.db`), then
+   `data/backup/daily-YYYYMMDD-HHMMSS.db[.gz]` (UTC) with a
    `sha256sum`-format `.sha256` sidecar, mode 0600
 5. Rotation, only after a verified copy exists: the newest backup of each of
    the 7 most recent (UTC) days that have one, plus the newest of each of the
@@ -123,9 +124,9 @@ What one run of
 Settings are `BACKUP_*` in `apps/api/.env`; see the "Scheduled database
 backups" section of [`apps/api/.env.example`](../apps/api/.env.example).
 
-Size, measured on the production copy of 2026-09-26: 418MB per backup, 124MB
-with `BACKUP_GZIP=1`, so up to ~4.2GB or ~1.3GB for ten files — check
-`df -h ~/bridge-2026` first. A run took 17s on a running API (copy 3.0s,
+Size, measured on the production copy of 2026-09-26: 124MB per backup gzipped
+(the default), 418MB with `BACKUP_GZIP=0`, so ~1.3GB or ~4.2GB for ten files —
+check `df -h ~/bridge-2026` first. A run took 17s on a running API (copy 3.0s,
 quick_check 0.8s, gzip 13s); without gzip, under 4s.
 
 ### Enable
@@ -134,7 +135,6 @@ From a **login shell** on the app server:
 
 ```bash
 cd ~/bridge-2026/oracle
-echo 'BACKUP_GZIP=1' >> apps/api/.env        # recommended; see the sizes above
 pm2 start ecosystem.config.cjs --only bridge-db-backup
 pm2 save
 ```
@@ -183,7 +183,7 @@ copy failed; 4 backup kept, rotation could not delete an expired file; 64 bad
 argument or `BACKUP_*` value.
 
 A backup by hand, e.g. before a risky manual change:
-`node ~/bridge-2026/oracle/apps/api/scripts/db-backup.cjs --gzip` (or
+`node ~/bridge-2026/oracle/apps/api/scripts/db-backup.cjs` (or
 `pm2 restart bridge-db-backup` once registered). A second run started while
 one is in progress refuses rather than racing it.
 

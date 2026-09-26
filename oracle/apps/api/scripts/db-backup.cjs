@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Scheduled, verified backup of the API's SQLite database.
 //
-// Usage: node apps/api/scripts/db-backup.cjs [--gzip] [--db <path>]
+// Usage: node apps/api/scripts/db-backup.cjs [--gzip|--no-gzip] [--db <path>]
 //          [--dir <path>] [--now <ISO time>] [--no-offsite]
 //
 // Why this exists: the only copies of oracle.db were the pre-deploy snapshots
@@ -20,8 +20,11 @@
 //   3. PRAGMA quick_check on the copy -- a copy that is not "ok" is deleted,
 //      because an unverified file in the backup directory is worse than none:
 //      it is what someone restores from at 3am;
-//   4. optionally gzip, then rename into place and write a sha256sum-format
-//      sidecar, so a restore can be checked with `sha256sum -c`;
+//   4. gzip (default; BACKUP_GZIP=0 or --no-gzip keeps a plain .db -- on by
+//      default so that switching the job on, even by accident, costs ~1.3GB
+//      of disk rather than ~4.2GB), then rename into place and write a
+//      sha256sum-format sidecar, so a restore can be checked with
+//      `sha256sum -c`;
 //   5. rotate -- only after a verified copy exists, so a failing job never
 //      eats the good backups it failed to replace;
 //   6. optionally rsync the file off the host (BACKUP_RSYNC_TARGET);
@@ -323,7 +326,7 @@ async function main() {
 
   const dbPath = resolveFromApi(args.db || process.env.DB_PATH || path.join("data", "oracle.db"));
   const dir = resolveFromApi(args.dir || process.env.BACKUP_DIR || path.join(path.dirname(dbPath), "backup"));
-  const gzip = args.gzip ?? envBool("BACKUP_GZIP", false);
+  const gzip = args.gzip ?? envBool("BACKUP_GZIP", true);
   const keepDaily = envInt("BACKUP_KEEP_DAILY", 7, 1);
   const keepWeekly = envInt("BACKUP_KEEP_WEEKLY", 4, 0);
   const minFreeMb = envInt("BACKUP_MIN_FREE_MB", 1024, 0);
