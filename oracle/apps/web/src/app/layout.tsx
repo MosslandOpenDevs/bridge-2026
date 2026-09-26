@@ -5,6 +5,7 @@ import { getMessages, getLocale } from "next-intl/server";
 import { Providers } from "@/components/Providers";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
+import { AiContentNotice } from "@/components/AiContentNotice";
 import { ExperimentalBanner } from "@/components/ExperimentalBanner";
 import { ExperimentalWarningModal } from "@/components/ExperimentalWarningModal";
 import { NpcCityStrip } from "@/components/NpcCityStrip";
@@ -18,25 +19,35 @@ export const dynamic = "force-dynamic";
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL || "https://bridge.moss.land";
 
+// What the site is today, not what it was pitched as. The old copy promised a
+// "Physical AI Governance OS" where "people decide" and outcomes are "proved
+// on-chain"; in practice no vote has ever been recorded, no outcome proof
+// exists, and BRIDGE is a Lab service (MIP-1) whose output binds no one —
+// MossDAO decides on Agora. Search results and link previews are where most
+// people first meet the site, so this is where an overclaim does most harm.
+const TITLE = "BRIDGE 2026 — Reality-signal governance lab · Mossland";
+const DESCRIPTION =
+  "An experimental Mossland Lab service. BRIDGE 2026 collects reality signals, detects issues and has AI agents draft governance proposals. Its outputs are non-binding; MossDAO's official decisions are made on Agora.";
+const SHARE_DESCRIPTION =
+  "An experimental Mossland Lab service that turns reality signals into non-binding, AI-drafted governance proposals.";
+
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
-    default: "BRIDGE 2026 — Physical AI Governance OS · Mossland",
+    default: TITLE,
     template: "%s · BRIDGE 2026",
   },
-  description:
-    "Where agents propose, people decide, reality updates. BRIDGE 2026 turns reality signals into proposals, has AI agents reach consensus, keeps humans as the final decision-makers, and proves outcomes on-chain.",
+  description: DESCRIPTION,
   applicationName: "BRIDGE 2026",
   keywords: [
     "BRIDGE 2026",
     "Mossland",
-    "Physical AI",
     "AI governance",
+    "governance lab",
     "DAO",
     "Reality Oracle",
-    "Agentic Consensus",
+    "AI agents",
     "Moss Coin",
-    "on-chain governance",
   ],
   authors: [{ name: "Mossland", url: "https://moss.land" }],
   creator: "Mossland",
@@ -48,15 +59,13 @@ export const metadata: Metadata = {
     type: "website",
     url: SITE_URL,
     siteName: "Mossland",
-    title: "BRIDGE 2026 — Physical AI Governance OS · Mossland",
-    description:
-      "Where agents propose, people decide, reality updates. Mossland's reality-driven governance system.",
+    title: TITLE,
+    description: SHARE_DESCRIPTION,
   },
   twitter: {
     card: "summary_large_image",
-    title: "BRIDGE 2026 — Physical AI Governance OS · Mossland",
-    description:
-      "Where agents propose, people decide, reality updates. Mossland's reality-driven governance system.",
+    title: TITLE,
+    description: SHARE_DESCRIPTION,
     creator: "@TheMossland",
   },
   robots: {
@@ -97,6 +106,9 @@ export default async function RootLayout({
               {/* NPC city cross-link — read-side fetch with 10-min
                   revalidate; renders nothing if npc.moss.land is down. */}
               <NpcCityStrip />
+              {/* Below the NPC strip on purpose: those headlines are AI
+                  output too, and the notice should cover everything above. */}
+              <AiContentNotice />
               <Footer />
             </div>
           </Providers>

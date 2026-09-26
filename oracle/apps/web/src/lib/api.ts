@@ -94,13 +94,17 @@ class APIClient {
   async getHealth() {
     // Mirrors the health handler's full payload. `lastObservedSignalAt` is
     // null when unknown — never read null as "just now".
+    //
+    // The /api alias, not bare /health: with the default same-origin base,
+    // nginx only proxies /api/* to the API, so /health would land on Next.js
+    // and 404 in production.
     return this.fetch<{
       status: string;
       service: string;
       version: string;
       timestamp: string;
       lastObservedSignalAt: string | null;
-    }>("/health");
+    }>("/api/health");
   }
 
   // Signals
@@ -115,9 +119,20 @@ class APIClient {
   }
 
   // Issues
-  async getIssues(status?: string) {
-    const query = status ? `?status=${status}` : "";
-    return this.fetch<{ issues: any[]; count: number }>(`/api/issues${query}`);
+  async getIssues(
+    status?: string,
+    options?: { limit?: number; includeSignals?: boolean },
+  ) {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (options?.limit) params.set("limit", String(options.limit));
+    // The API embeds every related signal by default, which a caller that only
+    // needs titles and times should not have to download.
+    if (options?.includeSignals === false) params.set("includeSignals", "false");
+    const query = params.toString();
+    return this.fetch<{ issues: any[]; count: number }>(
+      `/api/issues${query ? `?${query}` : ""}`,
+    );
   }
 
   async detectIssues() {
