@@ -148,8 +148,9 @@ Copy `oracle/apps/api/.env.example` → `oracle/apps/api/.env` and fill in the v
 (LLM keys, RPC URL, `ADMIN_API_KEY`, etc.). **Adding an LLM key does not
 start the autonomous loop** — automatic deliberation, auto-promotion to
 proposals and outcome scoring are all off by default. A key only makes the
-deliberations you request (`POST /api/deliberate`) use the LLM; signal
-collection and issue detection run either way. `AUTO_DELIBERATE_ENABLED=1`
+deliberations and debates you request (`POST /api/deliberate`,
+`POST /api/debate`) use the LLM; signal collection and issue detection run
+either way. `AUTO_DELIBERATE_ENABLED=1`
 opts in to deliberating every newly detected high-priority issue — five LLM
 calls each, every `ISSUE_DETECT_INTERVAL` seconds — and
 `AUTO_PROPOSAL_ENABLED=1` additionally opens the confident ones as live
