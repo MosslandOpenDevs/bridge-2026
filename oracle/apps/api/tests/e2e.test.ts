@@ -161,8 +161,14 @@ async function startServer(overrides: Record<string, string> = {}): Promise<void
       // Background jobs off so the suite observes only what it triggers.
       SIGNAL_COLLECT_INTERVAL: "0",
       ISSUE_DETECT_INTERVAL: "0",
-      OUTCOME_EVAL_ENABLED: "0",
       AUTO_FINALIZE_INTERVAL: "0",
+      // The autonomous loop is left to its defaults, which are off, so that
+      // testAutonomousLoopOffByDefault can pin them. Empty rather than
+      // omitted for the same dotenv reason as the keys above: a contributor
+      // who opted in through apps/api/.env must not change what is tested.
+      AUTO_DELIBERATE_ENABLED: "",
+      AUTO_PROPOSAL_ENABLED: "",
+      OUTCOME_EVAL_ENABLED: "",
       // No chain access: demo weights, no signature requirement.
       MAINNET_RPC_URL: "off",
       REQUIRE_VOTE_SIGNATURE: "never",
@@ -295,6 +301,32 @@ async function testHealthCheck() {
     data.lastObservedSignalAt === null || typeof data.lastObservedSignalAt === "string",
     "health: lastObservedSignalAt should be an ISO string or null",
   );
+}
+
+/**
+ * Adding an LLM key used to be enough to have the server deliberate, open
+ * proposals and write proxy outcome scores by itself. All three are opt-in
+ * now; this pins the defaults so a refactor of envFlag or of the flags cannot
+ * quietly turn the loop back on. The harness passes the flags empty, which
+ * envFlag reads as "use the default".
+ */
+async function testAutonomousLoopOffByDefault() {
+  const expected = [
+    "Auto deliberation: DISABLED",
+    "Auto proposal promotion: DISABLED",
+    "Outcome evaluation: DISABLED",
+  ];
+  // Startup lines are written from the listen callback; on a pipe they can
+  // land a moment after /health first answers.
+  const deadline = Date.now() + 2_000;
+  let log = serverLog.join("");
+  while (expected.some((line) => !log.includes(line)) && Date.now() < deadline) {
+    await sleep(50);
+    log = serverLog.join("");
+  }
+  for (const line of expected) {
+    assert(log.includes(line), `startup log should say "${line}"`);
+  }
 }
 
 /**
@@ -1132,6 +1164,7 @@ async function main() {
 
   try {
     await runTest("Health check", testHealthCheck);
+    await runTest("Autonomous loop is off by default", testAutonomousLoopOffByDefault);
     await runTest("Health ignores synthetic signals", testHealthIgnoresSyntheticSignals);
     await runTest("No success rate before anything is measured", testStatsBeforeAnyOutcome);
     await runTest("Admin endpoints require the key", testAdminAuthRequired);

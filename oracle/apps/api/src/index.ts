@@ -2253,7 +2253,17 @@ app.get("/api/blockchain/verify-voter/:address", async (req, res) => {
 // Background processing intervals (in seconds, 0 to disable)
 const SIGNAL_COLLECT_INTERVAL = parseInt(process.env.SIGNAL_COLLECT_INTERVAL || "60", 10);
 const ISSUE_DETECT_INTERVAL = parseInt(process.env.ISSUE_DETECT_INTERVAL || "300", 10); // 5 minutes
-const AUTO_DELIBERATE_ENABLED = envFlag("AUTO_DELIBERATE_ENABLED", true);
+// The autonomous governance loop is opt-in.
+//
+// It used to be on by default, so adding an LLM key was enough to have the
+// server deliberate and open proposals by itself. What it opened in production
+// was mostly a collector artifact ("Anomaly detected in mossland_disclosure"),
+// some of it promoted although most of the agents opposed it -- consensusScore
+// measures how much they agree, not what they agree on -- and none of it was
+// ever voted on. Signal collection and issue detection are unaffected, and the
+// admin-authenticated /api/deliberate and /api/proposals endpoints still work,
+// so a person can still take an issue to a vote on purpose.
+const AUTO_DELIBERATE_ENABLED = envFlag("AUTO_DELIBERATE_ENABLED", false);
 const AUTO_DELIBERATE_MIN_PRIORITY = (process.env.AUTO_DELIBERATE_MIN_PRIORITY || "high").toLowerCase();
 const PRIORITY_RANK: Record<string, number> = { low: 1, medium: 2, high: 3, urgent: 4, critical: 4 };
 const minPriorityRank = PRIORITY_RANK[AUTO_DELIBERATE_MIN_PRIORITY] ?? 3;
@@ -2273,7 +2283,11 @@ const minPriorityRank = PRIORITY_RANK[AUTO_DELIBERATE_MIN_PRIORITY] ?? 3;
 // the next pass no longer sees it as new.
 const AUTO_DELIBERATE_MAX_PER_CYCLE = envInt("AUTO_DELIBERATE_MAX_PER_CYCLE", 10);
 
-const OUTCOME_EVAL_ENABLED = envFlag("OUTCOME_EVAL_ENABLED", true);
+// Off by default for a plainer reason: evaluatePendingOutcomes writes a proxy
+// score recorded as "estimated", and every learning query filters estimated
+// outcomes out (see decisionHistoryDb.getSimilar / getCategorySuccessRate and
+// agentPerformanceDb.getAgentAccuracy). The job wrote rows nothing learns from.
+const OUTCOME_EVAL_ENABLED = envFlag("OUTCOME_EVAL_ENABLED", false);
 const OUTCOME_EVAL_INTERVAL = parseInt(process.env.OUTCOME_EVAL_INTERVAL || "1800", 10); // 30 min
 const OUTCOME_EVAL_AGE_HOURS = parseInt(process.env.OUTCOME_EVAL_AGE_HOURS || "6", 10);
 const OUTCOME_EVAL_BATCH = parseInt(process.env.OUTCOME_EVAL_BATCH || "20", 10);
@@ -2281,7 +2295,10 @@ const OUTCOME_EVAL_BATCH = parseInt(process.env.OUTCOME_EVAL_BATCH || "20", 10);
 // How often to close out proposals whose voting period has ended (0 disables).
 const AUTO_FINALIZE_INTERVAL = envInt("AUTO_FINALIZE_INTERVAL", 60);
 
-const AUTO_PROPOSAL_ENABLED = envFlag("AUTO_PROPOSAL_ENABLED", true);
+// Only reachable through auto-deliberation, so it is inert unless that is on
+// too. Off by default on its own as well: enabling deliberation to see what the
+// agents say should not also put their output up for a vote.
+const AUTO_PROPOSAL_ENABLED = envFlag("AUTO_PROPOSAL_ENABLED", false);
 const AUTO_PROPOSAL_THRESHOLD = parseFloat(process.env.AUTO_PROPOSAL_THRESHOLD || "0.7");
 const AUTO_PROPOSAL_PROPOSER = process.env.AUTO_PROPOSAL_PROPOSER || "auto-system";
 
@@ -2830,10 +2847,12 @@ httpServer.listen(PORT, () => {
     console.log(`🧠 Auto deliberation: DISABLED (set AUTO_DELIBERATE_ENABLED=1 to enable)`);
   }
 
-  if (AUTO_PROPOSAL_ENABLED) {
+  if (AUTO_PROPOSAL_ENABLED && !AUTO_DELIBERATE_ENABLED) {
+    console.log(`📝 Auto proposal promotion: ENABLED but inert — it only acts on auto-deliberations`);
+  } else if (AUTO_PROPOSAL_ENABLED) {
     console.log(`📝 Auto proposal promotion: ENABLED (consensus ≥ ${AUTO_PROPOSAL_THRESHOLD}, proposer ${AUTO_PROPOSAL_PROPOSER})`);
   } else {
-    console.log(`📝 Auto proposal promotion: DISABLED`);
+    console.log(`📝 Auto proposal promotion: DISABLED (set AUTO_PROPOSAL_ENABLED=1 to enable)`);
   }
 
   if (OUTCOME_EVAL_ENABLED && OUTCOME_EVAL_INTERVAL > 0) {
@@ -2845,7 +2864,7 @@ httpServer.listen(PORT, () => {
       }
     });
   } else {
-    console.log(`📈 Outcome evaluation: DISABLED`);
+    console.log(`📈 Outcome evaluation: DISABLED (set OUTCOME_EVAL_ENABLED=1 to enable)`);
   }
 
   // Close out proposals whose voting period ended, including any that expired
