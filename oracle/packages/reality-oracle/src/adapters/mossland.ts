@@ -491,7 +491,13 @@ export class MosslandAdapter extends BaseAdapter {
         ));
       }
 
-      // Fetch recent transactions
+      // Fetch recent transactions.
+      //
+      // Dormant: the endpoint answers with a bare array of the last 10
+      // transfers, not { value: [...] }, so this branch never emits. Parsing
+      // the array is not the fix it looks like — `count` would be 10 on every
+      // tick, one constant row a minute that tells nobody anything. Reviving
+      // it wants a real measure (transfers newer than the last seen txHash).
       const lastTxUrl = `${this.config.apiUrl}/api/getLastTx`;
       const lastTxResponse = await fetch(lastTxUrl);
       const lastTxData = await lastTxResponse.json() as LastTxResponse;
