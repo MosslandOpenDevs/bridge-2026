@@ -1,7 +1,7 @@
 {
   "common": {
     "appName": "ORACLE",
-    "tagline": "Physical AI 거버넌스 OS",
+    "tagline": "현실 신호 거버넌스 실험실",
     "loading": "로딩 중...",
     "error": "오류",
     "retry": "재시도",
@@ -228,7 +228,7 @@
     "mossland": "Mossland",
     "experimental": "실험 환경 / 연구용 / 비프로덕션",
     "ecosystemLabel": "모스랜드 에코시스템",
-    "bridgeRole": "거버넌스 OS",
+    "bridgeRole": "현실 신호 실험실",
     "agoraRole": "공식 의사결정",
     "aoRole": "에이전트 오케스트레이터",
     "newTab": "새 탭에서 열림",

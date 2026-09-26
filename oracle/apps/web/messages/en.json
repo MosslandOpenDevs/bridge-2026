@@ -1,7 +1,7 @@
 {
   "common": {
     "appName": "ORACLE",
-    "tagline": "Physical AI Governance OS",
+    "tagline": "Reality-signal governance lab",
     "loading": "Loading...",
     "error": "Error",
     "retry": "Retry",
@@ -228,7 +228,7 @@
     "mossland": "Mossland",
     "experimental": "Experimental / Research / Non-Production",
     "ecosystemLabel": "Mossland Ecosystem",
-    "bridgeRole": "Governance OS",
+    "bridgeRole": "Reality-signal Lab",
     "agoraRole": "Official DAO decisions",
     "aoRole": "Agentic Orchestrator",
     "newTab": "opens in new tab",

@@ -29,7 +29,7 @@ export function Footer() {
           <ul className="mt-2 flex flex-wrap justify-center md:justify-start gap-x-6 gap-y-1.5">
             {/* The {" "} after each site name is load-bearing: the margin on
                 the role span adds no text, so without it the accessible name
-                reads "BRIDGEGovernance OS". */}
+                reads "BRIDGEReality-signal Lab". */}
             {ECOSYSTEM.map((s) => (
               <li key={s.name} className="text-xs">
                 {s.current ? (

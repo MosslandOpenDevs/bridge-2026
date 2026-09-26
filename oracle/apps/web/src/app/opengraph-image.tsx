@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
 
 // Social share card (Open Graph + Twitter). 1200x630 is the canonical ratio.
-export const alt = "BRIDGE 2026 — Physical AI Governance OS";
+export const alt = "BRIDGE 2026 — Reality-signal governance lab";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -72,7 +72,7 @@ export default function OpengraphImage() {
             marginTop: 8,
           }}
         >
-          Physical AI Governance OS
+          Reality-signal governance lab
         </div>
 
         <div
@@ -83,7 +83,7 @@ export default function OpengraphImage() {
             marginTop: 28,
           }}
         >
-          Where agents propose, people decide, reality updates.
+          An experimental Mossland Lab service. Outputs are non-binding.
         </div>
 
         <div
@@ -95,8 +95,10 @@ export default function OpengraphImage() {
             letterSpacing: 1,
           }}
         >
-          Signals → Issues → Agentic Consensus → Human Decision → Actuation →
-          Proof
+          {/* Only the stages that run today. The old line continued through
+              "Human Decision → Actuation → Proof", none of which has ever
+              happened on this service. */}
+          Signals → Issues → AI agent deliberation → Draft proposals
         </div>
       </div>
     ),
