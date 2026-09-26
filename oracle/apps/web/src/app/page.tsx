@@ -276,10 +276,11 @@ export default function Dashboard() {
       {/* Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
         {/*
-          The signal total counts stored rows, and most collectors store the
-          previous minute's reading again whether or not it changed, so it is
-          labelled as rows rather than as signals; the last-24h figure shows
-          whether collection is still running. Issues lead with distinct open
+          The signal total counts stored rows, most of them repeats of the
+          previous minute's reading, so it is labelled as rows rather than as
+          signals. The last-24h figure is how many rows were stored, not
+          whether collection is running: once only changed readings are
+          stored, a quiet day stores few. Issues lead with distinct open
           conditions: a persisting condition used to add a row every pass, and
           754 rows were 12 conditions when this was written. The secondary
           figure is the open rows those conditions are counted over, not the

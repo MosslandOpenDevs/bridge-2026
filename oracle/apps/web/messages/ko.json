@@ -36,7 +36,7 @@
     "title": "대시보드",
     "subtitle": "실시간 거버넌스 지표 및 시스템 현황",
     "totalSignals": "저장된 관측 행",
-    "signalRowsLastDay": "최근 24시간 {count}",
+    "signalRowsLastDay": "최근 24시간 저장 {count}",
     "issueConditions": "열린 이슈 조건",
     "issueOpenRows": "열린 기록 {count}",
     "activeProposals": "활성 제안",

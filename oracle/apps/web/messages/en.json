@@ -36,7 +36,7 @@
     "title": "Dashboard",
     "subtitle": "Real-time governance metrics and system status",
     "totalSignals": "Stored signal rows",
-    "signalRowsLastDay": "{count} in last 24h",
+    "signalRowsLastDay": "{count} stored in last 24h",
     "issueConditions": "Open issue conditions",
     "issueOpenRows": "{count} open rows recorded",
     "activeProposals": "Active Proposals",

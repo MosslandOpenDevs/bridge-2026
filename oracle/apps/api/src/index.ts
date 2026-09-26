@@ -2352,11 +2352,14 @@ function computeStats() {
 
   return {
     signals: {
-      // Stored observation rows, not distinct readings: most collectors store
-      // the same value again every minute whether or not it changed.
+      // Stored observation rows, not distinct readings. Until collection
+      // stores only readings that changed, most rows repeat the previous
+      // minute's value; afterwards the legacy repeats stay until compacted.
       total: sum(observedCategories),
-      // Observed rows stored in the last 24 hours. The all-time total only
-      // ever grows, so it cannot show whether collection is still running.
+      // Observed rows stored in the last 24 hours. A volume figure, not a
+      // liveness one: once only changed readings are stored, a quiet day
+      // stores few rows while collection is running fine. Whether it is
+      // running is /api/health's lastObservedSignalAt.
       lastDay: (
         signalDb.countObservedSince.get(new Date(now - DAY_MS).toISOString()) as {
           count: number;
