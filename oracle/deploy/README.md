@@ -176,6 +176,9 @@ compacted copy deleted nothing.
 
 ```bash
 cd ~/bridge-2026/oracle
+# Step 3 pipes into tee; without pipefail the pipeline would report tee's
+# status and a REFUSED or INVARIANT BROKEN run would look like success.
+set -o pipefail
 
 # 0. Size it. Read-only, safe while the API runs.
 node apps/api/scripts/compact-signals.cjs apps/api/data/oracle.db
@@ -195,11 +198,27 @@ node apps/api/scripts/compact-signals.cjs apps/api/data/oracle.db --apply \
   --snapshot-verified "$SNAP" --i-stopped-the-api \
   --export-synthetic apps/api/data/backup/synthetic-signals-$(date -u +%Y%m%d).jsonl.gz \
   --vacuum 2>&1 | tee -a logs/compaction.log
+rc=$?
 
-# 4. Start again and check.
-pm2 start oracle-api bridge-deploy
-curl -s 'http://localhost:3101/api/health?strict=1'
+# 4. Start again and check -- only if step 3 exited 0.
+if [ "$rc" -eq 0 ]; then
+  pm2 start oracle-api bridge-deploy
+  curl -s 'http://localhost:3101/api/health?strict=1'
+else
+  echo "compaction exited $rc: do NOT start the API; see the exit codes below"
+fi
 ```
+
+Exit codes of step 3:
+
+- `0` — done; step 4 starts the API.
+- `1` — a `REFUSED:` line means a gate failed before anything was changed: fix
+  the cause (usually a fresh snapshot) and repeat from step 2. Any other error
+  after the `APPLY` line: treat it like `2`.
+- `2` — `INVARIANT BROKEN`: a referenced signal no longer resolves. **Restore
+  from `$SNAP` (below) before starting anything**; starting the API or
+  `bridge-deploy` first would add new rows on top of the broken file.
+- `64` — bad arguments; nothing was opened.
 
 VACUUM needs the database to itself (hence the stopped API) and free disk
 about the size of the result. `pre-compact-*` snapshots are not rotated by
