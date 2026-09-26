@@ -251,9 +251,11 @@
   },
   "experimental": {
     "banner": {
-      "title": "⚠️ Experimental / Research / Non-Production",
+      "title": "Experimental / Research / Non-Production",
       "subtitle": "This service is an experimental environment for research, testing, and PoC purposes. Data loss and service interruptions may occur.",
-      "dismiss": "Dismiss"
+      "dismiss": "Dismiss",
+      "details": "Details",
+      "label": "Experimental service notice"
     },
     "modal": {
       "title": "Experimental Environment Notice",
@@ -277,7 +279,8 @@
         }
       },
       "footer": "Please use this service only if you understand and agree to the above terms.",
-      "accept": "I Understand"
+      "accept": "I Understand",
+      "close": "Close"
     }
   },
   "errors": {
