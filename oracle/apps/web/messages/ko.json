@@ -190,6 +190,9 @@
   "delegation": {
     "title": "위임 정책",
     "subtitle": "조건 기반 자동 투표 위임",
+    "movedTitle": "투표와 위임은 Agora 에서 합니다",
+    "movedBody": "BRIDGE 는 투표나 위임을 받지 않습니다. 이곳의 제안은 AI 가 작성한 구속력 없는 초안이며, Mossland DAO 의 투표와 위임은 Agora 에서 이뤄집니다.",
+    "movedLink": "Agora 바로가기",
     "create": "정책 생성",
     "noPolicies": "위임 정책 없음",
     "createFirst": "첫 위임 정책을 생성하세요",

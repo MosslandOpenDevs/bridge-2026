@@ -190,6 +190,9 @@
   "delegation": {
     "title": "Delegation Policies",
     "subtitle": "Automated voting delegation based on conditions",
+    "movedTitle": "Voting and delegation happen on Agora",
+    "movedBody": "BRIDGE does not take votes or delegations. Its proposals are AI-drafted and non-binding; Mossland DAO votes and delegates on Agora.",
+    "movedLink": "Go to Agora",
     "create": "Create Policy",
     "noPolicies": "No delegation policies",
     "createFirst": "Create your first delegation policy",

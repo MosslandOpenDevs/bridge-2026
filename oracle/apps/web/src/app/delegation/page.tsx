@@ -3,13 +3,14 @@
 import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Users, Bot, Shield, Coins, Code, Plus, Trash2, Check, AlertTriangle, Loader2 } from "lucide-react";
+import { Users, Bot, Shield, Coins, Code, Plus, Trash2, Check, AlertTriangle, Loader2, ExternalLink } from "lucide-react";
 import { cn, timeAgo } from "@/lib/utils";
 import { useVotingPower, useAccount } from "@/hooks/useMOC";
 import { useToast } from "@/contexts/ToastContext";
 import { api } from "@/lib/api";
 import { useSignMessage } from "wagmi";
 import { signDelegationCreate, signDelegationRevoke } from "@/lib/delegationSignature";
+import { VOTING_ENABLED, AGORA_URL } from "@/lib/voting";
 
 // No reputation, accuracy or delegated-amount figures: the ones this list used
 // to carry were typed in by hand and never measured, and nothing was ever
@@ -148,7 +149,39 @@ function DelegationForm({ onClose, t, address, onSuccess }: { onClose: () => voi
   );
 }
 
+/**
+ * What /delegation shows while BRIDGE's own voting is off: where delegation
+ * actually happens. The API refuses delegation writes in that state, so the
+ * policy UI would only collect signatures for requests bound to fail.
+ */
+function DelegationOnAgora() {
+  const t = useTranslations("delegation");
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">{t("movedTitle")}</h1>
+      </div>
+      <div className="card max-w-2xl space-y-4">
+        <p className="text-gray-700">{t("movedBody")}</p>
+        <a
+          href={AGORA_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="btn-primary inline-flex items-center gap-2"
+        >
+          {t("movedLink")}
+          <ExternalLink className="w-4 h-4" aria-hidden="true" />
+        </a>
+      </div>
+    </div>
+  );
+}
+
 export default function DelegationPage() {
+  return VOTING_ENABLED ? <DelegationPolicies /> : <DelegationOnAgora />;
+}
+
+function DelegationPolicies() {
   const t = useTranslations();
   const tToast = useTranslations("toast");
   const toast = useToast();

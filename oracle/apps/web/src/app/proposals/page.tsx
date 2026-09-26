@@ -10,6 +10,7 @@ import { useVotingPower, useAccount } from "@/hooks/useMOC";
 import { useToast } from "@/contexts/ToastContext";
 import { api, type ProposalListItem } from "@/lib/api";
 import { useHasAdminKey } from "@/hooks/useAdminKey";
+import { VOTING_ENABLED } from "@/lib/voting";
 
 // Where Mossland DAO actually decides. Nothing voted on this page binds it.
 const AGORA_URL = "https://agora.moss.land";
@@ -559,7 +560,9 @@ export default function ProposalsPage() {
                   </div>
 
                   <div className="flex flex-row sm:flex-col items-center sm:items-end gap-2 sm:ml-4">
-                    {openForVoting && isConnected && (
+                    {/* Voting here is off unless NEXT_PUBLIC_VOTING_ENABLED is
+                        set; the notice above sends readers to Agora. */}
+                    {VOTING_ENABLED && openForVoting && isConnected && (
                       <button
                         onClick={() => setVotingProposal(proposal)}
                         className="btn-primary text-sm py-2 px-4 flex-1 sm:flex-none"
@@ -777,7 +780,7 @@ export default function ProposalsPage() {
         )}
       </div>
 
-      {votingProposal && (
+      {VOTING_ENABLED && votingProposal && (
         <VoteModal
           proposal={votingProposal}
           onClose={() => setVotingProposal(null)}
