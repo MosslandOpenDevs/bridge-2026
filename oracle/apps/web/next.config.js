@@ -2,6 +2,22 @@ const createNextIntlPlugin = require('next-intl/plugin');
 
 const withNextIntl = createNextIntlPlugin('./src/i18n.ts');
 
+// NEXT_PUBLIC_VOTING_ENABLED is inlined into the bundles, and every page that
+// reads it (src/lib/voting.ts) renders on demand, so a bad value would only
+// surface as a runtime error on those pages. Refuse it here instead, where
+// `next build` fails before anything is swapped in. Same accepted values as
+// src/lib/voting.ts and the API's envFlag; Next has loaded .env* by now.
+{
+  const raw = process.env.NEXT_PUBLIC_VOTING_ENABLED;
+  const value = (raw ?? "").trim().toLowerCase();
+  if (raw !== undefined && raw !== "" &&
+      !["1", "true", "yes", "on", "0", "false", "no", "off"].includes(value)) {
+    throw new Error(
+      `NEXT_PUBLIC_VOTING_ENABLED must be a boolean (1/0, true/false, yes/no, on/off), got "${raw}"`,
+    );
+  }
+}
+
 // Baseline security headers applied to every response. CSP is intentionally
 // omitted here — a wallet dApp (RainbowKit / WalletConnect) needs a carefully
 // tuned policy that is better managed at the edge/proxy once tested.
