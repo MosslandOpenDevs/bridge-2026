@@ -8,8 +8,21 @@ import { cn, getStatusColor, timeAgo, formatNumber } from "@/lib/utils";
 import { useSignMessage } from "wagmi";
 import { useVotingPower, useAccount } from "@/hooks/useMOC";
 import { useToast } from "@/contexts/ToastContext";
-import { api } from "@/lib/api";
+import { api, type ProposalListItem } from "@/lib/api";
 import { useHasAdminKey } from "@/hooks/useAdminKey";
+
+/**
+ * Active first, since those are the only ones anyone can act on, then newest
+ * first. The API returns insertion order, which put the single active
+ * production proposal last of 164.
+ */
+function compareProposals(a: ProposalListItem, b: ProposalListItem): number {
+  const activeRank = (p: ProposalListItem) => (p.status === "active" ? 0 : 1);
+  return (
+    activeRank(a) - activeRank(b) ||
+    new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
 
 // Must match buildVoteMessage() in apps/api/src/security.ts exactly.
 function buildVoteMessage(params: {
@@ -219,7 +232,8 @@ export default function ProposalsPage() {
     : allProposals.filter((p) => p.synthetic).length;
   const proposals = allProposals
     .filter((p) => showSynthetic || !p.synthetic)
-    .filter((p) => filter === "all" || p.status === filter);
+    .filter((p) => filter === "all" || p.status === filter)
+    .sort(compareProposals);
 
   const handleVoteSuccess = () => {
     // Invalidate and refetch proposals
