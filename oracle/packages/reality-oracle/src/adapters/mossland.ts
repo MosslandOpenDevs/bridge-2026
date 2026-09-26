@@ -119,9 +119,25 @@ interface TickerData {
   acc_trade_price_24h: number;
   acc_trade_volume_24h: number;
   timestamp: number;
+  /** "RISE" | "EVEN" | "FALL" against the previous close. */
   change: string;
+  /** Unsigned: a 6% fall and a 6% rise both read 0.06. */
   change_rate: number;
+  /** The same rate with its sign, negative for a fall. */
+  signed_change_rate?: number;
   change_price: number;
+}
+
+/**
+ * The day's change as a signed fraction. Upbit's change_rate is an absolute
+ * value, so reading it alone reported every fall as a rise of the same size;
+ * signed_change_rate carries the sign, and `change` recovers it if a payload
+ * ever lacks that field.
+ */
+function signedChangeRate(ticker: TickerData): number {
+  if (typeof ticker.signed_change_rate === "number") return ticker.signed_change_rate;
+  const magnitude = Math.abs(ticker.change_rate || 0);
+  return ticker.change === "FALL" ? -magnitude : magnitude;
 }
 
 interface Transaction {
@@ -311,6 +327,7 @@ export class MosslandAdapter extends BaseAdapter {
 
       if (Array.isArray(tickerData) && tickerData.length > 0) {
         const ticker = tickerData[0] as TickerData;
+        const changeRate = signedChangeRate(ticker);
         const priceChange = this.lastPrice > 0
           ? ((ticker.trade_price - this.lastPrice) / this.lastPrice) * 100
           : 0;
@@ -322,7 +339,7 @@ export class MosslandAdapter extends BaseAdapter {
             price: ticker.trade_price,
             priceChange,
             change: ticker.change,
-            changeRate: ticker.change_rate * 100,
+            changeRate: changeRate * 100,
             changePrice: ticker.change_price,
             volume24h: ticker.acc_trade_volume_24h,
             volumeKrw24h: ticker.acc_trade_price_24h,
@@ -336,14 +353,14 @@ export class MosslandAdapter extends BaseAdapter {
         this.lastPrice = ticker.trade_price;
 
         // Alert for significant price changes
-        if (Math.abs(ticker.change_rate) > 0.05) { // 5% change
+        if (Math.abs(changeRate) > 0.05) { // 5% change
           signals.push(this.createRawSignal(
             `mossland-price-alert-${Date.now()}`,
             {
               type: "price_alert",
               price: ticker.trade_price,
-              changeRate: ticker.change_rate * 100,
-              direction: ticker.change,
+              changeRate: changeRate * 100,
+              direction: changeRate < 0 ? "FALL" : "RISE",
               isSignificant: true,
             }
           ));

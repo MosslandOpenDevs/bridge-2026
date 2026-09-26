@@ -49,12 +49,30 @@ const doc = (n: number, date = "2026.09"): Doc => ({
 /** Newest first, like the live endpoint. */
 let disclosures: Doc[] = [];
 
+/** The fields of Upbit's KRW-MOC ticker the adapter reads. */
+const tick = (signedRate: number, tradeDate = "20260926") => ({
+  market: "KRW-MOC",
+  trade_price: 30.6,
+  change: signedRate > 0 ? "RISE" : signedRate < 0 ? "FALL" : "EVEN",
+  change_rate: Math.abs(signedRate),
+  signed_change_rate: signedRate,
+  change_price: 1.8,
+  acc_trade_price_24h: 624705609.5,
+  acc_trade_volume_24h: 20690500.8,
+  trade_date: tradeDate,
+  timestamp: Date.UTC(2026, 8, 26, 9, 42),
+});
+let ticker: ReturnType<typeof tick> | null = null;
+
 globalThis.fetch = (async (input: string | URL | Request) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
   let body: unknown;
   switch (url.pathname) {
     case "/api/disclosure":
       body = disclosures;
+      break;
+    case "/api/getTickerKrw":
+      body = ticker ? [ticker] : [];
       break;
     case "/api/getTotalTx":
     case "/api/getLastDayTx":
@@ -234,6 +252,30 @@ async function testStateSurvivesAMissingTable() {
   );
 }
 
+const priceAlerts = (signals: MosslandNormalizedSignal[]) =>
+  signals.filter((s) => s.category === "moc_price_alert");
+
+async function testPriceChangeKeepsItsSign() {
+  disclosures = [];
+  const adapter = new MosslandAdapter({ apiUrl: API_URL, language: "en" });
+
+  ticker = tick(-0.061);
+  const fall = await collect(adapter);
+  const [fallAlert] = priceAlerts(fall);
+  assert(fallAlert, "a 6.1% fall should raise an alert");
+  assert(Math.abs(fallAlert.value - -6.1) < 1e-9, `a fall is stored negative, got ${fallAlert.value}`);
+  assert(fallAlert.description === "MOC Price Alert: fall 6.10%", `unexpected description ${fallAlert.description}`);
+  const price = fall.find((s) => s.category === "moc_price");
+  assert(price?.description.endsWith("(-6.10%)"), `the price signal shows the fall, got ${price?.description}`);
+
+  ticker = tick(0.061);
+  const [riseAlert] = priceAlerts(await collect(adapter));
+  assert(riseAlert && Math.abs(riseAlert.value - 6.1) < 1e-9, `a rise is stored positive, got ${riseAlert?.value}`);
+  assert(riseAlert.description === "MOC Price Alert: rise 6.10%", `unexpected description ${riseAlert.description}`);
+
+  ticker = null;
+}
+
 /* --------------------------------- run -------------------------------- */
 
 async function main() {
@@ -243,6 +285,7 @@ async function main() {
   await runTest("A restart does not re-announce a disclosure", testNoReannouncementAfterRestart);
   await runTest("Legacy rows seed the transition", testLegacyRowsSeedTheTransition);
   await runTest("Missing state does not stop the collector", testStateSurvivesAMissingTable);
+  await runTest("A price change keeps its sign", testPriceChangeKeepsItsSign);
   console.log(failures === 0 ? "\n   all passed\n" : `\n   ${failures} failed\n`);
   process.exit(failures === 0 ? 0 : 1);
 }
