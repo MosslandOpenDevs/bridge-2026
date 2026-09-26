@@ -148,6 +148,8 @@
     "agoraLink": "Agora 바로가기",
     "showSynthetic": "데모 데이터 보기",
     "syntheticHidden": "데모 제안 {count}건 숨김",
+    "syntheticHiddenUncounted": "데모 제안 숨김",
+    "noRealProposals": "이 필터에 맞는 실제 관측 기반 제안이 없습니다.",
     "syntheticHint": "실제 관측이 아니라 데모 신호에서 탐지된 이슈를 바탕으로 생성된 제안입니다.",
     "expired": "정족수 미달로 만료",
     "expiredHint": "정족수에 도달하지 못한 채 투표가 끝났습니다. 내용상 부결된 것이 아닙니다.",

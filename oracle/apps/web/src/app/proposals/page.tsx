@@ -43,6 +43,26 @@ function serverStatusFilter(filter: string): string | undefined {
   return filter === "active" || filter === "passed" || filter === "rejected" ? filter : undefined;
 }
 
+type SyntheticProposalStats = { total: number; active: number; passed: number; rejected: number };
+
+/**
+ * How many demo proposals the toggle is keeping out of the current status
+ * filter: 0 for none, null for "some, but the count cannot be known".
+ *
+ * Counting every demo proposal whatever the filter said "143 hidden" under
+ * "Active", when almost none of them were. The counts come from /api/stats,
+ * which splits by stored status. That settles active and passed, but not
+ * rejected against expired: a legacy no-quorum row is stored "rejected" and
+ * shown "expired". For those two filters, only whether any demo proposal
+ * closed without passing is known.
+ */
+function hiddenSyntheticCount(filter: string, synthetic: SyntheticProposalStats): number | null {
+  if (filter === "all") return synthetic.total;
+  if (filter === "active") return synthetic.active;
+  if (filter === "passed") return synthetic.passed;
+  return synthetic.total - synthetic.active - synthetic.passed > 0 ? null : 0;
+}
+
 /** Whether an active proposal can still take votes; the API refuses them after votingEndsAt. */
 function isOpenForVoting(proposal: ProposalListItem, now: number): boolean {
   return proposal.status === "active" && new Date(proposal.votingEndsAt).getTime() > now;
@@ -300,7 +320,12 @@ export default function ProposalsPage() {
 
   const now = Date.now();
   const allProposals = data?.proposals ?? [];
-  const hiddenSyntheticCount = showSynthetic ? 0 : (stats?.proposals.synthetic.total ?? 0);
+  const hiddenSynthetic =
+    showSynthetic || !stats ? 0 : hiddenSyntheticCount(filter, stats.proposals.synthetic);
+  const hiddenSyntheticLabel =
+    hiddenSynthetic === null
+      ? t("proposals.syntheticHiddenUncounted")
+      : t("proposals.syntheticHidden", { count: hiddenSynthetic });
   const proposals = allProposals
     .filter((p) => showSynthetic || !p.synthetic)
     .filter((p) => filter === "all" || displayStatus(p) === filter)
@@ -391,10 +416,10 @@ export default function ProposalsPage() {
         </div>
       </div>
 
-      {hiddenSyntheticCount > 0 && (
+      {hiddenSynthetic !== 0 && proposals.length > 0 && (
         <p className="flex items-center gap-1 text-xs text-gray-500">
           <FlaskConical className="w-3 h-3" aria-hidden="true" />
-          {t("proposals.syntheticHidden", { count: hiddenSyntheticCount })}
+          {hiddenSyntheticLabel}
         </p>
       )}
 
@@ -403,6 +428,22 @@ export default function ProposalsPage() {
         {isLoading ? (
           <div className="card flex items-center justify-center py-12">
             <Loader2 className="w-8 h-8 animate-spin text-moss-600" />
+          </div>
+        ) : proposals.length === 0 && hiddenSynthetic !== 0 ? (
+          // Nothing real matches, but demo rows do. "No proposals yet" would
+          // say there is nothing here at all.
+          <div className="card text-center py-12 text-gray-500">
+            <FlaskConical className="w-12 h-12 mx-auto mb-3 text-gray-300" aria-hidden="true" />
+            <p>{t("proposals.noRealProposals")}</p>
+            <p className="text-sm">{hiddenSyntheticLabel}</p>
+            <button
+              type="button"
+              onClick={() => setShowSynthetic(true)}
+              className="mt-3 inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-600 hover:border-gray-400"
+            >
+              <FlaskConical className="w-4 h-4" aria-hidden="true" />
+              {t("proposals.showSynthetic")}
+            </button>
           </div>
         ) : proposals.length === 0 ? (
           <div className="card text-center py-12 text-gray-500">

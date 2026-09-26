@@ -148,6 +148,8 @@
     "agoraLink": "Go to Agora",
     "showSynthetic": "Show demo data",
     "syntheticHidden": "{count} demo proposals hidden",
+    "syntheticHiddenUncounted": "Demo proposals hidden",
+    "noRealProposals": "No proposals from observed data match this filter.",
     "syntheticHint": "Raised on an issue detected from demo signals, not from observed data.",
     "expired": "Expired — no quorum",
     "expiredHint": "Voting closed without reaching quorum. This is not a rejection on the merits.",
