@@ -319,6 +319,9 @@ export function hydrate(deps: {
   }
 
   // Votes ----------------------------------------------------------
+  // Proposals that lost a vote row to a restore failure. Their in-memory tally
+  // is short, so it cannot be trusted to say quorum was missed.
+  const proposalsWithUnrestoredVotes = new Set<string>();
   for (const row of governanceDb.allVotes.all() as any[]) {
     try {
       if (!knownProposals.has(row.proposal_id)) {
@@ -337,6 +340,7 @@ export function hydrate(deps: {
       });
       report.votes++;
     } catch (error) {
+      if (row?.proposal_id) proposalsWithUnrestoredVotes.add(row.proposal_id);
       report.skipped.push(`vote ${row?.id}: ${(error as Error).message}`);
     }
   }
@@ -344,6 +348,7 @@ export function hydrate(deps: {
   report.relabelledExpired = relabelUnquorateRejections(
     deps.votingSystem,
     knownProposals,
+    proposalsWithUnrestoredVotes,
     report.skipped,
   );
 
@@ -460,12 +465,20 @@ export function hydrate(deps: {
 function relabelUnquorateRejections(
   votingSystem: VotingSystem,
   proposalIds: Set<string>,
+  withUnrestoredVotes: Set<string>,
   skipped: string[],
 ): number {
   let relabelled = 0;
   for (const id of proposalIds) {
     const proposal = votingSystem.getProposal(id);
     if (!proposal || proposal.status !== "rejected") continue;
+    // The write is permanent and the tally here only counts votes that
+    // restored. A quorate rejection with one unreadable vote row would look
+    // unquorate, and fixing the row later would not bring "rejected" back.
+    if (withUnrestoredVotes.has(id)) {
+      skipped.push(`proposal ${id}: not relabelled as expired, some of its votes could not be restored`);
+      continue;
+    }
     try {
       if (votingSystem.tallyVotes(id).quorumReached) continue;
       governanceDb.markRejectedExpired.run(id);

@@ -1178,6 +1178,42 @@ async function testRestoredRejectionIsRelabelled() {
     !serverLog.slice(secondMark).join("").includes("zero-quorum proposals as expired"),
     "a second boot should find nothing to relabel",
   );
+
+  // A quorate rejection whose vote row fails to restore has a short tally in
+  // memory. It must not be relabelled on that evidence: the write is
+  // permanent, and repairing the row afterwards would not bring "rejected"
+  // back.
+  const setGenuineVoteWeight = (weight: string) => {
+    const rw = new Database(join(dataDir, "e2e.db"));
+    try {
+      rw.prepare("UPDATE votes SET weight = ? WHERE proposal_id = ?").run(weight, genuine.id);
+    } finally {
+      rw.close();
+    }
+  };
+  setGenuineVoteWeight("not-a-number");
+  const thirdMark = serverLog.length;
+  stopServer(true);
+  await sleep(500);
+  await startServer();
+  assert(
+    await logContains("not relabelled as expired", thirdMark),
+    "boot should say why it left a proposal with unrestored votes alone",
+  );
+  assert(
+    readStatus(genuine.id) === "rejected",
+    "a rejection with an unreadable vote row must stay rejected in storage",
+  );
+
+  setGenuineVoteWeight("10");
+  stopServer(true);
+  await sleep(500);
+  await startServer();
+  const repaired = await get(`/api/proposals/${genuine.id}`);
+  assert(
+    repaired.data.proposal.status === "rejected",
+    `after the vote row is repaired the proposal is still rejected, got ${repaired.data.proposal.status}`,
+  );
 }
 
 /**
