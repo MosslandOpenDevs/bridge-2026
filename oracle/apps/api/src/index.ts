@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getAddress } from "viem";
 import express, { Express } from "express";
 import { createServer } from "http";
+import { isIP } from "node:net";
 import { Server as SocketIOServer } from "socket.io";
 import cors from "cors";
 import helmet from "helmet";
@@ -421,8 +422,52 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "100kb" }));
 
-// Trust the first proxy hop so rate limiting sees the real client IP behind nginx.
-app.set("trust proxy", 1);
+/**
+ * Which peers may speak for the client in X-Forwarded-For. The per-IP rate
+ * limits below key on req.ip, and req.ip is only as honest as this setting.
+ *
+ * The default, one hop, trusts whoever connects directly. That is right behind
+ * nginx, but a caller that reaches the port without nginx is trusted too, and
+ * can put a new address in X-Forwarded-For on every request to get a fresh
+ * rate-limit bucket each time. Naming the proxy's address instead makes such a
+ * caller count as its own socket address, whatever the header says.
+ *
+ * TRUST_PROXY is a hop count or a comma-separated list of IPs/CIDRs (Express's
+ * loopback, linklocal and uniquelocal names work too). A bare number always
+ * means hops: passed to Express as a string, "2" would reach proxy-addr, which
+ * reads it as the IPv4 address 0.0.0.2 and so would trust no real proxy.
+ */
+const TRUST_PROXY_NAMES = new Set(["loopback", "linklocal", "uniquelocal"]);
+function refuseTrustProxy(raw: string, detail: string): never {
+  console.error(
+    `❌ Refusing to start: TRUST_PROXY must be a hop count (e.g. 1) or a comma-separated ` +
+      `list of proxy IPs/CIDRs (e.g. 100.107.17.114), got "${raw}": ${detail}`,
+  );
+  process.exit(1);
+}
+function resolveTrustProxy(raw: string | undefined): number | string[] {
+  const value = raw?.trim() ?? "";
+  if (value === "") return 1;
+  if (/^\d+$/.test(value)) return Number(value);
+  const entries = value.split(",").map((entry) => entry.trim());
+  for (const entry of entries) {
+    if (TRUST_PROXY_NAMES.has(entry)) continue;
+    const slash = entry.indexOf("/");
+    const address = slash === -1 ? entry : entry.slice(0, slash);
+    // node:net rather than proxy-addr's parser, which also takes "0x7f000001"
+    // and bare integers as IPv4, so "10.0.0.1,2" would mean 0.0.0.2.
+    if (isIP(address) === 0) refuseTrustProxy(raw ?? "", `"${entry}" is not an IP address or CIDR`);
+  }
+  return entries;
+}
+const TRUST_PROXY = resolveTrustProxy(process.env.TRUST_PROXY);
+try {
+  // Express compiles the setting here, so a bad prefix length (/33) throws now
+  // rather than on the first request.
+  app.set("trust proxy", TRUST_PROXY);
+} catch (error) {
+  refuseTrustProxy(process.env.TRUST_PROXY ?? "", error instanceof Error ? error.message : String(error));
+}
 
 // Rate limit caps are env-tunable so tests / load benchmarks can relax them.
 const RATE_LIMIT_GLOBAL = parseInt(process.env.RATE_LIMIT_GLOBAL || "120", 10);
@@ -2803,7 +2848,32 @@ void checkArchiveRpc();
 
 // Start server
 const PORT = process.env.PORT || 4000;
-httpServer.listen(PORT, () => {
+// Unset listens on every interface, as it always has. On a host whose LAN can
+// reach the port, HOST=<the address the proxy connects to> keeps direct
+// callers out entirely; TRUST_PROXY above only stops them spoofing their IP.
+const HOST = process.env.HOST?.trim() || undefined;
+const LISTEN_AT = HOST ? `${isIP(HOST) === 6 ? `[${HOST}]` : HOST}:${PORT}` : `*:${PORT}`;
+// Without this an address that is not up yet (a tailnet IP before tailscaled)
+// or a taken port surfaces as an unhandled 'error' event and a stack trace.
+// The exit code is the same; pm2 restarts the process either way.
+const refuseToListen = (error: NodeJS.ErrnoException) => {
+  console.error(`❌ Refusing to start: cannot listen on ${LISTEN_AT}: ${error.code ?? error.message}`);
+  process.exit(1);
+};
+httpServer.once("error", refuseToListen);
+httpServer.once("listening", () => {
+  httpServer.off("error", refuseToListen);
+  console.log(
+    `🌐 Listening on ${HOST ? LISTEN_AT : `${LISTEN_AT} (all interfaces; set HOST to bind one address)`}` +
+      `, X-Forwarded-For trusted from ` +
+      (typeof TRUST_PROXY !== "number"
+        ? TRUST_PROXY.join(", ")
+        : TRUST_PROXY === 0
+          ? "no one"
+          : `the nearest ${TRUST_PROXY} hop(s)`),
+  );
+});
+httpServer.listen({ port: Number(PORT), host: HOST }, () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
