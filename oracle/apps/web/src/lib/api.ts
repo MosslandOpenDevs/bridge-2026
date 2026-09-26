@@ -71,6 +71,10 @@ class APIClient {
   async getHealth() {
     // Mirrors the health handler's full payload. `lastObservedSignalAt` is
     // null when unknown — never read null as "just now".
+    //
+    // The /api alias, not bare /health: with the default same-origin base,
+    // nginx only proxies /api/* to the API, so /health would land on Next.js
+    // and 404 in production.
     return this.fetch<{
       status: "ok" | "degraded" | "down";
       service: string;
@@ -84,7 +88,7 @@ class APIClient {
         staleAfterSeconds: number | null;
       };
       reason: string | null;
-    }>("/health");
+    }>("/api/health");
   }
 
   // Signals
