@@ -189,11 +189,21 @@ function acquireLock(lockFile) {
   return false;
 }
 
-// Grandfather-father-son, by count rather than by calendar: keep the newest
-// `keepDaily` backups, plus the newest backup of each of the `keepWeekly` most
-// recent ISO weeks that have one. Counting (rather than "weeks since today")
+// Grandfather-father-son, by count rather than by calendar. Kept:
+//   - the newest backup, always;
+//   - every backup within RECENT_MS of the newest one, so a manual backup
+//     taken before a risky change is not pruned by a second one taken after
+//     the change went wrong;
+//   - the newest backup of each of the `keepDaily` most recent UTC days that
+//     have one -- days, not files, so extra runs on one day (manual ones,
+//     `pm2 restart`, a resurrect after a reboot) cannot push older days out;
+//   - the newest backup of each of the `keepWeekly` most recent ISO weeks
+//     that have one.
+// Counting days/weeks that have a backup (rather than "days since today")
 // means a job that was off for a month does not come back and delete the only
-// weekly copies left from before the gap.
+// copies left from before the gap.
+const RECENT_MS = 24 * 3600 * 1000;
+
 function planRotation(names, keepDaily, keepWeekly) {
   const backups = names
     .map((name) => {
@@ -206,16 +216,26 @@ function planRotation(names, keepDaily, keepWeekly) {
     .filter(Boolean)
     // Name order == time order; the name breaks ties between .db and .db.gz.
     .sort((a, b) => (a.key === b.key ? (a.name < b.name ? 1 : -1) : a.key < b.key ? 1 : -1));
+  if (backups.length === 0) return { keep: [], remove: [] };
 
-  const keep = new Set(backups.slice(0, keepDaily).map((b) => b.name));
-  const weeksSeen = new Set();
+  const keep = new Set([backups[0].name]);
+  const newestAt = backups[0].at.getTime();
   for (const b of backups) {
-    const w = isoWeek(b.at);
-    if (weeksSeen.has(w)) continue;
-    if (weeksSeen.size >= keepWeekly) break;
-    weeksSeen.add(w);
-    keep.add(b.name);
+    if (newestAt - b.at.getTime() < RECENT_MS) keep.add(b.name);
   }
+  // Newest-first order means the first backup seen in a bucket is its newest.
+  const keepNewestPer = (bucketOf, limit) => {
+    const seen = new Set();
+    for (const b of backups) {
+      const bucket = bucketOf(b);
+      if (seen.has(bucket)) continue;
+      if (seen.size >= limit) break;
+      seen.add(bucket);
+      keep.add(b.name);
+    }
+  };
+  keepNewestPer((b) => b.key.slice(0, 8), keepDaily); // UTC date
+  keepNewestPer((b) => isoWeek(b.at), keepWeekly);
   return {
     keep: backups.filter((b) => keep.has(b.name)).map((b) => b.name),
     remove: backups.filter((b) => !keep.has(b.name)).map((b) => b.name),

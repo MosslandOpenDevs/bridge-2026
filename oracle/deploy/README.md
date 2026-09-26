@@ -104,8 +104,12 @@ What one run of
    rotates nothing, and exits non-zero
 4. Optional gzip, then `data/backup/daily-YYYYMMDD-HHMMSS.db[.gz]` (UTC) with a
    `sha256sum`-format `.sha256` sidecar, mode 0600
-5. Rotation, only after a verified copy exists: the newest 7, plus the newest
-   of each of the 4 most recent ISO weeks that have one (at most 10 files).
+5. Rotation, only after a verified copy exists: the newest backup of each of
+   the 7 most recent (UTC) days that have one, plus the newest of each of the
+   4 most recent ISO weeks that have one (10 files in steady state), plus every
+   backup from the 24 hours before the newest — so extra runs on one day
+   (manual ones, `pm2 restart`) never push older days out, and a backup taken
+   before a risky change survives one taken after it.
    Only `daily-*` files are ever considered — `pre-deploy-*.db` (rotated by
    deploy.sh) and `manual-*.db` are never touched
 6. Optional rsync off the host (`BACKUP_RSYNC_TARGET`); a failed transfer keeps
