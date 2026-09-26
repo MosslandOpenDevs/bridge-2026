@@ -145,6 +145,8 @@
     "showSynthetic": "Show demo data",
     "syntheticHidden": "{count} demo proposals hidden",
     "syntheticHint": "Raised on an issue detected from demo signals, not from observed data.",
+    "expired": "Expired — no quorum",
+    "expiredHint": "Voting closed without reaching quorum. This is not a rejection on the merits.",
     "voteWeight": "Vote Weight",
     "reason": "Reason (Optional)",
     "castVote": "Cast Vote",

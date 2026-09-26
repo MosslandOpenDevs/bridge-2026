@@ -11,6 +11,25 @@ import { useToast } from "@/contexts/ToastContext";
 import { api, type ProposalListItem } from "@/lib/api";
 import { useHasAdminKey } from "@/hooks/useAdminKey";
 
+type DisplayStatus = ProposalListItem["status"];
+
+/**
+ * The status a reader should see, which is not always the one stored.
+ *
+ * A proposal that closes without reaching quorum was nobody's "no": no one
+ * turned up. Labelling it "Rejected" told readers the community had voted
+ * these proposals down, when in production not one vote was ever cast on any
+ * of them. The API is moving those to "expired"; until that migration has run,
+ * the legacy rows are still stored as "rejected", so a rejection whose tally
+ * never reached quorum is shown as the expiry it was.
+ */
+function displayStatus(proposal: ProposalListItem): DisplayStatus {
+  if (proposal.status === "rejected" && proposal.tally && !proposal.tally.quorumReached) {
+    return "expired";
+  }
+  return proposal.status;
+}
+
 /**
  * Active first, since those are the only ones anyone can act on, then newest
  * first. The API returns insertion order, which put the single active
@@ -218,8 +237,9 @@ export default function ProposalsPage() {
   const [votingProposal, setVotingProposal] = useState<any>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // One request for everything, filtered here: the toggle needs the number of
-  // demo proposals it is hiding.
+  // One request for everything, filtered here: the status filter works on the
+  // displayed status (a legacy no-quorum "rejected" belongs under "expired"),
+  // and the toggle needs the number of demo proposals it is hiding.
   const { data, isLoading } = useQuery({
     queryKey: ["proposals"],
     queryFn: () => api.getProposals(),
@@ -232,7 +252,7 @@ export default function ProposalsPage() {
     : allProposals.filter((p) => p.synthetic).length;
   const proposals = allProposals
     .filter((p) => showSynthetic || !p.synthetic)
-    .filter((p) => filter === "all" || p.status === filter)
+    .filter((p) => filter === "all" || displayStatus(p) === filter)
     .sort(compareProposals);
 
   const handleVoteSuccess = () => {
@@ -289,6 +309,7 @@ export default function ProposalsPage() {
             <option value="active">{t("proposals.active")}</option>
             <option value="passed">{t("proposals.passed")}</option>
             <option value="rejected">{t("proposals.rejected")}</option>
+            <option value="expired">{t("proposals.expired")}</option>
           </select>
         </div>
       </div>
@@ -330,6 +351,7 @@ export default function ProposalsPage() {
             const quorumPercent = Math.min(100, (voteCount / quorum) * 100);
             const isExpanded = expandedId === proposal.id;
             const votingEndsAt = new Date(proposal.votingEndsAt);
+            const status = displayStatus(proposal);
 
             // Extract title and description from decisionPacket or direct fields
             const dp = proposal.decisionPacket;
@@ -350,11 +372,18 @@ export default function ProposalsPage() {
                 <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center flex-wrap gap-1 sm:gap-2 mb-2">
-                      <span className={cn("badge text-xs", getStatusColor(proposal.status))}>
-                        {proposal.status === "active" ? t("proposals.active") :
-                         proposal.status === "passed" ? t("proposals.passed") :
-                         proposal.status === "executed" ? t("proposals.executed") :
-                         proposal.status === "pending" ? t("proposals.pending") : t("proposals.rejected")}
+                      <span
+                        className={cn("badge text-xs", getStatusColor(status))}
+                        title={status === "expired" ? t("proposals.expiredHint") : undefined}
+                      >
+                        {/* Every status is named explicitly. The old fallthrough
+                            rendered anything unrecognised as "Rejected". */}
+                        {status === "active" ? t("proposals.active") :
+                         status === "passed" ? t("proposals.passed") :
+                         status === "executed" ? t("proposals.executed") :
+                         status === "pending" ? t("proposals.pending") :
+                         status === "expired" ? t("proposals.expired") :
+                         status === "rejected" ? t("proposals.rejected") : status}
                       </span>
                       {(proposal.aiAssisted || dp) && (
                         <span className="badge bg-purple-50 text-purple-600 text-xs">
