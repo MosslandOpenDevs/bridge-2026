@@ -481,14 +481,30 @@ app.use(
   }),
 );
 
-// Any write that succeeds may have moved a figure in /api/stats — a proposal
-// finalized, an outcome recorded, an issue closed — so it drops the cached
-// payload. Done in res.end, before the response leaves, so a client that reads
-// stats straight after its own write cannot be answered from the old cache.
-// Failed writes (4xx/5xx) leave it alone: they changed nothing, and letting
-// them through would let anyone force a recomputation per request.
+// Public writes that cannot move any figure in /api/stats. A tally only reads;
+// a vote or a delegation changes no proposal's status and nothing else the
+// payload counts. Every other write route requires the admin key.
+const STATS_NEUTRAL_WRITES = [
+  /^\/api\/proposals\/[^/]+\/(vote|tally)\/?$/,
+  /^\/api\/delegations(\/|$)/,
+];
+
+// Any other write that succeeds may have moved a figure in /api/stats — a
+// proposal finalized, an outcome recorded, an issue closed — so it drops the
+// cached payload. Done in res.end, before the response leaves, so a client
+// that reads stats straight after its own write cannot be answered from the
+// old cache. Failed writes (4xx/5xx) and the public writes above leave it
+// alone: they changed nothing stats counts, and letting them through would let
+// an anonymous caller force the synchronous recomputation on every other
+// request (POST .../tally answers 200 for any existing id). What is left needs
+// the admin key.
 app.use((req, res, next) => {
-  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
+  if (
+    req.method === "GET" ||
+    req.method === "HEAD" ||
+    req.method === "OPTIONS" ||
+    STATS_NEUTRAL_WRITES.some((pattern) => pattern.test(req.path))
+  ) {
     next();
     return;
   }

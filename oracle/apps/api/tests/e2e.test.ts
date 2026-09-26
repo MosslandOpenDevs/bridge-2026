@@ -1868,7 +1868,7 @@ async function testStats() {
 
 /**
  * /api/stats is served from a cache that the Socket.IO connect handler shares,
- * dropped by any successful write and by nothing else.
+ * dropped by a successful write that can move its figures and by nothing else.
  *
  * Also pins what `conditions` means: rows left over from before open issues
  * were folded by fingerprint count once per condition, not once per row.
@@ -1936,6 +1936,21 @@ async function testStatsCache() {
     assert(
       stillCached.data.asOf === first.data.asOf,
       "stats: a failed write should leave the cache in place",
+    );
+
+    // Nor does a public write that succeeds but moves nothing stats counts:
+    // otherwise anyone could force a recomputation every other request.
+    const anyProposal = await get("/api/proposals?limit=1");
+    const tally = await post(
+      `/api/proposals/${anyProposal.data.proposals[0].id}/tally`,
+      undefined,
+      false,
+    );
+    assertStatus(tally.response, 200, "tally");
+    const afterTally = await get("/api/stats");
+    assert(
+      afterTally.data.asOf === first.data.asOf,
+      "stats: a read-only tally should leave the cache in place",
     );
 
     // Any successful write, not only the ones that recompute on purpose.
