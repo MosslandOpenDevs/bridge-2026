@@ -22,11 +22,13 @@ cd oracle && pnpm install --frozen-lockfile && pnpm build && pnpm test
 ```
 
 **Before you add an LLM key**, read the "Autonomous loop" section of
-`oracle/apps/api/.env.example`. With a key set, the API deliberates on detected
-issues by itself — five LLM calls each, every `ISSUE_DETECT_INTERVAL` seconds —
-and promotes confident results to live proposals. Without one, everything falls
-back to a rule-based path and costs nothing. `GET /api/llm/usage` reports what
-has actually been spent.
+`oracle/apps/api/.env.example`. A key on its own spends only when you ask for a
+deliberation: the loop that deliberates on detected issues by itself (five LLM
+calls each, every `ISSUE_DETECT_INTERVAL` seconds) and promotes confident
+results to live proposals is off unless `AUTO_DELIBERATE_ENABLED=1` and
+`AUTO_PROPOSAL_ENABLED=1` are set. Without a key, everything falls back to a
+rule-based path and costs nothing. `GET /api/llm/usage` reports what has
+actually been spent.
 
 The test suite blanks the LLM keys in the server it spawns, so `pnpm test` will
 not bill you even with a populated `.env`. Keep it that way.

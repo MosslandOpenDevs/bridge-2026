@@ -145,13 +145,17 @@ pnpm --filter @oracle/web dev             # Next.js web (port 3100)
 ```
 
 Copy `oracle/apps/api/.env.example` → `oracle/apps/api/.env` and fill in the values you need
-(LLM keys, RPC URL, `ADMIN_API_KEY`, etc.). **Adding an LLM key starts an
-autonomous loop that spends money** — the server deliberates on newly detected
-issues by itself, five LLM calls each, every `ISSUE_DETECT_INTERVAL` seconds,
-and promotes the confident ones to live proposals. Without a key it all falls
-back to a rule-based path and costs nothing. Set `AUTO_DELIBERATE_ENABLED=0` to
-keep detection without the spend, and check `GET /api/llm/usage` for what it
-has actually used. **MOC verification is on by
+(LLM keys, RPC URL, `ADMIN_API_KEY`, etc.). **Adding an LLM key does not
+start the autonomous loop** — automatic deliberation, auto-promotion to
+proposals and outcome scoring are all off by default. A key only makes the
+deliberations and debates you request (`POST /api/deliberate`,
+`POST /api/debate`) use the LLM; signal collection and issue detection run
+either way. `AUTO_DELIBERATE_ENABLED=1`
+opts in to deliberating every newly detected high-priority issue — five LLM
+calls each, every `ISSUE_DETECT_INTERVAL` seconds — and
+`AUTO_PROPOSAL_ENABLED=1` additionally opens the confident ones as live
+proposals; read the "Autonomous loop" section of `.env.example` first. Check
+`GET /api/llm/usage` for what has actually been spent. **MOC verification is on by
 default** — the API falls back to a public Ethereum RPC for read-only Moss
 Coin balance checks, so votes require a wallet signature and a nonzero MOC
 balance out of the box. Set `MAINNET_RPC_URL=off` for an open demo mode. See

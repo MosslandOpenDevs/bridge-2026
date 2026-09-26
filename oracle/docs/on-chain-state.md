@@ -70,6 +70,13 @@ Publish settled results, not live ones, and make it idempotent:
 2. Submit the settled votes with `castVotesFor` in batches, recording the
    returned `onchainId` on the proposal so a retry does not double-submit.
 3. Finalize and (after the timelock) execute on-chain.
+   The contract has no `Expired` status: its `finalizeProposal` sets
+   `Rejected` for anything that did not pass, quorum or not. Off-chain, a
+   proposal that closed without reaching quorum is `expired`, and one that
+   reached quorum but missed the threshold is `rejected`. An off-chain
+   `expired` therefore mirrors as on-chain `Rejected`; that is the contract's
+   coarser vocabulary, not a divergence to reconcile. Better still, do not
+   mirror expired proposals at all — there is no settled vote to publish.
 4. Record the outcome proof once measurements exist.
 
 Reconcile on boot: for any proposal with an `onchainId`, compare the on-chain
