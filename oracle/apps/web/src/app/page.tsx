@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useTranslations } from "next-intl";
+import { useFormatter, useTranslations } from "next-intl";
 import { api } from "@/lib/api";
 import {
   Activity,
@@ -13,6 +13,13 @@ import {
   Zap,
 } from "lucide-react";
 import Link from "next/link";
+
+type Stats = Awaited<ReturnType<typeof api.getStats>>;
+
+// How many of the newest detected issues to scan for one that was observed
+// rather than invented by the demo adapter. Issues are small once their
+// embedded signals are dropped, so this stays a few kilobytes.
+const ISSUE_LOOKBACK = 50;
 
 function StatCard({
   title,
@@ -73,91 +80,154 @@ function WelcomeBanner() {
   );
 }
 
-function RecentActivity() {
-  const t = useTranslations();
+function ActivityRow({
+  icon: Icon,
+  iconClassName,
+  label,
+  href,
+  children,
+}: {
+  icon: React.ElementType;
+  iconClassName: string;
+  label: string;
+  href: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <li className="border-b border-gray-100 last:border-0">
+      <Link
+        href={href}
+        className="flex items-start space-x-3 py-2 -mx-2 px-2 rounded-lg hover:bg-gray-50 transition-colors"
+      >
+        <Icon aria-hidden="true" className={`w-5 h-5 mt-0.5 flex-shrink-0 ${iconClassName}`} />
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-gray-900">{label}</p>
+          <div className="text-xs text-gray-500">{children}</div>
+        </div>
+      </Link>
+    </li>
+  );
+}
 
-  const activities = [
-    {
-      id: 1,
-      type: "signal",
-      titleKey: "signals.title",
-      time: "5m",
-      severity: "high",
+/**
+ * What the service has actually done lately, read from the same light
+ * endpoints as the rest of the dashboard.
+ *
+ * This replaces a hardcoded list that told every visitor a proposal had
+ * passed an hour ago and an outcome had been verified yesterday, while
+ * /api/stats reported 0 passed proposals and 0 proofs. Every row now either
+ * shows a real observation with its real time or says plainly that there is
+ * none; a row whose request failed says so instead of falling back to a
+ * guess. /api/proposals is deliberately not read here — it is several
+ * megabytes, and the active count in /api/stats is all this card needs.
+ */
+function RecentActivity({
+  stats,
+  statsLoading,
+  statsFailed,
+}: {
+  stats: Stats | undefined;
+  statsLoading: boolean;
+  statsFailed: boolean;
+}) {
+  const t = useTranslations();
+  const format = useFormatter();
+
+  // lastObservedSignalAt skips the demo adapter, which keeps writing signals
+  // while real collection is down; the newest row of /api/signals would make
+  // a stalled pipeline look alive.
+  const health = useQuery({
+    queryKey: ["home", "health"],
+    queryFn: () => api.getHealth(),
+    refetchInterval: 60000,
+  });
+
+  // status=detected is listed newest first; the default listing is ordered by
+  // priority, so its first row is not the latest one.
+  const latestIssue = useQuery({
+    queryKey: ["home", "latestObservedIssue"],
+    queryFn: async () => {
+      const { issues } = await api.getIssues("detected", {
+        limit: ISSUE_LOOKBACK,
+        includeSignals: false,
+      });
+      return issues.find((issue) => !issue.synthetic) ?? null;
     },
-    {
-      id: 2,
-      type: "proposal",
-      titleKey: "proposals.title",
-      time: "1h",
-      status: "passed",
-    },
-    {
-      id: 3,
-      type: "issue",
-      titleKey: "issues.title",
-      time: "3h",
-      severity: "medium",
-    },
-    {
-      id: 4,
-      type: "outcome",
-      titleKey: "outcomes.title",
-      time: "1d",
-      success: true,
-    },
-  ];
+    refetchInterval: 60000,
+  });
+
+  const now = new Date();
+  // null for a missing or unparseable time, so it renders as the empty state
+  // rather than "Invalid Date".
+  const ago = (value: string | null | undefined) => {
+    if (!value) return null;
+    const at = new Date(value);
+    return Number.isNaN(at.getTime()) ? null : format.relativeTime(at, now);
+  };
+
+  const pending = (loading: boolean, failed: boolean) =>
+    loading ? t("common.loading") : failed ? t("errors.fetchFailed") : null;
+
+  const signalAgo = ago(health.data?.lastObservedSignalAt);
+  const issueAgo = ago(latestIssue.data?.detectedAt);
+  const activeProposals = stats?.proposals.active ?? 0;
+  const measuredOutcomes = stats?.outcomes.totalProofs ?? 0;
 
   return (
     <div className="card">
-      <h3 className="text-lg font-semibold text-gray-900 mb-4">{t("dashboard.recentSignals")}</h3>
-      <div className="space-y-4">
-        {activities.map((activity) => (
-          <div
-            key={activity.id}
-            className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0"
-          >
-            <div className="flex items-center space-x-3">
-              {activity.type === "signal" && (
-                <Activity className="w-5 h-5 text-blue-500" />
-              )}
-              {activity.type === "proposal" && (
-                <Vote className="w-5 h-5 text-purple-500" />
-              )}
-              {activity.type === "issue" && (
-                <AlertTriangle className="w-5 h-5 text-orange-500" />
-              )}
-              {activity.type === "outcome" && (
-                <CheckCircle className="w-5 h-5 text-green-500" />
-              )}
-              <div>
-                <p className="text-sm font-medium text-gray-900">
-                  {t(activity.titleKey)}
-                </p>
-                <p className="text-xs text-gray-500">{activity.time}</p>
-              </div>
-            </div>
-            {activity.severity && (
-              <span
-                className={`badge ${
-                  activity.severity === "high"
-                    ? "bg-red-50 text-red-700"
-                    : "bg-yellow-50 text-yellow-700"
-                }`}
-              >
-                {t(`signals.severityLevels.${activity.severity}`)}
-              </span>
-            )}
-            {activity.status && (
-              <span className="badge bg-green-50 text-green-700">
-                {t(`proposals.${activity.status}`)}
-              </span>
-            )}
-            {activity.success !== undefined && (
-              <span className="badge bg-green-50 text-green-700">{t("outcomes.verified")}</span>
-            )}
-          </div>
-        ))}
-      </div>
+      <h3 className="text-lg font-semibold text-gray-900">{t("dashboard.recentActivity")}</h3>
+      <p className="mt-1 mb-4 text-xs text-gray-500">{t("dashboard.recentActivityNote")}</p>
+      <ul>
+        <ActivityRow
+          icon={Activity}
+          iconClassName="text-blue-500"
+          label={t("dashboard.latestSignal")}
+          href="/signals"
+        >
+          {pending(health.isLoading, health.isError) ??
+            (signalAgo
+              ? t("dashboard.observedAgo", { time: signalAgo })
+              : t("dashboard.noObservedSignal"))}
+        </ActivityRow>
+        <ActivityRow
+          icon={AlertTriangle}
+          iconClassName="text-orange-500"
+          label={t("dashboard.latestIssue")}
+          href="/issues"
+        >
+          {pending(latestIssue.isLoading, latestIssue.isError) ??
+            (latestIssue.data ? (
+              <>
+                <span className="block truncate text-gray-700">{latestIssue.data.title}</span>
+                {issueAgo && t("dashboard.detectedAgo", { time: issueAgo })}
+              </>
+            ) : (
+              t("dashboard.noObservedIssue")
+            ))}
+        </ActivityRow>
+        <ActivityRow
+          icon={Vote}
+          iconClassName="text-purple-500"
+          label={t("dashboard.activeProposals")}
+          href="/proposals"
+        >
+          {pending(statsLoading, statsFailed) ??
+            (activeProposals > 0
+              ? t("dashboard.activeProposalCount", { count: activeProposals })
+              : t("dashboard.noActiveProposals"))}
+        </ActivityRow>
+        <ActivityRow
+          icon={CheckCircle}
+          iconClassName="text-green-500"
+          label={t("dashboard.measuredOutcomes")}
+          href="/outcomes"
+        >
+          {pending(statsLoading, statsFailed) ??
+            (measuredOutcomes > 0
+              ? t("dashboard.measuredOutcomeCount", { count: measuredOutcomes })
+              : t("dashboard.noOutcomesMeasured"))}
+        </ActivityRow>
+      </ul>
     </div>
   );
 }
@@ -165,7 +235,11 @@ function RecentActivity() {
 export default function Dashboard() {
   const t = useTranslations();
 
-  const { data: stats, isLoading: statsLoading } = useQuery({
+  const {
+    data: stats,
+    isLoading: statsLoading,
+    isError: statsFailed,
+  } = useQuery({
     queryKey: ["stats"],
     queryFn: () => api.getStats(),
     refetchInterval: 30000,
@@ -220,7 +294,11 @@ export default function Dashboard() {
 
       {/* Content Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <RecentActivity />
+        <RecentActivity
+          stats={stats}
+          statsLoading={statsLoading}
+          statsFailed={statsFailed}
+        />
 
         {/* Quick Actions */}
         <div className="card">
