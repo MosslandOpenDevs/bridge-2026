@@ -137,7 +137,9 @@ class APIClient {
     // needs titles and times should not have to download.
     if (options?.includeSignals === false) params.set("includeSignals", "false");
     const query = params.toString();
-    return this.fetch<{ issues: any[]; count: number }>(
+    // signalsIncluded says whether `signals` was embedded: above 50 rows the
+    // API leaves it out unless asked.
+    return this.fetch<{ issues: any[]; count: number; signalsIncluded: boolean }>(
       `/api/issues${query ? `?${query}` : ""}`,
     );
   }

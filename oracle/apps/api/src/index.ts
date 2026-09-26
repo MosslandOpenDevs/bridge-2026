@@ -692,11 +692,25 @@ function populateIssueSignals(issue: any) {
 }
 
 // Issue endpoints
+// Embedding each issue's signals is what makes this endpoint heavy: at
+// ?limit=500 production answered with 6.8MB, one signal lookup per id. Small
+// pages keep embedding by default, so the issues page and any consumer that
+// relies on `signals` at the default limit see no change; past
+// ISSUE_EMBED_DEFAULT_MAX the default flips to off, and a caller that really
+// wants signals on a big page asks with includeSignals=true. The limit is
+// capped at 200 either way (it was 500); production's 754 open rows are 12
+// distinct conditions, so no page that size is short of anything.
+const ISSUE_EMBED_DEFAULT_MAX = 50;
+const ISSUE_LIST_MAX = 200;
+
 app.get("/api/issues", async (req, res) => {
   try {
-    const limit = clampLimit(req.query.limit, 50);
+    const limit = clampLimit(req.query.limit, 50, ISSUE_LIST_MAX);
     const status = req.query.status as string;
-    const includeSignals = req.query.includeSignals !== "false"; // Include signals by default
+    const includeSignals =
+      req.query.includeSignals === undefined
+        ? limit <= ISSUE_EMBED_DEFAULT_MAX
+        : req.query.includeSignals !== "false";
 
     let rows;
     if (status) {
@@ -712,7 +726,8 @@ app.get("/api/issues", async (req, res) => {
       issues = issues.map(populateIssueSignals);
     }
 
-    res.json({ issues, count: issues.length });
+    // Said outright, so a caller missing `signals` on a large page can see why.
+    res.json({ issues, count: issues.length, signalsIncluded: includeSignals });
   } catch (error) {
     console.error("Failed to fetch issues:", error);
     res.status(500).json({ error: "Failed to fetch issues" });

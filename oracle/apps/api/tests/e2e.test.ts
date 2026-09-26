@@ -686,6 +686,74 @@ async function testSignalsAndIssues() {
 }
 
 /**
+ * Embedded signals are what made ?limit=500 a 6.8MB answer in production, so
+ * large pages leave them out unless asked, and no page exceeds 200 rows. Small
+ * pages — the issues page reads the default 50 — keep embedding, so existing
+ * consumers see no change.
+ */
+async function testIssueListDefaults() {
+  const category = "issue_list_probe";
+  const db = new Database(join(dataDir, "e2e.db"));
+  try {
+    // More open rows than the cap, so the cap is what limits the page.
+    const insert = db.prepare(
+      `INSERT INTO issues (id, title, description, category, priority, status, detected_at, signal_ids, synthetic, fingerprint)
+       VALUES (?, 'probe', 'probe', ?, 'low', 'detected', ?, '[]', 1, ?)`,
+    );
+    const at = new Date().toISOString();
+    db.transaction(() => {
+      for (let i = 0; i < 205; i++) insert.run(`ilp-${i}`, category, at, `${category}|issue|`);
+    })();
+  } finally {
+    db.close();
+  }
+
+  try {
+    const embedded = (issues: any[]) => issues.every((issue) => Array.isArray(issue.signals));
+    const bare = (issues: any[]) => issues.every((issue) => !("signals" in issue));
+
+    const small = await get("/api/issues");
+    assertStatus(small.response, 200, "default issue list");
+    assert(
+      small.data.signalsIncluded === true && small.data.count > 0 && embedded(small.data.issues),
+      "issues: the default page of 50 should still embed signals",
+    );
+
+    const large = await get("/api/issues?limit=51");
+    assertStatus(large.response, 200, "issue list of 51");
+    assert(
+      large.data.signalsIncluded === false && large.data.count === 51 && bare(large.data.issues),
+      `issues: a page over 50 should leave signals out by default, got signalsIncluded=${large.data.signalsIncluded}`,
+    );
+
+    const asked = await get("/api/issues?limit=51&includeSignals=true");
+    assert(
+      asked.data.signalsIncluded === true && embedded(asked.data.issues),
+      "issues: includeSignals=true should still embed on a large page",
+    );
+
+    const declined = await get("/api/issues?limit=10&includeSignals=false");
+    assert(
+      declined.data.signalsIncluded === false && bare(declined.data.issues),
+      "issues: includeSignals=false should hold on a small page",
+    );
+
+    const capped = await get("/api/issues?limit=1000");
+    assert(
+      capped.data.count === 200,
+      `issues: limit should be capped at 200, got ${capped.data.count}`,
+    );
+  } finally {
+    const cleanup = new Database(join(dataDir, "e2e.db"));
+    try {
+      cleanup.prepare(`DELETE FROM issues WHERE category = ?`).run(category);
+    } finally {
+      cleanup.close();
+    }
+  }
+}
+
+/**
  * A second detection over the same signals must report zero NEW issues.
  *
  * The condition is still open, so it folds into the existing row — but
@@ -1905,6 +1973,7 @@ async function main() {
     await runTest("No success rate before anything is measured", testStatsBeforeAnyOutcome);
     await runTest("Admin endpoints require the key", testAdminAuthRequired);
     await runTest("Signals and issues", testSignalsAndIssues);
+    await runTest("Large issue pages leave signals out", testIssueListDefaults);
     await runTest("Detection counts only new rows", testDetectionCountsOnlyNewRows);
     await runTest("Legacy database upgrades and keeps health fast", testLegacyDatabaseUpgrade);
     await runTest("Proposal settings are validated", testProposalValidation);
