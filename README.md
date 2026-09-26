@@ -285,7 +285,10 @@ public issue.
 
 [bridge.moss.land](https://bridge.moss.land) runs the `oracle/` stack behind an
 nginx front (SSL, `/api` + `/socket.io` proxied to the API, everything else to
-the web app). The API exposes `GET /api/health` for uptime monitoring.
+the web app). The API exposes `GET /api/health` for uptime monitoring: it
+answers 200 while the process is up, with `status` (`ok` | `degraded` | `down`)
+and `reason` in the body. Monitors that read only the HTTP code should poll
+`GET /api/health?strict=1`, which answers 503 when the database cannot be read.
 
 Deploys are **pull-based**: a one-shot script
 ([`oracle/scripts/deploy.sh`](oracle/scripts/deploy.sh)) runs on the app server

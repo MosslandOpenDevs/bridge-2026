@@ -366,7 +366,14 @@ health_ok() {
   while [ "${i}" -lt "${DEPLOY_HEALTH_RETRIES}" ]; do
     local api_ok=1 web_ok=1
     if [ "${API_CHANGED}" = "1" ] || [ "${ROLLING_BACK:-0}" = "1" ]; then
-      curl -fsS -m 5 "${DEPLOY_API_URL}/api/health" >/dev/null 2>&1 || api_ok=0
+      # ?strict=1: plain /api/health answers 200 whenever the process answers
+      # (the ecosystem health contract puts the verdict in the body), so
+      # `curl -f` alone would pass a release that cannot read its database.
+      # strict answers 503 for "down" only; "degraded" (no signal collected
+      # yet, as right after a restart) stays 200 and must not roll back.
+      # Builds that predate strict ignore the parameter, so rollbacks to them
+      # are gated exactly as before.
+      curl -fsS -m 5 "${DEPLOY_API_URL}/api/health?strict=1" >/dev/null 2>&1 || api_ok=0
     fi
     if [ "${WEB_CHANGED}" = "1" ] || [ "${ROLLING_BACK:-0}" = "1" ]; then
       curl -fsSL -m 8 -o /dev/null "${DEPLOY_WEB_URL}/" 2>/dev/null || web_ok=0

@@ -43,8 +43,11 @@ What a deploy tick does:
    commit that does not compile never reaches a restart); the web app builds
    into `.next.new` and is swapped over the live `.next` only on success, so
    a failed build cannot blank the running site
-7. Health checks (`/api/health`, web `/`); on failure it **rolls back** to the
-   last successful deploy, rebuilds, and alerts (`DEPLOY_ALERT_WEBHOOK`)
+7. Health checks (`/api/health?strict=1`, web `/`); on failure it **rolls back** to the
+   last successful deploy, rebuilds, and alerts (`DEPLOY_ALERT_WEBHOOK`).
+   `strict=1` answers 503 only when the API reports `down` (its database
+   cannot be read); `degraded` — e.g. no signal collected yet right after the
+   restart — passes
 
 Concurrent ticks are excluded by a PID-carrying lock: a lock whose owner died
 is reclaimed immediately, one whose owner is alive is never stolen (a deploy
@@ -84,7 +87,12 @@ tail -f ~/bridge-2026/oracle/logs/deploy.log
 
 `bridge.moss.land` proxies `/api` and `/socket.io` to the app server's port
 3101 and everything else to port 3100. The API's health endpoint is exposed at
-`/api/health` for external uptime monitoring.
+`/api/health` for external uptime monitoring. Plain `/api/health` answers 200
+whenever the process is up and carries the verdict in the body — `status`
+(`ok` | `degraded` | `down`) and `reason` — so a monitor that parses the body
+should read those. A monitor that reads only the HTTP code should poll
+`/api/health?strict=1`, which answers 503 when the database cannot be read;
+on plain `/api/health` it would never alarm.
 
 Two known gaps, both in nginx rather than in this repo:
 

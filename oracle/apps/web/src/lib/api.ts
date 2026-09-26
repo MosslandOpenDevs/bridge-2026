@@ -99,11 +99,18 @@ class APIClient {
     // nginx only proxies /api/* to the API, so /health would land on Next.js
     // and 404 in production.
     return this.fetch<{
-      status: string;
+      status: "ok" | "degraded" | "down";
       service: string;
       version: string;
       timestamp: string;
       lastObservedSignalAt: string | null;
+      lastProcessedAt: string | null;
+      collection: {
+        enabled: boolean;
+        intervalSeconds: number | null;
+        staleAfterSeconds: number | null;
+      };
+      reason: string | null;
     }>("/api/health");
   }
 

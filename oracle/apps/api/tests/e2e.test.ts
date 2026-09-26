@@ -299,7 +299,29 @@ async function createProposal(options: Record<string, unknown> = {}) {
 async function testHealthCheck() {
   const { response, data } = await get("/health");
   assertStatus(response, 200, "health");
-  assert(data.status === "ok", "health: status should be ok");
+  // The suite runs with SIGNAL_COLLECT_INTERVAL=0 and no network guarantee, so
+  // there may be no observed signal at all. With collection off that is the
+  // expected state, not a fault: the status must be "ok", and the body must say
+  // why no freshness was judged. The staleness rule itself is covered by
+  // testHealthStalenessRule without waiting on a clock.
+  assert(data.status === "ok", `health: status should be ok with collection off, got ${data.status}`);
+  assert(
+    data.collection?.enabled === false && data.collection.staleAfterSeconds === null,
+    `health: collection should be reported off, got ${JSON.stringify(data.collection)}`,
+  );
+  assert(data.reason === null, `health: an ok status carries no reason, got ${data.reason}`);
+  assert(
+    data.lastProcessedAt === data.lastObservedSignalAt,
+    "health: lastProcessedAt is the contract's alias for lastObservedSignalAt",
+  );
+  // Contract rule 6, set by the app itself so the deploy gate's direct probe
+  // of the API port gets it too, not only traffic through nginx.
+  assert(
+    /no-store|no-cache/.test(response.headers.get("cache-control") ?? ""),
+    `health: Cache-Control should forbid caching, got ${response.headers.get("cache-control")}`,
+  );
+  const strict = await get("/api/health?strict=1");
+  assertStatus(strict.response, 200, "strict health while ok");
   assert(typeof data.version === "string", "health: version should be a string");
   // The ecosystem health contract's three required fields. `service` is the
   // registry id, so a collector can attribute the payload; `timestamp` is when
@@ -369,6 +391,12 @@ async function testHealthIgnoresSyntheticSignals() {
       data.lastObservedSignalAt === "2026-09-01T00:00:00.000Z",
       `health: lastObservedSignalAt should ignore synthetic rows, got ${data.lastObservedSignalAt}`,
     );
+    // Weeks old, and still ok: collection is off in this process, so an old
+    // observation is expected rather than a stalled pipeline.
+    assert(
+      data.status === "ok",
+      `health: an old signal with collection off should stay ok, got ${data.status}`,
+    );
   } finally {
     // Leave no trace: later tests assert on category counts, and these probe
     // rows would otherwise show up there as real signal categories.
@@ -378,6 +406,193 @@ async function testHealthIgnoresSyntheticSignals() {
     } finally {
       db.close();
     }
+  }
+}
+
+/**
+ * The staleness rule, exercised directly instead of by waiting on a clock.
+ * health.ts has no database or Express dependency for exactly this reason.
+ *
+ * The anchor case is the real one: on 2026-09-14 ingestion stopped for 487
+ * minutes and /api/health said "ok" throughout, because `status` was a
+ * constant. The same stored timestamp must now read as degraded.
+ */
+async function testHealthStalenessRule() {
+  const { deriveHealth, healthHttpStatus, resolveHealthConfig, MIN_STALE_AFTER_SECONDS } =
+    await import("../src/health.js");
+
+  // HTTP status, the whole table. Only (down, strict) is a 503: the deploy
+  // gate's `curl -f` reads strict, and a degraded 503 there would roll back
+  // every deploy that lands before its first collection — and any deploy made
+  // while ingestion is stalled, which is when the fix ships.
+  for (const status of ["ok", "degraded", "down"] as const) {
+    for (const strict of [false, true]) {
+      const expected = status === "down" && strict ? 503 : 200;
+      const actual = healthHttpStatus(status, strict);
+      assert(actual === expected, `${status} with strict=${strict} should be ${expected}, got ${actual}`);
+    }
+  }
+  const at = "2026-09-14T00:00:00.000Z";
+  const after = (seconds: number) => new Date(Date.parse(at) + seconds * 1000);
+  const reads = (value: string | null) => () => value;
+
+  // Threshold: max(180 s, 3 × interval), collection off when the interval is not > 0.
+  assert(resolveHealthConfig(60).staleAfterSeconds === 180, "threshold at the shipped 60 s interval");
+  assert(resolveHealthConfig(5).staleAfterSeconds === MIN_STALE_AFTER_SECONDS, "short intervals keep the floor");
+  assert(resolveHealthConfig(300).staleAfterSeconds === 900, "long intervals scale by three");
+  for (const off of [0, -1, Number.NaN]) {
+    const config = resolveHealthConfig(off, "600");
+    assert(
+      !config.collecting && config.staleAfterSeconds === null,
+      `interval ${off} means collection is off, whatever the override`,
+    );
+  }
+  const overridden = resolveHealthConfig(60, "600");
+  assert(overridden.staleAfterSeconds === 600 && !overridden.overrideRejected, "override is honoured");
+  for (const bad of ["0", "-5", "soon"]) {
+    const config = resolveHealthConfig(60, bad);
+    assert(
+      config.staleAfterSeconds === 180 && config.overrideRejected,
+      `override "${bad}" should fall back to the default and be flagged`,
+    );
+  }
+
+  const collecting = resolveHealthConfig(60);
+  const outage = deriveHealth(reads(at), collecting, after(487 * 60));
+  assert(outage.status === "degraded", `a 487-minute gap should be degraded, got ${outage.status}`);
+  assert(outage.lastObservedSignalAt === at, "degraded still reports what it knows");
+  assert(typeof outage.reason === "string", "degraded says why");
+
+  assert(deriveHealth(reads(at), collecting, after(60)).status === "ok", "one tick old is ok");
+  assert(deriveHealth(reads(at), collecting, after(180)).status === "ok", "exactly at the threshold is ok");
+  assert(deriveHealth(reads(at), collecting, after(181)).status === "degraded", "past the threshold is degraded");
+  assert(deriveHealth(reads(at), collecting, after(-600)).status === "ok", "clock skew into the future is not staleness");
+
+  // Nothing observed yet — also a fresh deploy before its first collection.
+  const empty = deriveHealth(reads(null), collecting, after(0));
+  assert(empty.status === "degraded" && empty.lastObservedSignalAt === null, "no signal while collecting is degraded");
+  const garbled = deriveHealth(reads("not a date"), collecting, after(0));
+  assert(garbled.status === "degraded" && garbled.lastObservedSignalAt === null, "an unreadable time is an unknown time");
+
+  // Collection off: neither age nor absence is a fault.
+  const off = resolveHealthConfig(0);
+  assert(deriveHealth(reads(at), off, after(487 * 60)).status === "ok", "old signal with collection off is ok");
+  assert(deriveHealth(reads(null), off, after(0)).status === "ok", "no signal with collection off is ok");
+
+  // A database that cannot be read is down, collection on or off.
+  const boom = () => {
+    throw new Error("SQLITE_CORRUPT");
+  };
+  for (const config of [collecting, off]) {
+    const down = deriveHealth(boom, config, after(0));
+    assert(down.status === "down" && down.lastObservedSignalAt === null, "a failed read is down, not ok");
+    assert(!down.reason?.includes("SQLITE"), "the raw error stays in the server log");
+  }
+}
+
+/**
+ * The whole path for "down": the running server loses its signals table, and
+ * the endpoint has to say so — in the body at /api/health (contract rule 4:
+ * 200 whenever it answers) and as a 503 at ?strict=1, which is what the
+ * deploy gate's `curl -f` reads to roll a broken release back.
+ */
+async function testHealthReportsDown() {
+  const dbPath = join(dataDir, "e2e.db");
+  let db = new Database(dbPath);
+  try {
+    db.exec("ALTER TABLE signals RENAME TO signals_hidden");
+  } finally {
+    db.close();
+  }
+
+  try {
+    const plain = await get("/api/health");
+    assertStatus(plain.response, 200, "health with an unreadable database");
+    assert(plain.data.status === "down", `health: expected down, got ${plain.data.status}`);
+    assert(plain.data.service === "bridge", "health: down still names the service");
+    assert(plain.data.lastObservedSignalAt === null, "health: down knows no signal time");
+
+    const strict = await get("/api/health?strict=1");
+    assertStatus(strict.response, 503, "strict health with an unreadable database");
+    assert(strict.data.status === "down", "strict health: the body still carries the verdict");
+  } finally {
+    db = new Database(dbPath);
+    try {
+      db.exec("ALTER TABLE signals_hidden RENAME TO signals");
+    } finally {
+      db.close();
+    }
+  }
+
+  const { data } = await get("/api/health");
+  assert(data.status === "ok", `health: should recover once the table is back, got ${data.status}`);
+}
+
+/**
+ * The 2026-09-14 outage, end to end: collection is on, the scheduler keeps
+ * ticking, and no observed signal lands. Every other boot in this suite has
+ * collection off, so without this the handler could ignore HEALTH_CONFIG, or
+ * answer 503 for degraded under ?strict=1, and still pass.
+ *
+ * Made deterministic without cutting the network: the newest observed signal
+ * is a day old, and a trigger silently drops every insert into `signals`, so
+ * whatever the adapters fetch never lands, which is what a stalled pipeline
+ * looks like from here. Reads are untouched, so this is degraded and not down.
+ */
+async function testHealthWhileIngestionStalls() {
+  const dbPath = join(dataDir, "e2e.db");
+  const lastObserved = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const setUp = (db: InstanceType<typeof Database>) => {
+    db.prepare("DELETE FROM signals WHERE synthetic = 0").run();
+    db.prepare(
+      `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic)
+       VALUES ('stall-obs', 'stall-obs', 'health-probe', ?, 'health_probe_obs', 'low', 0, 'n/a', 'observed', 0)`,
+    ).run(lastObserved);
+    db.exec(`CREATE TRIGGER e2e_stall_ingestion BEFORE INSERT ON signals
+             BEGIN SELECT RAISE(IGNORE); END`);
+  };
+
+  stopServer(true);
+  await sleep(500);
+  let db = new Database(dbPath);
+  try {
+    setUp(db);
+  } finally {
+    db.close();
+  }
+
+  try {
+    await startServer({ SIGNAL_COLLECT_INTERVAL: "3600", MOSSLAND_API_URL: "http://127.0.0.1:9" });
+
+    const { response, data } = await get("/api/health");
+    assertStatus(response, 200, "health while ingestion stalls");
+    assert(
+      JSON.stringify(data.collection) ===
+        JSON.stringify({ enabled: true, intervalSeconds: 3600, staleAfterSeconds: 10800 }),
+      `health: collection should report the configured interval, got ${JSON.stringify(data.collection)}`,
+    );
+    assert(data.status === "degraded", `health: a day-old signal should be degraded, got ${data.status}`);
+    assert(data.lastObservedSignalAt === lastObserved, "health: degraded still reports the last signal");
+    assert(
+      typeof data.reason === "string" && data.reason.includes("stale after 10800s"),
+      `health: degraded should say why, got ${data.reason}`,
+    );
+
+    // What the deploy gate reads. A 503 here would roll back a deploy made
+    // while ingestion is stalled, which is when the fix ships.
+    const strict = await get("/api/health?strict=1");
+    assertStatus(strict.response, 200, "strict health while degraded");
+    assert(strict.data.status === "degraded", "strict health: the body still carries the verdict");
+  } finally {
+    stopServer(true);
+    await sleep(500);
+    db = new Database(dbPath);
+    try {
+      db.exec("DROP TRIGGER IF EXISTS e2e_stall_ingestion");
+    } finally {
+      db.close();
+    }
+    await startServer();
   }
 }
 
@@ -1454,6 +1669,8 @@ async function main() {
     await runTest("Health check", testHealthCheck);
     await runTest("Autonomous loop is off by default", testAutonomousLoopOffByDefault);
     await runTest("Health ignores synthetic signals", testHealthIgnoresSyntheticSignals);
+    await runTest("Health staleness rule", testHealthStalenessRule);
+    await runTest("Health reports down when the database cannot be read", testHealthReportsDown);
     await runTest("No success rate before anything is measured", testStatsBeforeAnyOutcome);
     await runTest("Admin endpoints require the key", testAdminAuthRequired);
     await runTest("Signals and issues", testSignalsAndIssues);
@@ -1477,6 +1694,8 @@ async function main() {
     await runTest("A fully successful outcome", testFullySuccessfulOutcome);
     await runTest("Stats", testStats);
     await runTest("Unknown ids return 404", testNotFoundPaths);
+    // Last: it deletes the observed signals earlier tests count.
+    await runTest("Health is degraded while ingestion stalls", testHealthWhileIngestionStalls);
   } finally {
     stopServer();
   }
