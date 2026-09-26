@@ -156,7 +156,7 @@
     "pending": "대기",
     "executed": "실행됨",
     "labNoticeTitle": "AI 생성 · 구속력 없음",
-    "labNoticeBody": "이 제안들은 BRIDGE의 AI 에이전트가 실험으로 자동 생성한 것입니다. 사람이 검토하지 않은 내용이 있을 수 있으며, 참고용입니다. 여기서의 투표는 Mossland DAO를 구속하지 않습니다.",
+    "labNoticeBody": "이 제안들은 BRIDGE의 AI 에이전트가 실험으로 자동 생성한 것입니다. 사람이 검토하지 않은 내용이 있을 수 있으며, 참고용입니다. 여기서 정해지는 것은 Mossland DAO 를 구속하지 않습니다.",
     "agoraNotice": "Mossland DAO의 구속력 있는 의사결정은 Agora에서 이뤄집니다.",
     "agoraLink": "Agora 바로가기",
     "showSynthetic": "데모 데이터 보기",
