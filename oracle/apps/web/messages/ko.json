@@ -111,7 +111,42 @@
     "mitigation": "완화 방안",
     "alternatives": "대안",
     "createProposal": "제안 생성",
-    "proposalCreated": "제안이 생성되었습니다! 이동 중..."
+    "proposalCreated": "제안이 생성되었습니다! 이동 중...",
+    "decisionPacket": "결정 패킷",
+    "debateInProgress": "여러 라운드에 걸친 토론 진행 중...",
+    "selectIssue": "이슈를 선택하면 결정 패킷을 볼 수 있습니다",
+    "firstDetected": "최초 감지 {time}",
+    "occurrences": "{count, number}회 감지 · 마지막 {time}",
+    "priorityLabel": "우선순위",
+    "priorityHint": "규칙 기반 탐지기가 관련 신호의 중요도로 자동 지정한 값입니다. 사람이 평가한 것이 아닙니다.",
+    "priorityLevels": {
+      "urgent": "긴급",
+      "high": "높음",
+      "medium": "보통",
+      "low": "낮음"
+    },
+    "statusLabels": {
+      "detected": "탐지됨",
+      "deliberating": "심의 중",
+      "proposed": "제안됨",
+      "resolved": "해결됨"
+    },
+    "roles": {
+      "risk": "리스크",
+      "treasury": "재무",
+      "community": "커뮤니티",
+      "product": "프로덕트"
+    },
+    "progress": {
+      "risk": "Risk 에이전트 분석 중...",
+      "treasury": "Treasury 에이전트 분석 중...",
+      "community": "Community 에이전트 분석 중...",
+      "product": "Product 에이전트 분석 중...",
+      "moderator": "Moderator 종합 중...",
+      "analyzing": "분석 중...",
+      "eta": "약 15초 소요",
+      "summary": "4개 에이전트 심의 + Moderator 종합"
+    }
   },
   "debate": {
     "title": "에이전트 토론",

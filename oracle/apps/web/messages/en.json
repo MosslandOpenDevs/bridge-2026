@@ -111,7 +111,42 @@
     "mitigation": "Mitigation",
     "alternatives": "Alternatives",
     "createProposal": "Create Proposal",
-    "proposalCreated": "Proposal created! Redirecting..."
+    "proposalCreated": "Proposal created! Redirecting...",
+    "decisionPacket": "Decision Packet",
+    "debateInProgress": "Multi-round debate in progress...",
+    "selectIssue": "Select an issue to see its decision packet",
+    "firstDetected": "First detected {time}",
+    "occurrences": "Seen {count, plural, one {# time} other {# times}} · last {time}",
+    "priorityLabel": "Priority",
+    "priorityHint": "Set automatically by the rule-based detector from the severity of the signals involved. Not a human assessment.",
+    "priorityLevels": {
+      "urgent": "Urgent",
+      "high": "High",
+      "medium": "Medium",
+      "low": "Low"
+    },
+    "statusLabels": {
+      "detected": "Detected",
+      "deliberating": "Deliberating",
+      "proposed": "Proposed",
+      "resolved": "Resolved"
+    },
+    "roles": {
+      "risk": "Risk",
+      "treasury": "Treasury",
+      "community": "Community",
+      "product": "Product"
+    },
+    "progress": {
+      "risk": "Risk agent analysing...",
+      "treasury": "Treasury agent analysing...",
+      "community": "Community agent analysing...",
+      "product": "Product agent analysing...",
+      "moderator": "Moderator summarising...",
+      "analyzing": "Analysing...",
+      "eta": "About 15 seconds",
+      "summary": "4 agents deliberate, then the moderator summarises"
+    }
   },
   "debate": {
     "title": "Agent Debate",
