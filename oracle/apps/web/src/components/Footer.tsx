@@ -6,10 +6,10 @@ import { Twitter, BookOpen, Github, Mail, Globe } from "lucide-react";
 // Sister sites in the Mossland AI-governance family.
 //
 // Agora, not Algora: Algora was archived on 2026-09-02 (lifecycle "archive" in
-// the ecosystem registry), so linking it sent readers to a service that no
-// longer runs. Agora is where MossDAO actually decides — everything BRIDGE
-// produces is non-binding Lab output — so it is the link a reader leaving
-// this site most needs.
+// the ecosystem registry). Its site still answers, but it is no longer
+// maintained, so it is not somewhere to send readers. Agora is where MossDAO
+// actually decides — everything BRIDGE produces is non-binding Lab output —
+// so it is the link a reader leaving this site most needs.
 const ECOSYSTEM = [
   { name: "BRIDGE", roleKey: "bridgeRole", href: "https://bridge.moss.land", current: true },
   { name: "Agora", roleKey: "agoraRole", href: "https://agora.moss.land", current: false },
@@ -21,7 +21,8 @@ export function Footer() {
   return (
     <footer className="bg-white border-t border-gray-200">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Ecosystem wayfinding — identical content on every sister site */}
+        {/* Ecosystem wayfinding. Diverged from the sister sites on 2026-09-26,
+            when archived Algora was replaced by Agora here. */}
         <div className="pb-4 mb-4 border-b border-gray-100 text-center md:text-left">
           <p className="text-[10px] uppercase tracking-[0.22em] text-gray-400">
             {t("ecosystemLabel")}
