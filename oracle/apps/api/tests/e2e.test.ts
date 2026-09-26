@@ -427,6 +427,15 @@ async function bootSide(
   throw new Error(`side API neither came up nor exited:\n${out.join("")}`);
 }
 
+/** Whether this host can listen on ::1, i.e. has an IPv6 loopback at all. */
+async function hasIpv6Loopback(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const srv = createServer();
+    srv.once("error", () => resolve(false));
+    srv.listen(0, "::1", () => srv.close(() => resolve(true)));
+  });
+}
+
 /**
  * HOST binds one address, and TRUST_PROXY decides whose X-Forwarded-For moves
  * a caller into another rate-limit bucket. The second half is the reason the
@@ -450,6 +459,21 @@ async function testBindHostAndTrustedProxy() {
       bound.log().includes(`Listening on 127.0.0.1:${port}, X-Forwarded-For trusted from 127.0.0.1`),
       `startup log should name the bound address and the trusted proxy:\n${bound.log()}`,
     );
+    // Answering on 127.0.0.1 is also what a wildcard bind does. The bind is
+    // only real if another local address is refused; ::1 is the one every
+    // dual-stack host has (skipped where it does not exist).
+    if (await hasIpv6Loopback()) {
+      const other = await fetch(`http://[::1]:${port}/health`).then(
+        (res) => `answered ${res.status}`,
+        (error: unknown) => {
+          const cause = (error as { cause?: { code?: string } }).cause;
+          return cause?.code ?? String(error);
+        },
+      );
+      assert(other === "ECONNREFUSED", `HOST=127.0.0.1 should refuse [::1]:${port}, got ${other}`);
+    } else {
+      console.log("    (no ::1 on this host; skipped the other-interface check)");
+    }
     // The caller is the trusted proxy here, so each forwarded address is a
     // client of its own and none of them reaches the limit.
     for (let i = 1; i <= 5; i++) {

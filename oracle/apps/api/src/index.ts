@@ -2860,11 +2860,24 @@ const refuseToListen = (error: NodeJS.ErrnoException) => {
   console.error(`❌ Refusing to start: cannot listen on ${LISTEN_AT}: ${error.code ?? error.message}`);
   process.exit(1);
 };
+// Where the socket really is, from the kernel rather than from HOST: a name
+// such as "localhost" resolves to one address (::1 on some hosts, so
+// 127.0.0.1 is then refused), and the log should say which.
+let BOUND_AT = LISTEN_AT;
 httpServer.once("error", refuseToListen);
 httpServer.once("listening", () => {
   httpServer.off("error", refuseToListen);
+  const bound = httpServer.address();
+  if (HOST && bound && typeof bound === "object") {
+    BOUND_AT = `${bound.family === "IPv6" ? `[${bound.address}]` : bound.address}:${bound.port}`;
+  }
   console.log(
-    `🌐 Listening on ${HOST ? LISTEN_AT : `${LISTEN_AT} (all interfaces; set HOST to bind one address)`}` +
+    `🌐 Listening on ` +
+      (!HOST
+        ? `${LISTEN_AT} (all interfaces; set HOST to bind one address)`
+        : isIP(HOST) === 0
+          ? `${BOUND_AT} (HOST=${HOST})`
+          : BOUND_AT) +
       `, X-Forwarded-For trusted from ` +
       (typeof TRUST_PROXY !== "number"
         ? TRUST_PROXY.join(", ")
@@ -2887,7 +2900,7 @@ httpServer.listen({ port: Number(PORT), host: HOST }, () => {
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
 
-🚀 API server running on http://localhost:${PORT}
+🚀 API server running on http://${HOST ? BOUND_AT : `localhost:${PORT}`}
 📡 Endpoints:
    - GET  /health              - Health check
    - GET  /api/signals         - List signals (from DB)
