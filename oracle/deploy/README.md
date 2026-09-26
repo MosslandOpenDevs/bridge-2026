@@ -87,7 +87,12 @@ tail -f ~/bridge-2026/oracle/logs/deploy.log
 
 `bridge.moss.land` proxies `/api` and `/socket.io` to the app server's port
 3101 and everything else to port 3100. The API's health endpoint is exposed at
-`/api/health` for external uptime monitoring.
+`/api/health` for external uptime monitoring. Plain `/api/health` answers 200
+whenever the process is up and carries the verdict in the body — `status`
+(`ok` | `degraded` | `down`) and `reason` — so a monitor that parses the body
+should read those. A monitor that reads only the HTTP code should poll
+`/api/health?strict=1`, which answers 503 when the database cannot be read;
+on plain `/api/health` it would never alarm.
 
 Two known gaps, both in nginx rather than in this repo:
 
