@@ -332,7 +332,10 @@ function planObservedCategory(db, category, refs, cutoffMs) {
   const doomed = [];
   let prev = null;
 
+  // Keep reasons are counted per row when the row is settled, so a row that
+  // is both the first and the last of its day counts once as a day edge.
   const settle = (p) => {
+    if (p.dayEdge) stat.dayEdge++;
     if (p.keep) stat.keep++;
     else { stat.del++; doomed.push(p.rid); }
   };
@@ -341,7 +344,7 @@ function planObservedCategory(db, category, refs, cutoffMs) {
     stat.rows++;
     const ms = Date.parse(row.timestamp);
     const day = Number.isNaN(ms) ? null : new Date(ms).toISOString().slice(0, 10);
-    const cur = { rid: row.rid, day, keep: false };
+    const cur = { rid: row.rid, day, keep: false, dayEdge: false };
 
     const changed =
       !prev ||
@@ -353,15 +356,15 @@ function planObservedCategory(db, category, refs, cutoffMs) {
     const recent = Number.isNaN(ms) || ms >= cutoffMs;
 
     if (changed) stat.change++;
-    if (dayFirst) stat.dayEdge++;
     if (referenced) stat.referenced++;
     if (recent) stat.recent++;
+    cur.dayEdge = dayFirst;
     cur.keep = changed || dayFirst || referenced || recent || day === null;
 
     if (prev) {
       if (dayFirst) {
         prev.keep = true; // last row of the previous UTC day
-        stat.dayEdge++;
+        prev.dayEdge = true;
       }
       settle(prev);
     }
@@ -373,7 +376,7 @@ function planObservedCategory(db, category, refs, cutoffMs) {
   }
   if (prev) {
     prev.keep = true; // last row of the last day
-    stat.dayEdge++;
+    prev.dayEdge = true;
     settle(prev);
   }
   return { stat, doomed };
