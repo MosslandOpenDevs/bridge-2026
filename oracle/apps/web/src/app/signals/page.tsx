@@ -41,21 +41,29 @@ const sourceIcons: Record<string, React.ElementType> = {
 
 /** One feed row: a signal plus the identical observations folded into it. */
 interface SignalRow {
+  /**
+   * React key. Must not be an observation id: collectors append an identical
+   * observation every minute and the 500-row window slides, so both the newest
+   * and the oldest id of a run change on each refetch, which remounted the card
+   * and snapped an expanded detail panel shut.
+   */
+  key: string;
   signal: any; // the newest observation, shown on the card
   count: number;
   firstAt: string;
   lastAt: string;
 }
 
-function sameObservation(a: any, b: any): boolean {
-  return (
-    a.description === b.description &&
-    a.value === b.value &&
-    a.unit === b.unit &&
-    a.severity === b.severity &&
-    a.source === b.source &&
-    Boolean(a.synthetic) === Boolean(b.synthetic)
-  );
+function observationFingerprint(s: any): string {
+  return JSON.stringify([
+    s.category ?? "",
+    s.description,
+    s.value,
+    s.unit,
+    s.severity,
+    s.source,
+    Boolean(s.synthetic),
+  ]);
 }
 
 /**
@@ -69,19 +77,33 @@ function sameObservation(a: any, b: any): boolean {
  */
 function collapseRepeats(signals: any[]): SignalRow[] {
   const rows: SignalRow[] = [];
-  const openRowByCategory = new Map<string, SignalRow>();
+  const openRowByCategory = new Map<string, { row: SignalRow; fingerprint: string }>();
+  // Runs seen so far per fingerprint, counted from the top (newest) of the
+  // list, so an A,B,A sequence in one category still gets distinct keys. A new
+  // repeat joins the top run and leaves every ordinal as it was.
+  const runsByFingerprint = new Map<string, number>();
   for (const signal of signals) {
-    const key = signal.category ?? "";
-    const open = openRowByCategory.get(key);
-    if (open && sameObservation(open.signal, signal)) {
+    const category = signal.category ?? "";
+    const fingerprint = observationFingerprint(signal);
+    const entry = openRowByCategory.get(category);
+    const open = entry && entry.fingerprint === fingerprint ? entry.row : undefined;
+    if (open) {
       open.count += 1;
       if (signal.timestamp < open.firstAt) open.firstAt = signal.timestamp;
       if (signal.timestamp > open.lastAt) open.lastAt = signal.timestamp;
       continue;
     }
-    const row = { signal, count: 1, firstAt: signal.timestamp, lastAt: signal.timestamp };
+    const ordinal = runsByFingerprint.get(fingerprint) ?? 0;
+    runsByFingerprint.set(fingerprint, ordinal + 1);
+    const row = {
+      key: `${fingerprint}#${ordinal}`,
+      signal,
+      count: 1,
+      firstAt: signal.timestamp,
+      lastAt: signal.timestamp,
+    };
     rows.push(row);
-    openRowByCategory.set(key, row);
+    openRowByCategory.set(category, { row, fingerprint });
   }
   return rows;
 }
@@ -670,7 +692,7 @@ export default function SignalsPage() {
             </div>
           ) : (
             rows.map((row) => (
-              <SignalCard key={row.signal.id} row={row} t={t} locale={locale} />
+              <SignalCard key={row.key} row={row} t={t} locale={locale} />
             ))
           )}
         </div>
