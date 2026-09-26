@@ -72,9 +72,19 @@
 // SAFETY GATES for --apply:
 //
 //   --snapshot-verified <path>  a snapshot file of this database, modified in
-//                               the last 24h, that is not this file, and whose
-//                               PRAGMA quick_check says ok (checked here, not
-//                               taken on trust). It is the restore path.
+//                               the last 24h, that is not this file, whose
+//                               PRAGMA quick_check says ok, AND that holds the
+//                               database's current state: signal row count,
+//                               newest signal timestamp, issue count and newest
+//                               issues.updated_at must equal the live file's
+//                               (all checked here, not taken on trust). It is
+//                               the restore path, and restoring an older copy
+//                               would lose everything written after it -- a
+//                               pre-deploy-*.db from hours ago, or an old
+//                               snapshot whose mtime a cp/scp refreshed, passes
+//                               the age check but not this one. Since the API
+//                               is stopped for --apply, a snapshot taken after
+//                               the stop always matches.
 //   --i-stopped-the-api         the operator's statement that oracle-api is
 //                               stopped. VACUUM and a long delete need the
 //                               database to themselves; a live API would keep
@@ -196,16 +206,43 @@ function verifySnapshot(snapshotPath, dbPath) {
       const lines = result.join("\n").split("\n");
       fail(`snapshot quick_check failed (${lines.length} lines): ${lines.slice(0, 3).join(" | ")}`);
     }
-    const rows = snap.prepare("SELECT COUNT(*) FROM signals").pluck().get();
+    const snapState = currentState(snap);
+    const live = new Database(dbPath, { readonly: true, fileMustExist: true });
+    let liveState;
+    try { liveState = currentState(live); } finally { live.close(); }
+    const diff = Object.keys(liveState).filter((k) => snapState[k] !== liveState[k]);
+    if (diff.length > 0) {
+      fail(
+        `snapshot is not of the current state of ${dbPath}; take a fresh one after stopping oracle-api ` +
+          `(${diff.map((k) => `${k}: snapshot ${snapState[k]}, live ${liveState[k]}`).join("; ")})`,
+      );
+    }
     console.log(
       `snapshot ok: ${snapshotPath} (${mb(stat.size)}, ${(age / 3600000).toFixed(1)}h old, ` +
-        `quick_check ok in ${secs(Date.now() - t0)}, ${rows} signal rows)`,
+        `quick_check ok, matches the live file: ${snapState.signals} signals up to ${snapState.newestSignal}, ` +
+        `${snapState.issues} issues; ${secs(Date.now() - t0)})`,
     );
   } catch (error) {
     fail(`snapshot ${snapshotPath} could not be read as a BRIDGE database: ${error.message}`);
   } finally {
     snap.close();
   }
+}
+
+/**
+ * Cheap summary of what the collectors and the governance loop have written.
+ * Every write path moves at least one of these, so a snapshot that matches
+ * the (stopped) live file on all of them holds its current state. rowid is
+ * deliberately not used: VACUUM INTO may renumber it.
+ */
+function currentState(db) {
+  const one = (sql) => db.prepare(sql).pluck().get();
+  return {
+    signals: one("SELECT COUNT(*) FROM signals"),
+    newestSignal: one("SELECT MAX(timestamp) FROM signals"),
+    issues: one("SELECT COUNT(*) FROM issues"),
+    newestIssueUpdate: one("SELECT MAX(updated_at) FROM issues"),
+  };
 }
 
 /** Best-effort check behind --i-stopped-the-api: who else has the file open. */

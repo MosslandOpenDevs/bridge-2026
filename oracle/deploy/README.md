@@ -184,7 +184,9 @@ node apps/api/scripts/compact-signals.cjs apps/api/data/oracle.db
 #    mid-run -- and do not merge API changes to main during the window.
 pm2 stop bridge-deploy oracle-api
 
-# 2. Snapshot -- the restore path. The script checks it (exists, < 24h old, quick_check ok).
+# 2. Snapshot -- the restore path. Take it now, after the stop: the script refuses one
+#    that is not of the current state (signal/issue counts and newest timestamps must
+#    match the live file), as well as one that is > 24h old or fails quick_check.
 SNAP=apps/api/data/backup/pre-compact-$(date -u +%Y%m%dT%H%M%SZ).db
 node apps/api/scripts/db-snapshot.cjs apps/api/data/oracle.db "$SNAP"
 
