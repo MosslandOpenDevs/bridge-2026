@@ -2234,6 +2234,8 @@ function computeStats() {
     signalDb.countByCategory.all(synthetic) as { category: string; count: number }[];
   const byStatus = (synthetic: 0 | 1) =>
     issueDb.countByStatus.all(synthetic) as { status: string; count: number }[];
+  const openConditions = (synthetic: 0 | 1) =>
+    (issueDb.countOpenConditions.get(synthetic) as { count: number }).count;
   const sum = (rows: { count: number }[]) => rows.reduce((n, row) => n + row.count, 0);
 
   // category is NOT NULL, so the per-category counts cover every row exactly
@@ -2260,7 +2262,16 @@ function computeStats() {
 
   return {
     signals: {
+      // Stored observation rows, not distinct readings: most collectors store
+      // the same value again every minute whether or not it changed.
       total: sum(observedCategories),
+      // Observed rows stored in the last 24 hours. The all-time total only
+      // ever grows, so it cannot show whether collection is still running.
+      lastDay: (
+        signalDb.countObservedSince.get(new Date(now - DAY_MS).toISOString()) as {
+          count: number;
+        }
+      ).count,
       byCategory: observedCategories,
       adapterCount: signalRegistry.listAdapters().length,
       synthetic: {
@@ -2269,10 +2280,17 @@ function computeStats() {
       },
     },
     issues: {
+      // Every issue row stored, in any status — kept for the consumers that
+      // read it. It counts detections, not problems.
       total: issueCounts.observed,
+      // Distinct conditions among open issues. A condition that persisted used
+      // to mint a new row on every detection pass, and those rows are still
+      // open: 754 rows are 12 conditions on the 2026-09-26 snapshot.
+      conditions: openConditions(0),
       byStatus: byStatus(0),
       synthetic: {
         total: issueCounts.synthetic,
+        conditions: openConditions(1),
         byStatus: byStatus(1),
       },
     },

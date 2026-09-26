@@ -1678,6 +1678,27 @@ async function testStats() {
     `stats: expected 1 of 2 proofs successful, got ${data.outcomes.successRate}`,
   );
 
+  // Added fields. Conditions are distinct open fingerprints, so never more
+  // than the rows; the last day's rows are a subset of all rows.
+  for (const [label, value] of [
+    ["signals.lastDay", data.signals.lastDay],
+    ["issues.conditions", data.issues.conditions],
+    ["issues.synthetic.conditions", data.issues.synthetic.conditions],
+  ] as const) {
+    assert(
+      Number.isInteger(value) && value >= 0,
+      `stats: ${label} should be a count, got ${JSON.stringify(value)}`,
+    );
+  }
+  assert(
+    data.signals.lastDay <= data.signals.total,
+    `stats: ${data.signals.lastDay} rows in the last day exceeds ${data.signals.total} in total`,
+  );
+  assert(
+    data.issues.conditions <= data.issues.total &&
+      data.issues.synthetic.conditions <= data.issues.synthetic.total,
+    "stats: conditions should never exceed issue rows",
+  );
   assert(
     typeof data.asOf === "string" && !Number.isNaN(Date.parse(data.asOf)),
     `stats: asOf should be a timestamp, got ${JSON.stringify(data.asOf)}`,
@@ -1687,6 +1708,9 @@ async function testStats() {
 /**
  * /api/stats is served from a cache that the Socket.IO connect handler shares,
  * dropped by any successful write and by nothing else.
+ *
+ * Also pins what `conditions` means: rows left over from before open issues
+ * were folded by fingerprint count once per condition, not once per row.
  */
 async function testStatsCache() {
   const first = await get("/api/stats");
@@ -1757,6 +1781,12 @@ async function testStatsCache() {
     assert(
       fresh.data.issues.total === first.data.issues.total + 5,
       `stats: expected 5 more issue rows, got ${fresh.data.issues.total - first.data.issues.total}`,
+    );
+    assert(
+      fresh.data.issues.conditions === first.data.issues.conditions + 2,
+      `stats: 4 open rows of 2 conditions should add 2 conditions, got ${
+        fresh.data.issues.conditions - first.data.issues.conditions
+      }`,
     );
     agree(await socketStats(), fresh.data, "after a write");
 
