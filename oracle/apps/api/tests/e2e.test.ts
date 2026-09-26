@@ -381,9 +381,20 @@ async function testHealthIgnoresSyntheticSignals() {
  * constant. The same stored timestamp must now read as degraded.
  */
 async function testHealthStalenessRule() {
-  const { deriveHealth, resolveHealthConfig, MIN_STALE_AFTER_SECONDS } = await import(
-    "../src/health.js"
-  );
+  const { deriveHealth, healthHttpStatus, resolveHealthConfig, MIN_STALE_AFTER_SECONDS } =
+    await import("../src/health.js");
+
+  // HTTP status, the whole table. Only (down, strict) is a 503: the deploy
+  // gate's `curl -f` reads strict, and a degraded 503 there would roll back
+  // every deploy that lands before its first collection — and any deploy made
+  // while ingestion is stalled, which is when the fix ships.
+  for (const status of ["ok", "degraded", "down"] as const) {
+    for (const strict of [false, true]) {
+      const expected = status === "down" && strict ? 503 : 200;
+      const actual = healthHttpStatus(status, strict);
+      assert(actual === expected, `${status} with strict=${strict} should be ${expected}, got ${actual}`);
+    }
+  }
   const at = "2026-09-14T00:00:00.000Z";
   const after = (seconds: number) => new Date(Date.parse(at) + seconds * 1000);
   const reads = (value: string | null) => () => value;
@@ -478,6 +489,74 @@ async function testHealthReportsDown() {
 
   const { data } = await get("/api/health");
   assert(data.status === "ok", `health: should recover once the table is back, got ${data.status}`);
+}
+
+/**
+ * The 2026-09-14 outage, end to end: collection is on, the scheduler keeps
+ * ticking, and no observed signal lands. Every other boot in this suite has
+ * collection off, so without this the handler could ignore HEALTH_CONFIG, or
+ * answer 503 for degraded under ?strict=1, and still pass.
+ *
+ * Made deterministic without cutting the network: the newest observed signal
+ * is a day old, and a trigger silently drops every insert into `signals`, so
+ * whatever the adapters fetch never lands, which is what a stalled pipeline
+ * looks like from here. Reads are untouched, so this is degraded and not down.
+ */
+async function testHealthWhileIngestionStalls() {
+  const dbPath = join(dataDir, "e2e.db");
+  const lastObserved = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const setUp = (db: InstanceType<typeof Database>) => {
+    db.prepare("DELETE FROM signals WHERE synthetic = 0").run();
+    db.prepare(
+      `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic)
+       VALUES ('stall-obs', 'stall-obs', 'health-probe', ?, 'health_probe_obs', 'low', 0, 'n/a', 'observed', 0)`,
+    ).run(lastObserved);
+    db.exec(`CREATE TRIGGER e2e_stall_ingestion BEFORE INSERT ON signals
+             BEGIN SELECT RAISE(IGNORE); END`);
+  };
+
+  stopServer(true);
+  await sleep(500);
+  let db = new Database(dbPath);
+  try {
+    setUp(db);
+  } finally {
+    db.close();
+  }
+
+  try {
+    await startServer({ SIGNAL_COLLECT_INTERVAL: "3600", MOSSLAND_API_URL: "http://127.0.0.1:9" });
+
+    const { response, data } = await get("/api/health");
+    assertStatus(response, 200, "health while ingestion stalls");
+    assert(
+      JSON.stringify(data.collection) ===
+        JSON.stringify({ enabled: true, intervalSeconds: 3600, staleAfterSeconds: 10800 }),
+      `health: collection should report the configured interval, got ${JSON.stringify(data.collection)}`,
+    );
+    assert(data.status === "degraded", `health: a day-old signal should be degraded, got ${data.status}`);
+    assert(data.lastObservedSignalAt === lastObserved, "health: degraded still reports the last signal");
+    assert(
+      typeof data.reason === "string" && data.reason.includes("stale after 10800s"),
+      `health: degraded should say why, got ${data.reason}`,
+    );
+
+    // What the deploy gate reads. A 503 here would roll back a deploy made
+    // while ingestion is stalled, which is when the fix ships.
+    const strict = await get("/api/health?strict=1");
+    assertStatus(strict.response, 200, "strict health while degraded");
+    assert(strict.data.status === "degraded", "strict health: the body still carries the verdict");
+  } finally {
+    stopServer(true);
+    await sleep(500);
+    db = new Database(dbPath);
+    try {
+      db.exec("DROP TRIGGER IF EXISTS e2e_stall_ingestion");
+    } finally {
+      db.close();
+    }
+    await startServer();
+  }
 }
 
 /**
@@ -1291,6 +1370,8 @@ async function main() {
     await runTest("A fully successful outcome", testFullySuccessfulOutcome);
     await runTest("Stats", testStats);
     await runTest("Unknown ids return 404", testNotFoundPaths);
+    // Last: it deletes the observed signals earlier tests count.
+    await runTest("Health is degraded while ingestion stalls", testHealthWhileIngestionStalls);
   } finally {
     stopServer();
   }

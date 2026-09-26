@@ -48,7 +48,7 @@ import {
 
 // Import blockchain service
 import { blockchainService } from "./blockchain.js";
-import { deriveHealth, resolveHealthConfig } from "./health.js";
+import { deriveHealth, healthHttpStatus, resolveHealthConfig } from "./health.js";
 
 // Import security utilities
 import {
@@ -545,13 +545,13 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
 // cannot be read, "degraded" when collection is on and no observed signal has
 // landed within the staleness threshold, "ok" otherwise.
 //
-// HTTP status follows the health contract's rule 4: the body carries the
-// verdict and this answers 200 whenever it answers, so a consumer can tell
-// "unreachable" from "reachable and unwell". `?strict=1` is for probes that
-// can only read a number — the deploy gate's `curl -f` is one — and answers
-// 503 for "down" only. "degraded" is 200 there too: right after a restart the
-// first collection has not landed yet, and a gate that failed on that would
-// roll back every deploy.
+// HTTP status follows the health contract's rule 4 (healthHttpStatus): the
+// body carries the verdict and this answers 200 whenever it answers, so a
+// consumer can tell "unreachable" from "reachable and unwell". `?strict=1` is
+// for probes that can only read a number — the deploy gate's `curl -f` is one
+// — and answers 503 for "down" only. "degraded" is 200 there too: right after
+// a restart the first collection has not landed yet, and a gate that failed on
+// that would roll back every deploy.
 //
 // Never throws: a health check that 500s on a bad DB read is worse than one
 // that reports what it does know. lastObservedSignalAt is null when unknown —
@@ -585,7 +585,7 @@ const healthHandler = (req: express.Request, res: express.Response) => {
   // direct probe of the API port included.
   res.set("Cache-Control", "no-store");
   const strict = req.query.strict === "1";
-  res.status(strict && verdict.status === "down" ? 503 : 200).json({
+  res.status(healthHttpStatus(verdict.status, strict)).json({
     status: verdict.status,
     // The registry id from ecosystem-registry.json, not the display name
     // "BRIDGE" — a collector polling several services keys off this to

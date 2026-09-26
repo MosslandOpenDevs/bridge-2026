@@ -143,3 +143,19 @@ export function deriveHealth(
 
   return { status: "ok", lastObservedSignalAt, reason: null };
 }
+
+/**
+ * The HTTP status for a verdict. Contract rule 4: /api/health answers 200
+ * whenever it answers and carries the verdict in the body, so a consumer can
+ * tell "unreachable" from "reachable and unwell". `strict` (`?strict=1`) is for
+ * probes that can only read a number — the deploy gate's `curl -f` is one —
+ * and turns "down" alone into 503.
+ *
+ * "degraded" stays 200 under strict on purpose. Right after a restart the
+ * first collection has not landed yet, and a deploy made while ingestion is
+ * stalled is usually the fix for the stall; a gate that failed on degraded
+ * would roll both back.
+ */
+export function healthHttpStatus(status: HealthStatus, strict: boolean): number {
+  return strict && status === "down" ? 503 : 200;
+}
