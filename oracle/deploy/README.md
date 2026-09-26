@@ -95,9 +95,11 @@ registers it**.
 What one run of
 [`apps/api/scripts/db-backup.cjs`](../apps/api/scripts/db-backup.cjs) does:
 
-1. Refuses to start if it would leave less than `BACKUP_MIN_FREE_MB` (1024)
-   free — the backups share a disk with the live database, and SQLite on a
-   full disk fails the API's writes
+1. Removes a `.daily-*.partial` left by an interrupted run, then refuses to
+   start if the copy (1.5× the database with gzip, while the uncompressed and
+   compressed copies coexist) would leave less than `BACKUP_MIN_FREE_MB`
+   (1024) free — the backups share a disk with the live database, and SQLite
+   on a full disk fails the API's writes
 2. `VACUUM INTO` from a read-only handle (the same online copy as the
    pre-deploy snapshot; safe while the API is writing)
 3. `PRAGMA quick_check` on the **copy**; anything but `ok` deletes the copy,

@@ -357,25 +357,44 @@ async function main() {
       return finish(1);
     }
 
+    // Leftovers of a killed run (a reboot or `pm2 restart` mid-copy) go
+    // before the disk check: a .partial is as large as the database, and
+    // counting it as used space would fail every later run's check before it
+    // ever reached this cleanup. A .partial is ours and never a restore point,
+    // and we hold the lock. The tiny *.tmp-<pid> files of writeAtomic are only
+    // removed once old enough that no concurrent writer can still rename them.
+    for (const n of fs.readdirSync(dir)) {
+      const f = path.join(dir, n);
+      if (/^\.daily-.*\.partial(\.gz)?$/.test(n)) {
+        log("WARN", `removing ${n} left by an interrupted run`);
+        fs.rmSync(f, { force: true });
+      } else if (/^(\.last-backup\.json|daily-.*\.sha256)\.tmp-\d+$/.test(n)) {
+        try {
+          if (Date.now() - fs.statSync(f).mtimeMs > 3600 * 1000) fs.rmSync(f, { force: true });
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+
     // The copy is at most the size of the database file (VACUUM only drops
     // free pages), so that is the space it can take. The WAL is not counted:
-    // its committed content is already inside that estimate once copied.
+    // its committed content is already inside that estimate once copied. With
+    // gzip the .partial and the .gz exist together until the .partial is
+    // removed; production compressed to 30%, so half the source is a safe
+    // allowance for the .gz.
     const srcBytes = fs.statSync(dbPath).size;
+    const peakBytes = gzip ? srcBytes + Math.ceil(srcBytes / 2) : srcBytes;
     const fsStat = fs.statfsSync(dir);
     const freeBytes = fsStat.bavail * fsStat.bsize;
-    const needBytes = srcBytes + minFreeMb * 1048576;
+    const needBytes = peakBytes + minFreeMb * 1048576;
     if (freeBytes < needBytes) {
       marker.error = `insufficient disk: ${mb(freeBytes)} free, need ${mb(needBytes)}`;
       log(
         "FAIL",
-        `not enough disk: ${mb(freeBytes)} free, backup needs up to ${mb(srcBytes)} and BACKUP_MIN_FREE_MB=${minFreeMb} must stay free`,
+        `not enough disk: ${mb(freeBytes)} free, backup needs up to ${mb(peakBytes)} and BACKUP_MIN_FREE_MB=${minFreeMb} must stay free`,
       );
       return finish(1);
-    }
-
-    // A .partial left by a killed run is ours and never a restore point.
-    for (const n of fs.readdirSync(dir)) {
-      if (/^\.daily-.*\.partial(\.gz)?$/.test(n)) fs.rmSync(path.join(dir, n), { force: true });
     }
 
     // 1. Copy. Read-only, as in db-snapshot.cjs: the backup must never be the
