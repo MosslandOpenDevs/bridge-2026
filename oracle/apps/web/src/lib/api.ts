@@ -133,9 +133,12 @@ class APIClient {
     const params = new URLSearchParams();
     if (status) params.set("status", status);
     if (options?.limit) params.set("limit", String(options.limit));
-    // The API embeds every related signal by default, which a caller that only
-    // needs titles and times should not have to download.
-    if (options?.includeSignals === false) params.set("includeSignals", "false");
+    // Sent whenever it is given, either way: the API's default depends on the
+    // page size (signals embedded up to 50 rows, left out above), so only an
+    // explicit value makes the option mean what it says.
+    if (options?.includeSignals !== undefined) {
+      params.set("includeSignals", String(options.includeSignals));
+    }
     const query = params.toString();
     // signalsIncluded says whether `signals` was embedded: above 50 rows the
     // API leaves it out unless asked.
