@@ -72,11 +72,18 @@ class APIClient {
     // Mirrors the health handler's full payload. `lastObservedSignalAt` is
     // null when unknown — never read null as "just now".
     return this.fetch<{
-      status: string;
+      status: "ok" | "degraded" | "down";
       service: string;
       version: string;
       timestamp: string;
       lastObservedSignalAt: string | null;
+      lastProcessedAt: string | null;
+      collection: {
+        enabled: boolean;
+        intervalSeconds: number | null;
+        staleAfterSeconds: number | null;
+      };
+      reason: string | null;
     }>("/health");
   }
 

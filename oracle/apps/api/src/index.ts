@@ -48,6 +48,7 @@ import {
 
 // Import blockchain service
 import { blockchainService } from "./blockchain.js";
+import { deriveHealth, resolveHealthConfig } from "./health.js";
 
 // Import security utilities
 import {
@@ -538,36 +539,74 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
 // report named exactly this gap: "cumulative figures alone cannot establish
 // whether a pipeline is running."
 //
+// `status` used to be the constant "ok" beside that field, so it said "ok"
+// through the 487-minute ingestion outage of 2026-09-14 while the evidence sat
+// in the same body. It is now derived (health.ts): "down" when the database
+// cannot be read, "degraded" when collection is on and no observed signal has
+// landed within the staleness threshold, "ok" otherwise.
+//
+// HTTP status follows the health contract's rule 4: the body carries the
+// verdict and this answers 200 whenever it answers, so a consumer can tell
+// "unreachable" from "reachable and unwell". `?strict=1` is for probes that
+// can only read a number — the deploy gate's `curl -f` is one — and answers
+// 503 for "down" only. "degraded" is 200 there too: right after a restart the
+// first collection has not landed yet, and a gate that failed on that would
+// roll back every deploy.
+//
 // Never throws: a health check that 500s on a bad DB read is worse than one
-// that reports what it does know. It is null when unknown — callers
-// must not read null as "just now".
+// that reports what it does know. lastObservedSignalAt is null when unknown —
+// callers must not read null as "just now".
 const healthHandler = (req: express.Request, res: express.Response) => {
-  let lastObservedSignalAt: string | null = null;
-  try {
-    // Observed rows only. The demo adapter keeps writing synthetic signals
-    // when real collection is dead, so counting them here would report a
-    // stalled pipeline as healthy — the exact failure this field exists to
-    // surface. (Roughly a third of stored signals are synthetic.)
-    const row = signalDb.getLatestObservedTimestamp.get() as
-      | { timestamp?: string }
-      | undefined;
-    // Serialise explicitly rather than leaning on res.json, and drop an
-    // unparseable value instead of emitting "Invalid Date".
-    const at = row?.timestamp ? new Date(row.timestamp) : null;
-    lastObservedSignalAt = at && !Number.isNaN(at.getTime()) ? at.toISOString() : null;
-  } catch (error) {
-    console.error("health: could not read the latest observed signal time:", error);
-  }
+  // One clock read: the response time and the "now" staleness is judged
+  // against must be the same instant.
+  const now = new Date();
+  const verdict = deriveHealth(
+    () => {
+      try {
+        // Observed rows only. The demo adapter keeps writing synthetic signals
+        // when real collection is dead, so counting them here would report a
+        // stalled pipeline as healthy — the exact failure this field exists to
+        // surface. (Roughly a third of stored signals are synthetic.)
+        const row = signalDb.getLatestObservedTimestamp.get() as
+          | { timestamp?: string }
+          | undefined;
+        return row?.timestamp ?? null;
+      } catch (error) {
+        console.error("health: could not read the latest observed signal time:", error);
+        throw error;
+      }
+    },
+    HEALTH_CONFIG,
+    now,
+  );
 
-  res.json({
-    status: "ok",
+  // A cached health response reports the past (contract rule 6). nginx adds
+  // `no-cache` at the edge; this covers what bypasses it, the deploy gate's
+  // direct probe of the API port included.
+  res.set("Cache-Control", "no-store");
+  const strict = req.query.strict === "1";
+  res.status(strict && verdict.status === "down" ? 503 : 200).json({
+    status: verdict.status,
     // The registry id from ecosystem-registry.json, not the display name
     // "BRIDGE" — a collector polling several services keys off this to
     // attribute the payload.
     service: "bridge",
     version: "0.1.0",
-    timestamp: new Date().toISOString(),
-    lastObservedSignalAt,
+    timestamp: now.toISOString(),
+    lastObservedSignalAt: verdict.lastObservedSignalAt,
+    // The contract's name for data freshness. Same value, added alongside
+    // rather than instead: monitor and mossland-backend already read the
+    // field above.
+    lastProcessedAt: verdict.lastObservedSignalAt,
+    // What the freshness verdict was judged against. `enabled: false` means
+    // collection is switched off on purpose, which is why an old signal does
+    // not make this degraded then — there is no expectation to miss.
+    collection: {
+      enabled: HEALTH_CONFIG.collecting,
+      intervalSeconds: HEALTH_CONFIG.intervalSeconds,
+      staleAfterSeconds: HEALTH_CONFIG.staleAfterSeconds,
+    },
+    reason: verdict.reason,
   });
 };
 app.get("/health", healthHandler);
@@ -2252,6 +2291,18 @@ app.get("/api/blockchain/verify-voter/:address", async (req, res) => {
 
 // Background processing intervals (in seconds, 0 to disable)
 const SIGNAL_COLLECT_INTERVAL = parseInt(process.env.SIGNAL_COLLECT_INTERVAL || "60", 10);
+// Read by healthHandler at request time. Declared here so the freshness
+// expectation is derived from the very value the scheduler below acts on.
+const HEALTH_CONFIG = resolveHealthConfig(
+  SIGNAL_COLLECT_INTERVAL,
+  process.env.HEALTH_STALE_AFTER_SECONDS,
+);
+if (HEALTH_CONFIG.overrideRejected) {
+  console.warn(
+    `⚠️  HEALTH_STALE_AFTER_SECONDS must be a positive number of seconds, got ` +
+      `"${process.env.HEALTH_STALE_AFTER_SECONDS}"; using ${HEALTH_CONFIG.staleAfterSeconds}s`,
+  );
+}
 const ISSUE_DETECT_INTERVAL = parseInt(process.env.ISSUE_DETECT_INTERVAL || "300", 10); // 5 minutes
 const AUTO_DELIBERATE_ENABLED = envFlag("AUTO_DELIBERATE_ENABLED", true);
 const AUTO_DELIBERATE_MIN_PRIORITY = (process.env.AUTO_DELIBERATE_MIN_PRIORITY || "high").toLowerCase();
