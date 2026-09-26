@@ -11,11 +11,14 @@ import { api } from "@/lib/api";
 import { useSignMessage } from "wagmi";
 import { signDelegationCreate, signDelegationRevoke } from "@/lib/delegationSignature";
 
+// No reputation, accuracy or delegated-amount figures: the ones this list used
+// to carry were typed in by hand and never measured, and nothing was ever
+// delegated to these agents.
 const agents = [
-  { id: "risk-agent", nameKey: "security", icon: Shield, reputation: 87, totalDelegated: 1250000, recentAccuracy: 92 },
-  { id: "treasury-agent", nameKey: "treasury", icon: Coins, reputation: 82, totalDelegated: 980000, recentAccuracy: 88 },
-  { id: "community-agent", nameKey: "community", icon: Users, reputation: 91, totalDelegated: 1540000, recentAccuracy: 95 },
-  { id: "product-agent", nameKey: "technical", icon: Code, reputation: 78, totalDelegated: 720000, recentAccuracy: 85 },
+  { id: "risk-agent", nameKey: "security", icon: Shield },
+  { id: "treasury-agent", nameKey: "treasury", icon: Coins },
+  { id: "community-agent", nameKey: "community", icon: Users },
+  { id: "product-agent", nameKey: "technical", icon: Code },
 ];
 
 function DelegationForm({ onClose, t, address, onSuccess }: { onClose: () => void; t: any; address: string; onSuccess: () => void }) {
@@ -90,7 +93,6 @@ function DelegationForm({ onClose, t, address, onSuccess }: { onClose: () => voi
                     <Icon className="w-5 h-5 text-moss-600" />
                     <span className="font-medium text-sm">{t(`delegation.${agent.nameKey}`)}</span>
                   </div>
-                  <div className="mt-1 text-xs text-gray-500">{agent.reputation} pts</div>
                 </button>
               );
             })}
@@ -225,7 +227,7 @@ export default function DelegationPage() {
             const userDelegation = delegations.find((d: any) => d.delegate === agent.id && d.active);
             return (
               <div key={agent.id} className="card">
-                <div className="flex items-center space-x-3 mb-3">
+                <div className="flex items-center space-x-3">
                   <div className="p-2 bg-moss-50 rounded-lg">
                     <Icon className="w-6 h-6 text-moss-600" />
                   </div>
@@ -234,16 +236,6 @@ export default function DelegationPage() {
                     {userDelegation && (
                       <span className="badge bg-moss-100 text-moss-700 text-xs">{t("delegation.active")}</span>
                     )}
-                  </div>
-                </div>
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">{t("outcomes.score")}</span>
-                    <span className="font-medium">{agent.reputation}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">{t("outcomes.accuracy")}</span>
-                    <span className="font-medium">{agent.recentAccuracy}%</span>
                   </div>
                 </div>
               </div>
