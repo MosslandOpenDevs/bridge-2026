@@ -189,13 +189,15 @@ class APIClient {
   // default, and the API tallies every row it returns.
   //
   // limit (1-200) and offset page the filtered list; `count` is every match,
-  // `returned` the rows in this page.
+  // `returned` the rows in this page. Pages are cut oldest first unless
+  // order is "desc" (newest createdAt first), so limit alone gets the oldest.
   async getProposals(
     options: {
       status?: string;
       synthetic?: "include" | "exclude" | "only";
       limit?: number;
       offset?: number;
+      order?: "asc" | "desc";
     } = {},
   ) {
     const params = new URLSearchParams();
@@ -203,6 +205,7 @@ class APIClient {
     if (options.synthetic) params.set("synthetic", options.synthetic);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     if (options.offset !== undefined) params.set("offset", String(options.offset));
+    if (options.order) params.set("order", options.order);
     const qs = params.toString();
     const query = qs ? `?${qs}` : "";
     return this.fetch<{ proposals: ProposalListItem[]; count: number; returned: number }>(

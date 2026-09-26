@@ -1134,7 +1134,16 @@ type SyntheticFilter = (typeof SYNTHETIC_FILTERS)[number];
 // why monitor.moss.land stopped reading this endpoint: it had no way to ask
 // for less. `count` is every proposal that matched the filters, `returned` how
 // many are in this page, so a caller can tell a short page from the end.
+//
+// `?order=` sets the order pages are cut from. The default, asc, is the order
+// the list always had: oldest first (proposals load ORDER BY created_at ASC and
+// new ones are appended), so ?limit=20 alone is the twenty OLDEST proposals.
+// A caller that wants the latest — monitor.moss.land does — asks for
+// order=desc, newest createdAt first, and gets them in one request instead of
+// reading `count` and computing an offset.
 const PROPOSAL_PAGE_MAX = 200;
+const PROPOSAL_ORDERS = ["asc", "desc"] as const;
+type ProposalOrder = (typeof PROPOSAL_ORDERS)[number];
 
 /** A non-negative integer query value, or undefined when absent; NaN if malformed. */
 function intParam(raw: unknown): number | undefined {
@@ -1168,6 +1177,12 @@ app.get("/api/proposals", (req, res) => {
       return res.status(400).json({ error: "offset must be a non-negative integer" });
     }
     const limit = rawLimit === undefined ? undefined : Math.min(rawLimit, PROPOSAL_PAGE_MAX);
+    const order = (req.query.order ?? "asc") as ProposalOrder;
+    if (!PROPOSAL_ORDERS.includes(order)) {
+      return res.status(400).json({
+        error: `order must be one of: ${PROPOSAL_ORDERS.join(", ")}`,
+      });
+    }
 
     const syntheticIds = new Set(
       (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
@@ -1179,8 +1194,16 @@ app.get("/api/proposals", (req, res) => {
           ? true
           : syntheticIds.has(p.id) === (syntheticFilter === "only"),
       );
+    // Reversed before the (stable) sort, so proposals created in the same
+    // millisecond still come newest-inserted first.
+    const ordered =
+      order === "desc"
+        ? [...matching]
+            .reverse()
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        : matching;
     // Paged before tallying, so a page costs its own rows' tallies only.
-    const proposals = matching
+    const proposals = ordered
       .slice(offset, limit === undefined ? undefined : offset + limit)
       .map((p) => ({ ...withTally(p), synthetic: syntheticIds.has(p.id) }));
     res.json({ proposals, count: matching.length, returned: proposals.length });

@@ -1117,7 +1117,7 @@ async function testProposalListPaging() {
   // At least three, whatever ran before.
   await createProposal({ votingPeriod: 60_000 });
   await createProposal({ votingPeriod: 60_000 });
-  await createProposal({ votingPeriod: 60_000 });
+  const newest = await createProposal({ votingPeriod: 60_000 });
 
   const full = await get("/api/proposals");
   assertStatus(full.response, 200, "unpaged list");
@@ -1153,6 +1153,32 @@ async function testProposalListPaging() {
     past.data.returned === 0 && past.data.count === all.length,
     "an offset past the end should return an empty page but the full count",
   );
+
+  // Pages are cut oldest first unless asked otherwise: the default is the
+  // unpaged order, and order=desc puts the newest proposal on the first page.
+  const ids = (data: any) => data.proposals.map((p: { id: string }) => p.id).join();
+  const asc = await get("/api/proposals?order=asc");
+  assert(ids(asc.data) === all.join(), "order=asc should be the default, unpaged order");
+  const latest = await get("/api/proposals?order=desc&limit=1");
+  assertStatus(latest.response, 200, "newest page");
+  assert(
+    latest.data.returned === 1 && latest.data.proposals[0].id === newest.id,
+    `order=desc&limit=1 should be the proposal created last (${newest.id}), got ${ids(latest.data)}`,
+  );
+  const desc = await get("/api/proposals?order=desc");
+  const created = desc.data.proposals.map((p: { createdAt: string }) => Date.parse(p.createdAt));
+  assert(
+    desc.data.count === all.length &&
+      created.every((t: number, i: number) => i === 0 || created[i - 1] >= t),
+    "order=desc should list every proposal, newest createdAt first",
+  );
+  const descPage = await get("/api/proposals?order=desc&limit=2&offset=1");
+  assert(
+    ids(descPage.data) === desc.data.proposals.slice(1, 3).map((p: { id: string }) => p.id).join(),
+    "offset should shift a desc page along the desc order",
+  );
+  const badOrder = await get("/api/proposals?order=newest");
+  assertStatus(badOrder.response, 400, "unknown order");
 
   // count is the filtered total, not the table's.
   const excluded = await get("/api/proposals?synthetic=exclude");
