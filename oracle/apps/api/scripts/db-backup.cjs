@@ -162,31 +162,71 @@ function writeAtomic(file, content) {
 // A second run (a manual one during the cron one) would VACUUM the same
 // database twice and race on rotation. The lock carries the owner's PID so a
 // lock left by a killed run is reclaimed rather than blocking every later day.
+// A live PID alone is not proof: the lock file survives a reboot, and its
+// small PID is often reused by an unrelated process afterwards, which would
+// block backups indefinitely. So a live owner whose command line is not
+// recognisably a db-backup run is treated as abandoned once the lock is older
+// than LOCK_STALE_MS (a run takes seconds to minutes; the daily run is 24h
+// later). One that is a db-backup run is never reclaimed, as with deploy.sh's
+// lock: a second run on top of a live one is what the lock exists to stop.
+// Returns null once acquired, else the reason it was not.
+const LOCK_STALE_MS = 6 * 3600 * 1000;
+
+function ownerCommand(pid) {
+  const res = spawnSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 5000 });
+  if (res.error || typeof res.stdout !== "string") return "";
+  return res.stdout.trim();
+}
+
 function acquireLock(lockFile) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const fd = fs.openSync(lockFile, "wx");
       fs.writeSync(fd, String(process.pid));
       fs.closeSync(fd);
-      return true;
+      return null;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
-      const pid = Number(fs.readFileSync(lockFile, "utf8").trim());
-      let alive = false;
-      if (Number.isInteger(pid) && pid > 0) {
-        try {
-          process.kill(pid, 0);
-          alive = true;
-        } catch (e) {
-          alive = e.code === "EPERM";
-        }
-      }
-      if (alive) return false;
-      log("WARN", `reclaiming stale lock from pid ${pid || "?"}`);
-      fs.rmSync(lockFile, { force: true });
     }
+    let pid;
+    let since;
+    try {
+      pid = Number(fs.readFileSync(lockFile, "utf8").trim());
+      since = fs.statSync(lockFile).mtime;
+    } catch (err) {
+      if (err.code === "ENOENT") continue; // released between our open and read
+      throw err;
+    }
+    let alive = false;
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch (e) {
+        alive = e.code === "EPERM";
+      }
+    }
+    let stale;
+    if (!alive) {
+      stale = `owner pid ${pid || "?"} is gone`;
+    } else {
+      const cmd = ownerCommand(pid);
+      const ageMs = Date.now() - since.getTime();
+      // Only age reclaims a live owner, never the command line alone: under
+      // pm2 the title is rewritten to "node <script>" and may be truncated to
+      // the wrapper's argv length, so a real run can fail the name match.
+      if (!cmd.includes("db-backup") && ageMs > LOCK_STALE_MS) {
+        stale =
+          `pid ${pid} is alive but not recognisably a db-backup run (reused after a reboot?) ` +
+          `and the lock is ${secs(ageMs)} old: ${cmd.slice(0, 120) || "command line unreadable"}`;
+      } else {
+        return `lock ${lockFile} held by pid ${pid} since ${since.toISOString()}`;
+      }
+    }
+    log("WARN", `reclaiming stale lock: ${stale}`);
+    fs.rmSync(lockFile, { force: true });
   }
-  return false;
+  return `lock ${lockFile} could not be acquired after reclaiming it`;
 }
 
 // Grandfather-father-son, by count rather than by calendar. Kept:
@@ -345,9 +385,14 @@ async function main() {
   }
 
   const lockFile = path.join(dir, ".backup.lock");
-  if (!acquireLock(lockFile)) {
-    log("FAIL", `another backup run holds ${lockFile}; not starting a second one`);
-    return 1; // the running one owns the marker
+  const refused = acquireLock(lockFile);
+  if (refused) {
+    // Into the marker as well as the log: a lock that keeps refusing must be
+    // visible to whatever reads the marker. If the holder is a real run, it
+    // overwrites this when it finishes.
+    marker.error = refused;
+    log("FAIL", `${refused}; not starting a second backup run`);
+    return finish(1);
   }
 
   try {
