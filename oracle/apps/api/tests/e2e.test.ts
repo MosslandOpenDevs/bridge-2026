@@ -294,6 +294,38 @@ async function createProposal(options: Record<string, unknown> = {}) {
   return data.proposal;
 }
 
+/**
+ * The `stats:update` payload a new Socket.IO connection receives.
+ *
+ * Spoken over Engine.IO's long-polling transport with plain fetch — open,
+ * CONNECT to the default namespace, read until the event arrives, close — so
+ * the suite needs no socket.io-client dependency.
+ */
+async function socketStats(): Promise<any> {
+  const base = `${baseUrl}/socket.io/?EIO=4&transport=polling`;
+  const open = await fetch(base);
+  assertStatus(open, 200, "socket handshake");
+  const { sid } = JSON.parse((await open.text()).slice(1));
+  const url = `${base}&sid=${sid}`;
+  const send = (packet: string) =>
+    fetch(url, { method: "POST", body: packet, headers: { "Content-Type": "text/plain" } });
+  try {
+    assertStatus(await send("40"), 200, "socket connect");
+    for (let poll = 0; poll < 3; poll++) {
+      const body = await (await fetch(url, { signal: AbortSignal.timeout(5000) })).text();
+      // Engine.IO v4 separates packets in one polling payload with 0x1e.
+      for (const packet of body.split("\x1e")) {
+        if (!packet.startsWith("42")) continue;
+        const [event, data] = JSON.parse(packet.slice(2));
+        if (event === "stats:update") return data;
+      }
+    }
+    throw new Error("socket: no stats:update after connecting");
+  } finally {
+    await send("1").catch(() => undefined);
+  }
+}
+
 /* -------------------------------- tests ------------------------------- */
 
 async function testHealthCheck() {
@@ -1645,6 +1677,108 @@ async function testStats() {
     data.outcomes.successRate === 0.5,
     `stats: expected 1 of 2 proofs successful, got ${data.outcomes.successRate}`,
   );
+
+  assert(
+    typeof data.asOf === "string" && !Number.isNaN(Date.parse(data.asOf)),
+    `stats: asOf should be a timestamp, got ${JSON.stringify(data.asOf)}`,
+  );
+}
+
+/**
+ * /api/stats is served from a cache that the Socket.IO connect handler shares,
+ * dropped by any successful write and by nothing else.
+ */
+async function testStatsCache() {
+  const first = await get("/api/stats");
+  assertStatus(first.response, 200, "stats");
+  const again = await get("/api/stats");
+  assert(
+    JSON.stringify(again.data) === JSON.stringify(first.data),
+    "stats: a second read inside the window should be the cached payload",
+  );
+
+  const agree = (socket: any, stats: any, label: string) =>
+    assert(
+      socket.signals === stats.signals.total &&
+        socket.issues === stats.issues.total &&
+        socket.proposals === stats.proposals.total &&
+        socket.activeProposals === stats.proposals.active &&
+        socket.synthetic.signals === stats.signals.synthetic.total &&
+        socket.synthetic.issues === stats.issues.synthetic.total &&
+        socket.synthetic.proposals === stats.proposals.synthetic.total,
+      `${label}: socket ${JSON.stringify(socket)} disagrees with /api/stats`,
+    );
+  agree(await socketStats(), first.data, "on connect");
+
+  // Three open rows of one condition, one of another, one closed: as legacy
+  // duplicates would sit in the table. Written behind the API's back, so the
+  // cache cannot know about them until something invalidates it.
+  const category = "conditions_probe";
+  const at = new Date().toISOString();
+  const db = new Database(join(dataDir, "e2e.db"));
+  try {
+    const insert = db.prepare(
+      `INSERT INTO issues (id, title, description, category, priority, status, detected_at, synthetic, fingerprint)
+       VALUES (?, 'probe', 'probe', ?, 'low', ?, ?, 0, ?)`,
+    );
+    insert.run("cp-1", category, "detected", at, `${category}|issue|up`);
+    insert.run("cp-2", category, "detected", at, `${category}|issue|up`);
+    insert.run("cp-3", category, "deliberating", at, `${category}|issue|up`);
+    insert.run("cp-4", category, "detected", at, `${category}|issue|down`);
+    insert.run("cp-5", category, "resolved", at, `${category}|anomaly|up`);
+  } finally {
+    db.close();
+  }
+
+  try {
+    const cached = await get("/api/stats");
+    assert(
+      cached.data.asOf === first.data.asOf && cached.data.issues.total === first.data.issues.total,
+      "stats: an out-of-band row should not show before the cache is dropped",
+    );
+
+    // A refused write changed nothing, so it must not cost a recomputation.
+    const refused = await post("/api/proposals", { decisionPacket: {} });
+    assertStatus(refused.response, 400, "malformed proposal");
+    const stillCached = await get("/api/stats");
+    assert(
+      stillCached.data.asOf === first.data.asOf,
+      "stats: a failed write should leave the cache in place",
+    );
+
+    // Any successful write, not only the ones that recompute on purpose.
+    await createProposal({ votingPeriod: 60_000 });
+    const fresh = await get("/api/stats");
+    assert(fresh.data.asOf !== first.data.asOf, "stats: a successful write should drop the cache");
+    assert(
+      fresh.data.proposals.total === first.data.proposals.total + 1,
+      "stats: the new proposal should be counted after the write",
+    );
+    assert(
+      fresh.data.issues.total === first.data.issues.total + 5,
+      `stats: expected 5 more issue rows, got ${fresh.data.issues.total - first.data.issues.total}`,
+    );
+    agree(await socketStats(), fresh.data, "after a write");
+
+    // A collection recomputes at once, so its event and the next read agree.
+    const collected = await post("/api/signals/collect");
+    assertStatus(collected.response, 200, "collect signals");
+    const afterCollect = await get("/api/stats");
+    assert(
+      afterCollect.data.signals.total + afterCollect.data.signals.synthetic.total ===
+        fresh.data.signals.total + fresh.data.signals.synthetic.total + collected.data.collected,
+      "stats: the collected rows should be counted after a collection",
+    );
+  } finally {
+    const cleanup = new Database(join(dataDir, "e2e.db"));
+    try {
+      cleanup.prepare(`DELETE FROM issues WHERE category = ?`).run(category);
+    } finally {
+      cleanup.close();
+    }
+    // Drop the cache again so nothing after this reads the probe rows.
+    await post("/api/signals/collect");
+  }
 }
 
 async function testNotFoundPaths() {
@@ -1693,6 +1827,7 @@ async function main() {
     // measured proof survived, and this one mints a second.
     await runTest("A fully successful outcome", testFullySuccessfulOutcome);
     await runTest("Stats", testStats);
+    await runTest("Stats cache is shared with the socket and dropped on writes", testStatsCache);
     await runTest("Unknown ids return 404", testNotFoundPaths);
     // Last: it deletes the observed signals earlier tests count.
     await runTest("Health is degraded while ingestion stalls", testHealthWhileIngestionStalls);

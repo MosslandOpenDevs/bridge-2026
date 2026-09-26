@@ -481,31 +481,51 @@ app.use(
   }),
 );
 
+// Any write that succeeds may have moved a figure in /api/stats — a proposal
+// finalized, an outcome recorded, an issue closed — so it drops the cached
+// payload. Done in res.end, before the response leaves, so a client that reads
+// stats straight after its own write cannot be answered from the old cache.
+// Failed writes (4xx/5xx) leave it alone: they changed nothing, and letting
+// them through would let anyone force a recomputation per request.
+app.use((req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
+    next();
+    return;
+  }
+  const end = res.end;
+  res.end = function (this: express.Response, ...args: unknown[]) {
+    if (res.statusCode < 400) invalidateStats();
+    return (end as (...a: unknown[]) => express.Response).apply(this, args);
+  } as typeof res.end;
+  next();
+});
+
 // Socket.IO connection handling
 io.on("connection", (socket) => {
   console.log(`🔌 Client connected: ${socket.id}`);
 
-  // Send current stats on connection. Same rule as GET /api/stats: the headline
-  // counts are observations, the demo totals travel separately.
-  const signalCounts = signalDb.counts.get() as SyntheticSplit;
-  const issueCounts = issueDb.counts.get() as SyntheticSplit;
-  const syntheticProposalIds = new Set(
-    (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
-  );
-  const proposals = votingSystem.listProposals();
-  const realProposals = proposals.filter((p) => !syntheticProposalIds.has(p.id));
-
-  socket.emit("stats:update", {
-    signals: signalCounts.observed,
-    issues: issueCounts.observed,
-    proposals: realProposals.length,
-    activeProposals: realProposals.filter((p) => p.status === "active").length,
-    synthetic: {
-      signals: signalCounts.synthetic,
-      issues: issueCounts.synthetic,
-      proposals: proposals.length - realProposals.length,
-    },
-  });
+  // Send current stats on connection, read from the GET /api/stats cache. Each
+  // connection used to run its own full COUNT over ~1.1M signal rows, so
+  // anyone opening sockets in a loop held the event loop for as long as they
+  // liked; now a connection costs a cache read, and the socket and the HTTP
+  // endpoint cannot disagree. Same rule as there: the headline counts are
+  // observations, the demo totals travel separately.
+  try {
+    const stats = currentStats();
+    socket.emit("stats:update", {
+      signals: stats.signals.total,
+      issues: stats.issues.total,
+      proposals: stats.proposals.total,
+      activeProposals: stats.proposals.active,
+      synthetic: {
+        signals: stats.signals.synthetic.total,
+        issues: stats.issues.synthetic.total,
+        proposals: stats.proposals.synthetic.total,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to send stats on connect:", error);
+  }
 
   socket.on("disconnect", () => {
     console.log(`🔌 Client disconnected: ${socket.id}`);
@@ -642,11 +662,11 @@ app.post("/api/signals/collect", requireAdminKey, async (req, res) => {
       signalDb.insert.run(serializeSignal(signal));
     }
 
-    // Emit real-time event
-    const signalCounts = signalDb.counts.get() as SyntheticSplit;
+    // Emit real-time event. The total comes from recomputed stats, so the
+    // event and the next GET /api/stats report the same number.
     io.emit("signals:collected", {
       count: signals.length,
-      total: signalCounts.observed,
+      total: refreshStats().signals.total,
       signals: signals.slice(0, 5), // Send latest 5 for preview
     });
 
@@ -2174,6 +2194,25 @@ app.get("/api/llm/usage", requireAdminKey, (req, res) => {
 });
 
 /**
+ * How long a computed stats payload is served before it is computed again.
+ *
+ * The moss.land homepage widget (~2,170 IPs over 30 days) and monitor.moss.land
+ * each poll /api/stats every 30s, the dashboard does per open tab, and every
+ * Socket.IO connection used to run the same counts once more. Computing them
+ * groups ~1.1M signal rows, and better-sqlite3 is synchronous, so every request
+ * held the event loop for ~62ms on the 2026-09-26 snapshot while all other
+ * requests waited. The numbers only move when this process writes, so they
+ * are computed at most once per window, and sooner when a write of ours
+ * changes them: a collection tick recomputes at once (its socket event carries
+ * the new total), and a detection or finalize tick, or any successful write
+ * request, drops the cache so the next read recomputes.
+ *
+ * The window is the pollers' own interval, so none of them reads a figure
+ * older than it would have seen between two of its polls anyway.
+ */
+const STATS_MAX_AGE_MS = 30_000;
+
+/**
  * System stats, with the demo data reported beside the real data and never
  * inside it.
  *
@@ -2183,69 +2222,111 @@ app.get("/api/llm/usage", requireAdminKey, (req, res) => {
  * value now gets the number of things this service actually observed. It used
  * to get that plus 223,074 values MockAdapter invented, with nothing in the
  * response to say so.
+ *
+ * Fields are only ever added here: the moss.land widget, monitor.moss.land and
+ * mossland-backend read this payload by key.
  */
+function computeStats() {
+  const now = Date.now();
+  const issueCounts = issueDb.counts.get() as SyntheticSplit;
+
+  const byCategory = (synthetic: 0 | 1) =>
+    signalDb.countByCategory.all(synthetic) as { category: string; count: number }[];
+  const byStatus = (synthetic: 0 | 1) =>
+    issueDb.countByStatus.all(synthetic) as { status: string; count: number }[];
+  const sum = (rows: { count: number }[]) => rows.reduce((n, row) => n + row.count, 0);
+
+  // category is NOT NULL, so the per-category counts cover every row exactly
+  // once and their sum is the total. A separate COUNT(*) walked the whole
+  // table a second time for the same number: 26ms of the 62.
+  const observedCategories = byCategory(0);
+  const syntheticCategories = byCategory(1);
+
+  const syntheticProposalIds = new Set(
+    (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
+  );
+  const allProposals = votingSystem.listProposals();
+  const tallyProposals = (proposals: typeof allProposals) => ({
+    total: proposals.length,
+    active: proposals.filter((p) => p.status === "active").length,
+    passed: proposals.filter((p) => p.status === "passed").length,
+    rejected: proposals.filter((p) => p.status === "rejected").length,
+    // Voting ended without reaching quorum: closed, but not decided. Counted
+    // apart from `rejected`, which it used to be folded into.
+    expired: proposals.filter((p) => p.status === "expired").length,
+  });
+
+  const proofs = outcomeTracker.listProofs();
+
+  return {
+    signals: {
+      total: sum(observedCategories),
+      byCategory: observedCategories,
+      adapterCount: signalRegistry.listAdapters().length,
+      synthetic: {
+        total: sum(syntheticCategories),
+        byCategory: syntheticCategories,
+      },
+    },
+    issues: {
+      total: issueCounts.observed,
+      byStatus: byStatus(0),
+      synthetic: {
+        total: issueCounts.synthetic,
+        byStatus: byStatus(1),
+      },
+    },
+    proposals: {
+      ...tallyProposals(allProposals.filter((p) => !syntheticProposalIds.has(p.id))),
+      synthetic: tallyProposals(
+        allProposals.filter((p) => syntheticProposalIds.has(p.id)),
+      ),
+    },
+    outcomes: {
+      totalProofs: proofs.length,
+      // null, not 0, when nothing has been measured yet. Zero proofs is not
+      // a zero success rate — it is the absence of one — and the dashboard
+      // rendered the difference as "0%", which reads as a service that tries
+      // and fails rather than one that has not yet measured anything.
+      successRate:
+        proofs.length > 0
+          ? proofs.filter((p) => p.overallSuccess).length / proofs.length
+          : null,
+    },
+    // When these figures were computed. Up to STATS_MAX_AGE_MS old.
+    asOf: new Date(now).toISOString(),
+  };
+}
+
+type StatsPayload = ReturnType<typeof computeStats>;
+
+let statsCache: { payload: StatsPayload; computedAt: number } | undefined;
+
+/** The stats payload, recomputed only when the cached one is too old. */
+function currentStats(): StatsPayload {
+  const now = Date.now();
+  if (statsCache && now - statsCache.computedAt < STATS_MAX_AGE_MS) {
+    return statsCache.payload;
+  }
+  const payload = computeStats();
+  statsCache = { payload, computedAt: now };
+  return payload;
+}
+
+/** Drop the cached stats; the next read computes them. */
+function invalidateStats(): void {
+  statsCache = undefined;
+}
+
+/** Recompute now, for a write whose own event publishes a figure from it. */
+function refreshStats(): StatsPayload {
+  invalidateStats();
+  return currentStats();
+}
+
 app.get("/api/stats", (req, res) => {
   try {
-    const signalCounts = signalDb.counts.get() as SyntheticSplit;
-    const issueCounts = issueDb.counts.get() as SyntheticSplit;
-
-    const byCategory = (synthetic: 0 | 1) =>
-      signalDb.countByCategory.all(synthetic) as { category: string; count: number }[];
-    const byStatus = (synthetic: 0 | 1) =>
-      issueDb.countByStatus.all(synthetic) as { status: string; count: number }[];
-
-    const syntheticProposalIds = new Set(
-      (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
-    );
-    const allProposals = votingSystem.listProposals();
-    const tallyProposals = (proposals: typeof allProposals) => ({
-      total: proposals.length,
-      active: proposals.filter((p) => p.status === "active").length,
-      passed: proposals.filter((p) => p.status === "passed").length,
-      rejected: proposals.filter((p) => p.status === "rejected").length,
-      // Voting ended without reaching quorum: closed, but not decided. Counted
-      // apart from `rejected`, which it used to be folded into.
-      expired: proposals.filter((p) => p.status === "expired").length,
-    });
-
-    const proofs = outcomeTracker.listProofs();
-
-    res.json({
-      signals: {
-        total: signalCounts.observed,
-        byCategory: byCategory(0),
-        adapterCount: signalRegistry.listAdapters().length,
-        synthetic: {
-          total: signalCounts.synthetic,
-          byCategory: byCategory(1),
-        },
-      },
-      issues: {
-        total: issueCounts.observed,
-        byStatus: byStatus(0),
-        synthetic: {
-          total: issueCounts.synthetic,
-          byStatus: byStatus(1),
-        },
-      },
-      proposals: {
-        ...tallyProposals(allProposals.filter((p) => !syntheticProposalIds.has(p.id))),
-        synthetic: tallyProposals(
-          allProposals.filter((p) => syntheticProposalIds.has(p.id)),
-        ),
-      },
-      outcomes: {
-        totalProofs: proofs.length,
-        // null, not 0, when nothing has been measured yet. Zero proofs is not
-        // a zero success rate — it is the absence of one — and the dashboard
-        // rendered the difference as "0%", which reads as a service that tries
-        // and fails rather than one that has not yet measured anything.
-        successRate:
-          proofs.length > 0
-            ? proofs.filter((p) => p.overallSuccess).length / proofs.length
-            : null,
-      },
-    });
+    res.json(currentStats());
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch stats" });
   }
@@ -2393,12 +2474,13 @@ async function collectAndSaveSignals() {
     signalDb.insert.run(serializeSignal(signal));
   }
 
-  // Emit real-time event
+  // A collection tick is the main thing that moves the stats, so they are
+  // recomputed here rather than on the next read; the event then carries the
+  // same total GET /api/stats will serve, without a second count of its own.
   if (signals.length > 0) {
-    const signalCounts = signalDb.counts.get() as SyntheticSplit;
     io.emit("signals:collected", {
       count: signals.length,
-      total: signalCounts.observed,
+      total: refreshStats().signals.total,
       signals: signals.slice(0, 5),
     });
   }
@@ -2633,6 +2715,10 @@ async function detectAndSaveIssues() {
     );
   }
 
+  // Issue rows, their statuses and any proposals promoted from them may have
+  // moved; the next /api/stats read recomputes.
+  invalidateStats();
+
   return {
     detected: detectedIssues.length,
     // Rows actually created. `saved` is this plus escalations, i.e. everything
@@ -2733,6 +2819,9 @@ function finalizeDueProposals(): { finalized: number; failed: number } {
       console.error(`[auto-finalize] failed for proposal ${proposal.id}:`, error);
     }
   }
+
+  // Proposal counts in /api/stats just moved; the next read recomputes them.
+  if (finalized > 0) invalidateStats();
 
   return { finalized, failed };
 }
