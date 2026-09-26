@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useSocketContext } from "@/contexts/SocketContext";
 import {
   Activity,
@@ -37,7 +37,7 @@ const sourceIcons: Record<string, React.ElementType> = {
   api: Globe,
 };
 
-function SignalCard({ signal, t }: { signal: any; t: any }) {
+function SignalCard({ signal, t, locale }: { signal: any; t: any; locale: string }) {
   const [isExpanded, setIsExpanded] = useState(false);
 
   const SourceIcon = sourceIcons[signal.source] || Activity;
@@ -180,7 +180,7 @@ function SignalCard({ signal, t }: { signal: any; t: any }) {
           <div className="mt-2 flex items-center gap-2 sm:gap-4 text-xs sm:text-sm text-gray-500">
             <span className="flex items-center gap-1">
               <Clock className="w-3 h-3" />
-              {timeAgo(new Date(signal.timestamp))}
+              {timeAgo(signal.timestamp, locale)}
             </span>
             {metadata.blockNumber && (
               <span className="flex items-center gap-1">
@@ -276,7 +276,7 @@ function SignalCard({ signal, t }: { signal: any; t: any }) {
                 {t("signals.timestamp")}
               </span>
               <p className="mt-1 text-sm text-gray-700">
-                {new Date(signal.timestamp).toLocaleString()}
+                {new Date(signal.timestamp).toLocaleString(locale)}
               </p>
             </div>
 
@@ -313,6 +313,7 @@ function SignalCard({ signal, t }: { signal: any; t: any }) {
 
 export default function SignalsPage() {
   const t = useTranslations();
+  const locale = useLocale();
   const queryClient = useQueryClient();
   const { onSignalsCollected, isConnected } = useSocketContext();
   const [filter, setFilter] = useState<string>("all");
@@ -573,7 +574,7 @@ export default function SignalsPage() {
             </div>
           ) : (
             filteredSignals.map((signal: any) => (
-              <SignalCard key={signal.id} signal={signal} t={t} />
+              <SignalCard key={signal.id} signal={signal} t={t} locale={locale} />
             ))
           )}
         </div>

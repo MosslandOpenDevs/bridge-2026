@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useAccount } from "@/hooks/useMOC";
 import { AlertTriangle, MessageSquare, Users, Shield, Coins, Code, ChevronRight, Bot, Loader2, RefreshCw, CheckCircle, Clock, MessageCircle, FlaskConical } from "lucide-react";
 import { cn, timeAgo } from "@/lib/utils";
@@ -106,6 +106,7 @@ const stanceColors: Record<string, string> = {
 
 export default function IssuesPage() {
   const t = useTranslations();
+  const locale = useLocale();
   const tToast = useTranslations("toast");
   const tAdmin = useTranslations("admin");
   const hasAdminKey = useHasAdminKey();
@@ -261,7 +262,7 @@ export default function IssuesPage() {
                         <h3 className="mt-2 font-semibold text-gray-900 text-sm sm:text-base line-clamp-2">{issue.title}</h3>
                         <p className="mt-1 text-xs sm:text-sm text-gray-500 line-clamp-2">{issue.description}</p>
                         <div className="mt-2 flex items-center flex-wrap gap-2 sm:gap-4 text-xs text-gray-400">
-                          <span>{timeAgo(new Date(issue.detectedAt))}</span>
+                          <span>{timeAgo(issue.detectedAt, locale)}</span>
                           <span>{t("issues.relatedSignals")}: {issue.signalCount || 0}</span>
                         </div>
                       </div>
