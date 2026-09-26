@@ -1040,11 +1040,41 @@ function withTally(proposal: Proposal) {
   };
 }
 
+const SYNTHETIC_FILTERS = ["include", "exclude", "only"] as const;
+type SyntheticFilter = (typeof SYNTHETIC_FILTERS)[number];
+
 // Proposal endpoints
+//
+// Every listed proposal says whether it was raised on demo data. At the
+// 2026-09-26 audit, 143 of 164 production proposals traced back to synthetic
+// issues, and the list gave
+// no way to tell them from the 21 real ones, so the page presented invented
+// governance history as if it had happened. The marker comes from the same
+// query /api/stats splits its proposal totals on, so the two cannot disagree.
+//
+// `?synthetic=` defaults to include: consumers that predate the field keep
+// receiving exactly the rows they did, with one more property on each.
 app.get("/api/proposals", (req, res) => {
   try {
     const status = req.query.status as string | undefined;
-    const proposals = votingSystem.listProposals(status as any).map(withTally);
+    const syntheticFilter = (req.query.synthetic ?? "include") as SyntheticFilter;
+    if (!SYNTHETIC_FILTERS.includes(syntheticFilter)) {
+      return res.status(400).json({
+        error: `synthetic must be one of: ${SYNTHETIC_FILTERS.join(", ")}`,
+      });
+    }
+
+    const syntheticIds = new Set(
+      (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
+    );
+    const proposals = votingSystem
+      .listProposals(status as any)
+      .filter((p) =>
+        syntheticFilter === "include"
+          ? true
+          : syntheticIds.has(p.id) === (syntheticFilter === "only"),
+      )
+      .map((p) => ({ ...withTally(p), synthetic: syntheticIds.has(p.id) }));
     res.json({ proposals, count: proposals.length });
   } catch (error) {
     console.error("Failed to fetch proposals:", error);

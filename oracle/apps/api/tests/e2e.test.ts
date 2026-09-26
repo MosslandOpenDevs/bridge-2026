@@ -698,6 +698,101 @@ async function testProposalListIncludesTally() {
   assert(typeof listed.title === "string" && listed.title.length > 0, "listed proposal needs a title");
 }
 
+/**
+ * The proposal list must say which proposals were raised on demo data. Without
+ * the marker the web had no way to tell 143 synthetic proposals from 21 real
+ * ones, and presented all of them as governance history.
+ *
+ * A proposal is synthetic when its linked issue is, which is also how
+ * /api/stats splits its totals — so the two are checked against each other.
+ */
+async function testProposalListMarksSynthetic() {
+  const syntheticIssueId = "50000000-0000-4000-8000-000000000001";
+  const db = new Database(join(dataDir, "e2e.db"));
+  try {
+    db.prepare(
+      `INSERT INTO issues (id, title, description, category, priority, status, detected_at, synthetic)
+       VALUES (?, 'Demo issue', 'Raised on demo signals', 'governance', 'low', 'resolved', ?, 1)`,
+    ).run(syntheticIssueId, new Date().toISOString());
+  } finally {
+    db.close();
+  }
+
+  const packet = decisionPacket();
+  packet.issueId = syntheticIssueId;
+  packet.issue.id = syntheticIssueId;
+  const created = await post("/api/proposals", {
+    decisionPacket: packet,
+    proposer: voterAddress(0xbeef),
+    options: { quorum: 1, threshold: 50, votingPeriod: 60_000 },
+  });
+  assertStatus(created.response, 201, "create proposal on a synthetic issue");
+  const syntheticId: string = created.data.proposal.id;
+  const observedId: string = (await createProposal({ votingPeriod: 60_000 })).id;
+
+  const list = async (query: string) => {
+    const { response, data } = await get(`/api/proposals${query}`);
+    assertStatus(response, 200, `list proposals${query}`);
+    assert(
+      data.count === data.proposals.length,
+      `list proposals${query}: count ${data.count} != ${data.proposals.length} rows`,
+    );
+    return data.proposals as { id: string; synthetic: unknown }[];
+  };
+  const ids = (rows: { id: string }[]) => new Set(rows.map((p) => p.id));
+
+  const all = await list("");
+  assert(
+    all.every((p) => typeof p.synthetic === "boolean"),
+    "every listed proposal should carry a boolean synthetic marker",
+  );
+  assert(
+    all.find((p) => p.id === syntheticId)?.synthetic === true,
+    "a proposal on a synthetic issue should be marked synthetic",
+  );
+  assert(
+    all.find((p) => p.id === observedId)?.synthetic === false,
+    "a proposal on no stored issue should not be marked synthetic",
+  );
+
+  const excluded = await list("?synthetic=exclude");
+  assert(
+    excluded.every((p) => p.synthetic === false) && ids(excluded).has(observedId),
+    "synthetic=exclude should return only non-synthetic proposals",
+  );
+  const only = await list("?synthetic=only");
+  assert(
+    only.every((p) => p.synthetic === true) && ids(only).has(syntheticId),
+    "synthetic=only should return only synthetic proposals",
+  );
+  assert(
+    excluded.length + only.length === all.length,
+    "exclude and only should partition the full list",
+  );
+  const included = await list("?synthetic=include");
+  assert(included.length === all.length, "synthetic=include should be the default");
+
+  // The proposals page filters on both at once, so they must combine.
+  const activeObserved = await list("?status=active&synthetic=exclude");
+  assert(
+    activeObserved.every((p) => p.synthetic === false) &&
+      ids(activeObserved).has(observedId) &&
+      !ids(activeObserved).has(syntheticId),
+    "status and synthetic filters should apply together",
+  );
+
+  const stats = await get("/api/stats");
+  assertStatus(stats.response, 200, "stats");
+  assert(
+    stats.data.proposals.synthetic.total === only.length &&
+      stats.data.proposals.total === excluded.length,
+    `list and stats disagree on synthetic proposals: stats ${stats.data.proposals.total}+${stats.data.proposals.synthetic.total}, list ${excluded.length}+${only.length}`,
+  );
+
+  const invalid = await get("/api/proposals?synthetic=hide");
+  assertStatus(invalid.response, 400, "unknown synthetic filter");
+}
+
 async function testVotingTimeline() {
   const proposal = await createProposal({ votingPeriod: 800 });
   await post(
@@ -1367,6 +1462,7 @@ async function main() {
     await runTest("Proposal settings are validated", testProposalValidation);
     await runTest("Voting integrity", testVotingIntegrity);
     await runTest("Proposal responses carry a tally", testProposalListIncludesTally);
+    await runTest("Proposal list marks synthetic proposals", testProposalListMarksSynthetic);
     await runTest("Voting timeline is enforced", testVotingTimeline);
     await runTest("A vote without quorum expires", testUnquorateProposalExpires);
     await runTest("Execution and measured outcome", testExecutionAndMeasuredOutcome);

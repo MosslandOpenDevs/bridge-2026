@@ -20,6 +20,29 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A proposal as GET /api/proposals lists it. Only the fields the list page
+ * branches on are spelled out; the decision packet and the rest stay loose.
+ */
+export interface ProposalListItem {
+  id: string;
+  /** "expired" is a proposal that closed without reaching quorum. */
+  status: "pending" | "active" | "passed" | "rejected" | "expired" | "executed";
+  votingEndsAt: string;
+  createdAt: string;
+  /** Raised on an issue detected from demo signals, not observed ones. */
+  synthetic: boolean;
+  tally?: {
+    forVotes: string;
+    againstVotes: string;
+    abstainVotes: string;
+    voteCount: number;
+    quorumReached: boolean;
+    passed: boolean;
+  };
+  [field: string]: any;
+}
+
 class APIClient {
   private baseUrl: string;
 
@@ -135,9 +158,20 @@ class APIClient {
   }
 
   // Proposals
-  async getProposals(status?: string) {
-    const query = status ? `?status=${status}` : "";
-    return this.fetch<{ proposals: any[]; count: number }>(`/api/proposals${query}`);
+  //
+  // Ask the server to filter rather than filtering here. Unfiltered, the
+  // production list is 164 rows and 3.36MB of uncompressed JSON (see
+  // deploy/README.md), 143 of those rows are demo data the page hides by
+  // default, and the API tallies every row it returns.
+  async getProposals(
+    options: { status?: string; synthetic?: "include" | "exclude" | "only" } = {},
+  ) {
+    const params = new URLSearchParams();
+    if (options.status) params.set("status", options.status);
+    if (options.synthetic) params.set("synthetic", options.synthetic);
+    const qs = params.toString();
+    const query = qs ? `?${qs}` : "";
+    return this.fetch<{ proposals: ProposalListItem[]; count: number }>(`/api/proposals${query}`);
   }
 
   async createProposal(decisionPacket: any, proposer: string, options?: any) {

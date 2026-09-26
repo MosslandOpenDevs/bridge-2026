@@ -1,15 +1,104 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
-import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Zap } from "lucide-react";
+import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Zap, FlaskConical, Info, ExternalLink } from "lucide-react";
 import { cn, getStatusColor, timeAgo, formatNumber } from "@/lib/utils";
 import { useSignMessage } from "wagmi";
 import { useVotingPower, useAccount } from "@/hooks/useMOC";
 import { useToast } from "@/contexts/ToastContext";
-import { api } from "@/lib/api";
+import { api, type ProposalListItem } from "@/lib/api";
 import { useHasAdminKey } from "@/hooks/useAdminKey";
+
+// Where Mossland DAO actually decides. Nothing voted on this page binds it.
+const AGORA_URL = "https://agora.moss.land";
+
+type DisplayStatus = ProposalListItem["status"];
+
+/**
+ * The status a reader should see, which is not always the one stored.
+ *
+ * A proposal that closes without reaching quorum was nobody's "no": no one
+ * turned up. Labelling it "Rejected" told readers the community had voted
+ * these proposals down, when in production not one vote was ever cast on any
+ * of them. The API is moving those to "expired"; until that migration has run,
+ * the legacy rows are still stored as "rejected", so a rejection whose tally
+ * never reached quorum is shown as the expiry it was.
+ */
+function displayStatus(proposal: ProposalListItem): DisplayStatus {
+  if (proposal.status === "rejected" && proposal.tally && !proposal.tally.quorumReached) {
+    return "expired";
+  }
+  return proposal.status;
+}
+
+/**
+ * The `status` to ask the API for, given the status filter picked on the page.
+ * "expired" has none: it covers stored "expired" rows and legacy no-quorum
+ * "rejected" ones, which one status param cannot select together, so that
+ * filter fetches every status and displayStatus() sorts it out.
+ */
+function serverStatusFilter(filter: string): string | undefined {
+  return filter === "active" || filter === "passed" || filter === "rejected" ? filter : undefined;
+}
+
+type SyntheticProposalStats = { total: number; active: number; passed: number; rejected: number };
+
+/**
+ * How many demo proposals the toggle is keeping out of the current status
+ * filter: 0 for none, null for "some, but the count cannot be known".
+ *
+ * Counting every demo proposal whatever the filter said "143 hidden" under
+ * "Active", when almost none of them were. The counts come from /api/stats,
+ * which splits by stored status. That settles active and passed, but not
+ * rejected against expired: a legacy no-quorum row is stored "rejected" and
+ * shown "expired". For those two filters, only whether any demo proposal
+ * closed without passing is known.
+ */
+function hiddenSyntheticCount(filter: string, synthetic: SyntheticProposalStats): number | null {
+  if (filter === "all") return synthetic.total;
+  if (filter === "active") return synthetic.active;
+  if (filter === "passed") return synthetic.passed;
+  return synthetic.total - synthetic.active - synthetic.passed > 0 ? null : 0;
+}
+
+/** Whether an active proposal can still take votes; the API refuses them after votingEndsAt. */
+function isOpenForVoting(proposal: ProposalListItem, now: number): boolean {
+  return proposal.status === "active" && new Date(proposal.votingEndsAt).getTime() > now;
+}
+
+/**
+ * Time left to vote. Rounding up to whole days read "0d" both for a proposal
+ * with hours left and for one whose voting had already ended but that nothing
+ * had closed out yet, so the two are told apart and short spans get hours.
+ */
+function remainingLabel(votingEndsAt: Date, now: number, t: any): string {
+  const ms = votingEndsAt.getTime() - now;
+  if (ms <= 0) return t("proposals.votingClosed");
+  const hours = Math.floor(ms / 3_600_000);
+  const days = Math.floor(hours / 24);
+  const span =
+    days >= 1
+      ? `${days}d ${hours % 24}h`
+      : hours >= 1
+        ? `${hours}h`
+        : `${Math.max(1, Math.ceil(ms / 60_000))}m`;
+  return t("proposals.timeLeft", { time: span });
+}
+
+/**
+ * Active first, since those are the only ones anyone can act on, then newest
+ * first. The API returns insertion order, which put the single active
+ * production proposal last of 164.
+ */
+function compareProposals(a: ProposalListItem, b: ProposalListItem): number {
+  const activeRank = (p: ProposalListItem) => (p.status === "active" ? 0 : 1);
+  return (
+    activeRank(a) - activeRank(b) ||
+    new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
 
 // Must match buildVoteMessage() in apps/api/src/security.ts exactly.
 function buildVoteMessage(params: {
@@ -201,16 +290,55 @@ export default function ProposalsPage() {
   const hasAdminKey = useHasAdminKey();
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<string>("all");
+  const [showSynthetic, setShowSynthetic] = useState(false);
   const [votingProposal, setVotingProposal] = useState<any>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // The server does the filtering. Unfiltered, this poll pulled every row
+  // (3.36MB uncompressed in production, mostly demo data the page then hid)
+  // every 30s, and the API tallied each one. Only the legacy remap stays
+  // client-side, below.
   const { data, isLoading } = useQuery({
-    queryKey: ["proposals", filter],
-    queryFn: () => api.getProposals(filter === "all" ? undefined : filter),
+    queryKey: ["proposals", { filter, showSynthetic }],
+    queryFn: () =>
+      api.getProposals({
+        status: serverStatusFilter(filter),
+        synthetic: showSynthetic ? "include" : "exclude",
+      }),
     refetchInterval: 30000,
   });
 
-  const proposals = data?.proposals ?? [];
+  // With demo rows excluded server-side, how many were left out comes from
+  // /api/stats, which splits its proposal totals on the same query the list
+  // filters on. Same key as the dashboard, so it shares that cache.
+  const { data: stats } = useQuery({
+    queryKey: ["stats"],
+    queryFn: () => api.getStats(),
+    refetchInterval: 60000,
+    enabled: !showSynthetic,
+  });
+
+  // The clock that decides "Xm left" and whether Vote is offered has to tick
+  // on its own. Read during render, it only moved when something re-rendered,
+  // and a refetch returning identical data does not; with no votes ever cast
+  // in production the data never changes, so a page left open past
+  // votingEndsAt kept offering a vote the API would refuse.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+  const allProposals = data?.proposals ?? [];
+  const hiddenSynthetic =
+    showSynthetic || !stats ? 0 : hiddenSyntheticCount(filter, stats.proposals.synthetic);
+  const hiddenSyntheticLabel =
+    hiddenSynthetic === null
+      ? t("proposals.syntheticHiddenUncounted")
+      : t("proposals.syntheticHidden", { count: hiddenSynthetic });
+  const proposals = allProposals
+    .filter((p) => showSynthetic || !p.synthetic)
+    .filter((p) => filter === "all" || displayStatus(p) === filter)
+    .sort(compareProposals);
 
   const handleVoteSuccess = () => {
     // Invalidate and refetch proposals
@@ -242,7 +370,21 @@ export default function ProposalsPage() {
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">{t("proposals.title")}</h1>
           <p className="mt-1 text-sm sm:text-base text-gray-500">{t("proposals.subtitle")}</p>
         </div>
-        <div className="flex items-center">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowSynthetic(!showSynthetic)}
+            aria-pressed={showSynthetic}
+            className={cn(
+              "inline-flex items-center justify-center gap-1 rounded-lg border px-3 py-2 text-sm",
+              showSynthetic
+                ? "border-amber-300 bg-amber-50 text-amber-800"
+                : "border-gray-300 bg-white text-gray-600 hover:border-gray-400"
+            )}
+          >
+            <FlaskConical className="w-4 h-4" aria-hidden="true" />
+            {t("proposals.showSynthetic")}
+          </button>
           <select
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
@@ -252,15 +394,65 @@ export default function ProposalsPage() {
             <option value="active">{t("proposals.active")}</option>
             <option value="passed">{t("proposals.passed")}</option>
             <option value="rejected">{t("proposals.rejected")}</option>
+            <option value="expired">{t("proposals.expired")}</option>
           </select>
         </div>
       </div>
+
+      {/* Non-binding framing. BRIDGE is a lab: its agents write these
+          proposals and nothing voted here reaches the DAO. Mossland DAO
+          decides on Agora, and a reader who landed here should learn that
+          before reading any of the rows below as governance. */}
+      <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+        <div className="flex items-start gap-2">
+          <Info className="w-5 h-5 flex-shrink-0 text-blue-600 mt-0.5" aria-hidden="true" />
+          <div className="space-y-1">
+            <p className="font-semibold">{t("proposals.labNoticeTitle")}</p>
+            <p>{t("proposals.labNoticeBody")}</p>
+            <p>
+              {t("proposals.agoraNotice")}{" "}
+              <a
+                href={AGORA_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 font-medium text-blue-700 underline hover:text-blue-800"
+              >
+                {t("proposals.agoraLink")}
+                <ExternalLink className="w-3 h-3" aria-hidden="true" />
+              </a>
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {hiddenSynthetic !== 0 && proposals.length > 0 && (
+        <p className="flex items-center gap-1 text-xs text-gray-500">
+          <FlaskConical className="w-3 h-3" aria-hidden="true" />
+          {hiddenSyntheticLabel}
+        </p>
+      )}
 
       {/* Proposals List */}
       <div className="space-y-4">
         {isLoading ? (
           <div className="card flex items-center justify-center py-12">
             <Loader2 className="w-8 h-8 animate-spin text-moss-600" />
+          </div>
+        ) : proposals.length === 0 && hiddenSynthetic !== 0 ? (
+          // Nothing real matches, but demo rows do. "No proposals yet" would
+          // say there is nothing here at all.
+          <div className="card text-center py-12 text-gray-500">
+            <FlaskConical className="w-12 h-12 mx-auto mb-3 text-gray-300" aria-hidden="true" />
+            <p>{t("proposals.noRealProposals")}</p>
+            <p className="text-sm">{hiddenSyntheticLabel}</p>
+            <button
+              type="button"
+              onClick={() => setShowSynthetic(true)}
+              className="mt-3 inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-600 hover:border-gray-400"
+            >
+              <FlaskConical className="w-4 h-4" aria-hidden="true" />
+              {t("proposals.showSynthetic")}
+            </button>
           </div>
         ) : proposals.length === 0 ? (
           <div className="card text-center py-12 text-gray-500">
@@ -269,7 +461,7 @@ export default function ProposalsPage() {
             <p className="text-sm">{t("proposals.createFirst")}</p>
           </div>
         ) : (
-          proposals.map((proposal: any) => {
+          proposals.map((proposal) => {
             // The tally comes from the API. Reading forVotes/againstVotes off
             // the proposal itself always yielded 0: those fields never existed
             // on the object, so every proposal showed no votes however many
@@ -286,6 +478,8 @@ export default function ProposalsPage() {
             const quorumPercent = Math.min(100, (voteCount / quorum) * 100);
             const isExpanded = expandedId === proposal.id;
             const votingEndsAt = new Date(proposal.votingEndsAt);
+            const status = displayStatus(proposal);
+            const openForVoting = isOpenForVoting(proposal, now);
 
             // Extract title and description from decisionPacket or direct fields
             const dp = proposal.decisionPacket;
@@ -306,16 +500,32 @@ export default function ProposalsPage() {
                 <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center flex-wrap gap-1 sm:gap-2 mb-2">
-                      <span className={cn("badge text-xs", getStatusColor(proposal.status))}>
-                        {proposal.status === "active" ? t("proposals.active") :
-                         proposal.status === "passed" ? t("proposals.passed") :
-                         proposal.status === "executed" ? t("proposals.executed") :
-                         proposal.status === "pending" ? t("proposals.pending") : t("proposals.rejected")}
+                      <span
+                        className={cn("badge text-xs", getStatusColor(status))}
+                        title={status === "expired" ? t("proposals.expiredHint") : undefined}
+                      >
+                        {/* Every status is named explicitly. The old fallthrough
+                            rendered anything unrecognised as "Rejected". */}
+                        {status === "active" ? t("proposals.active") :
+                         status === "passed" ? t("proposals.passed") :
+                         status === "executed" ? t("proposals.executed") :
+                         status === "pending" ? t("proposals.pending") :
+                         status === "expired" ? t("proposals.expired") :
+                         status === "rejected" ? t("proposals.rejected") : status}
                       </span>
                       {(proposal.aiAssisted || dp) && (
                         <span className="badge bg-purple-50 text-purple-600 text-xs">
                           <Bot className="w-3 h-3 mr-1 inline" />
                           AI
+                        </span>
+                      )}
+                      {proposal.synthetic && (
+                        <span
+                          className="badge bg-amber-100 text-amber-800 flex items-center gap-1 text-xs"
+                          title={t("proposals.syntheticHint")}
+                        >
+                          <FlaskConical className="w-3 h-3" aria-hidden="true" />
+                          {t("common.synthetic")}
                         </span>
                       )}
                     </div>
@@ -340,7 +550,7 @@ export default function ProposalsPage() {
                       <span className="flex items-center">
                         <Clock className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
                         {proposal.status === "active"
-                          ? `${Math.max(0, Math.ceil((votingEndsAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000)))}d`
+                          ? remainingLabel(votingEndsAt, now, t)
                           : timeAgo(votingEndsAt)}
                       </span>
                       <span>{formatNumber(total)} MOC</span>
@@ -349,7 +559,7 @@ export default function ProposalsPage() {
                   </div>
 
                   <div className="flex flex-row sm:flex-col items-center sm:items-end gap-2 sm:ml-4">
-                    {proposal.status === "active" && isConnected && (
+                    {openForVoting && isConnected && (
                       <button
                         onClick={() => setVotingProposal(proposal)}
                         className="btn-primary text-sm py-2 px-4 flex-1 sm:flex-none"
