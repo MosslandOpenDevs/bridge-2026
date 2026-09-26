@@ -119,6 +119,123 @@ Two known gaps, both in nginx rather than in this repo:
 
   Apply with `sudo nginx -t && sudo systemctl reload nginx`.
 
+## Data retention & compaction
+
+The collectors write one row per category per minute whether or not anything
+changed. On the 2026-09-26 production snapshot that was 881,519 observed rows,
+~99% of them a repeat of the previous minute (`github_commit`,
+`mossland_disclosure` and `mossland_roadmap` had one distinct value in seven
+days), plus 223,074 rows from the retired demo adapter. Signals and their
+indexes were 96% of the file, which grows ~7.5 MB/day.
+
+[`apps/api/scripts/compact-signals.cjs`](../apps/api/scripts/compact-signals.cjs)
+removes the repeats. **It never runs on its own** — not from `deploy.sh`, not
+from the API, not from a cron — and it has not been run on production. Running
+it is an operator decision, taken and recorded like any other: MIP-1 says
+archiving is not deletion and that deleting data takes its own agenda item.
+BRIDGE is Lab rather than Archive, and what this removes is only rows that
+repeat a row it keeps, but it is still removal of history, so the policy it
+applies is written down here rather than left to a flag.
+
+### Retention policy
+
+For each **observed** category, walking rows in time order, a row is kept if
+any of these holds; everything else is deleted:
+
+- it is a **change point** — its `(value, description, severity)` differs from
+  the row before it. The series stays a faithful step function: every deleted
+  row equals the kept row before it (checked row by row on a copy, see below)
+- it is the **first or last row of its UTC day**, so the collector's daily
+  cadence stays visible even for a category that never changes
+- it is **referenced from any other table** — `issues.signal_ids` (what
+  `/api/issues` embeds), anomaly evidence in `issues.evidence`, signals inside
+  `proposals.decision_packet`. The script scans every text column of every
+  other table for ids, so no issue or proposal loses its evidence
+- it is within the **last 7 days** (`--keep-recent-days`), so issue detection
+  (newest 1,000 rows), `/api/signals?limit=N` and the monitors read exactly what
+  they read before
+
+**Synthetic** (demo) rows are kept unless `--export-synthetic <file.jsonl.gz>`
+is given; then all of them are written to that file first (verbatim columns,
+read back and counted before anything is deleted) and removed, except the ones
+an issue still references. Issues, proposals, decisions and every other table
+are never modified.
+
+What changes for readers: `/api/stats` keeps every field, but
+`signals.total` counts the rows that remain — 881,519 → 103,857 on the
+snapshot — and `signals.synthetic.total` 223,074 → 22,688. The moss.land
+homepage widget shows `signals.total`. Nothing else in the public responses
+changed (see the measurements).
+
+This is a one-off cleanup of history, not a fix of the write path: the
+collectors keep writing repeats (~9.4k rows/day) until they store on change.
+Re-running later compacts the new history; a second run over an already
+compacted copy deleted nothing.
+
+### Procedure (on the app server)
+
+```bash
+cd ~/bridge-2026/oracle
+
+# 0. Size it. Read-only, safe while the API runs.
+node apps/api/scripts/compact-signals.cjs apps/api/data/oracle.db
+
+# 1. Stop the writers. bridge-deploy too, so a deploy tick cannot restart the API
+#    mid-run -- and do not merge API changes to main during the window.
+pm2 stop bridge-deploy oracle-api
+
+# 2. Snapshot -- the restore path. The script checks it (exists, < 24h old, quick_check ok).
+SNAP=apps/api/data/backup/pre-compact-$(date -u +%Y%m%dT%H%M%SZ).db
+node apps/api/scripts/db-snapshot.cjs apps/api/data/oracle.db "$SNAP"
+
+# 3. Compact. Refuses without both gates, and while any process holds the file (lsof).
+node apps/api/scripts/compact-signals.cjs apps/api/data/oracle.db --apply \
+  --snapshot-verified "$SNAP" --i-stopped-the-api \
+  --export-synthetic apps/api/data/backup/synthetic-signals-$(date -u +%Y%m%d).jsonl.gz \
+  --vacuum 2>&1 | tee -a logs/compaction.log
+
+# 4. Start again and check.
+pm2 start oracle-api bridge-deploy
+curl -s 'http://localhost:3101/api/health?strict=1'
+```
+
+VACUUM needs the database to itself (hence the stopped API) and free disk
+about the size of the result. `pre-compact-*` snapshots are not rotated by
+`deploy.sh` (it rotates only `pre-deploy-*`); both it and the export sit on
+the same disk as the database, so copy them off the host before treating the
+old rows as gone.
+
+To undo: `pm2 stop oracle-api`, copy `$SNAP` over `apps/api/data/oracle.db`,
+delete `oracle.db-wal` and `oracle.db-shm`, `pm2 start oracle-api`. Rows
+collected after the snapshot are lost with the restore.
+
+`--drop-unused-index` drops `idx_signals_severity`, which no query uses, but
+`src/db.ts` still creates it at boot (`CREATE INDEX IF NOT EXISTS`), so it is
+back after the next start — 1.5 MB after compaction instead of 13.5 MB. Leave
+it out until that line is removed.
+
+### Measured on a copy of the 2026-09-26 snapshot
+
+Full run (`--export-synthetic --drop-unused-index --vacuum`) on a copy that
+had been booted by the API first (WAL mode, as on production), on a MacBook SSD:
+
+| | before | after |
+|---|---:|---:|
+| file | 418.4 MB | 61.8 MB (dry-run estimate 62.0 MB) |
+| observed rows | 881,519 | 103,857 |
+| synthetic rows | 223,074 | 22,688 (all referenced by issues) |
+| referenced signal ids that resolve | 37,046 | 37,046 |
+| wall time | | 16.0 s (plan 2.3 s, export 1.9 s, deletes ~10 s, VACUUM 0.2 s), 247 MB RSS |
+
+The synthetic export was 15.4 MB. Without the export (observed rows only,
+`--vacuum`) the file went to 136.2 MB. With the API booted on the compacted
+copy: `/api/health` `ok`, the 500 issues of `/api/issues?limit=500` and of
+`?status=detected` byte-identical to before including their embedded signals,
+`/api/proposals`, `/api/outcomes` and `/api/signals?limit=50` identical, and
+`/api/stats` identical outside `signals.*`. Checked directly against the
+original: all 135,897 `signal_ids` references of all 3,811 issues resolve to
+identical rows.
+
 ## Governance loop: issues have to be closed
 
 Detection folds a repeat sighting into the open issue for the same condition and
