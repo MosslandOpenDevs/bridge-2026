@@ -1921,6 +1921,13 @@ async function testStatsCache() {
       cached.data.asOf === first.data.asOf && cached.data.issues.total === first.data.issues.total,
       "stats: an out-of-band row should not show before the cache is dropped",
     );
+    // The rows are in the table now, so a handler that counted per connection
+    // would report five more. Only one that reads the cache reports none.
+    const socketCached = await socketStats();
+    assert(
+      socketCached.issues === first.data.issues.total,
+      `stats: the socket should read the cache, got ${socketCached.issues} issue rows against ${first.data.issues.total} cached`,
+    );
 
     // A refused write changed nothing, so it must not cost a recomputation.
     const refused = await post("/api/proposals", { decisionPacket: {} });
