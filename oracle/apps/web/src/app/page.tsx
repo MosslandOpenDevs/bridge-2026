@@ -123,11 +123,11 @@ function ActivityRow({
  */
 function RecentActivity({
   stats,
-  statsLoading,
+  statsPending,
   statsFailed,
 }: {
   stats: Stats | undefined;
-  statsLoading: boolean;
+  statsPending: boolean;
   statsFailed: boolean;
 }) {
   const t = useTranslations();
@@ -165,8 +165,13 @@ function RecentActivity({
     return Number.isNaN(at.getTime()) ? null : format.relativeTime(at, now);
   };
 
-  const pending = (loading: boolean, failed: boolean) =>
-    loading ? t("common.loading") : failed ? t("errors.fetchFailed") : null;
+  // Keyed on isPending (no data yet), not isLoading: isLoading is
+  // isPending && isFetching, so a query paused offline or mid-retry in a
+  // hidden tab has neither isLoading nor isError and no data, and would fall
+  // through to the empty-state copy — asserting "no signals" or "no outcomes"
+  // about an API we never heard back from.
+  const pending = (waiting: boolean, failed: boolean) =>
+    waiting ? t("common.loading") : failed ? t("errors.fetchFailed") : null;
 
   const signalAgo = ago(health.data?.lastObservedSignalAt);
   const issueAgo = ago(latestIssue.data?.detectedAt);
@@ -184,7 +189,7 @@ function RecentActivity({
           label={t("dashboard.latestSignal")}
           href="/signals"
         >
-          {pending(health.isLoading, health.isError) ??
+          {pending(health.isPending, health.isError) ??
             (signalAgo
               ? t("dashboard.observedAgo", { time: signalAgo })
               : t("dashboard.noObservedSignal"))}
@@ -195,7 +200,7 @@ function RecentActivity({
           label={t("dashboard.latestIssue")}
           href="/issues"
         >
-          {pending(latestIssue.isLoading, latestIssue.isError) ??
+          {pending(latestIssue.isPending, latestIssue.isError) ??
             (latestIssue.data ? (
               <>
                 <span className="block truncate text-gray-700">{latestIssue.data.title}</span>
@@ -211,7 +216,7 @@ function RecentActivity({
           label={t("dashboard.activeProposals")}
           href="/proposals"
         >
-          {pending(statsLoading, statsFailed) ??
+          {pending(statsPending, statsFailed) ??
             (activeProposals > 0
               ? t("dashboard.activeProposalCount", { count: activeProposals })
               : t("dashboard.noActiveProposals"))}
@@ -222,7 +227,7 @@ function RecentActivity({
           label={t("dashboard.measuredOutcomes")}
           href="/outcomes"
         >
-          {pending(statsLoading, statsFailed) ??
+          {pending(statsPending, statsFailed) ??
             (measuredOutcomes > 0
               ? t("dashboard.measuredOutcomeCount", { count: measuredOutcomes })
               : t("dashboard.noOutcomesMeasured"))}
@@ -237,7 +242,7 @@ export default function Dashboard() {
 
   const {
     data: stats,
-    isLoading: statsLoading,
+    isPending: statsPending,
     isError: statsFailed,
   } = useQuery({
     queryKey: ["stats"],
@@ -262,26 +267,26 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
         <StatCard
           title={t("dashboard.totalSignals")}
-          value={statsLoading ? "..." : stats?.signals.total ?? 0}
+          value={statsPending ? "..." : stats?.signals.total ?? 0}
           icon={Activity}
           href="/signals"
         />
         <StatCard
           title={t("issues.title")}
-          value={statsLoading ? "..." : stats?.issues.total ?? 0}
+          value={statsPending ? "..." : stats?.issues.total ?? 0}
           icon={AlertTriangle}
           href="/issues"
         />
         <StatCard
           title={t("dashboard.activeProposals")}
-          value={statsLoading ? "..." : stats?.proposals.active ?? 0}
+          value={statsPending ? "..." : stats?.proposals.active ?? 0}
           icon={Vote}
           href="/proposals"
         />
         <StatCard
           title={t("dashboard.successRate")}
           value={
-            statsLoading
+            statsPending
               ? "..."
               : stats?.outcomes.successRate == null
                 ? "—"
@@ -296,7 +301,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <RecentActivity
           stats={stats}
-          statsLoading={statsLoading}
+          statsPending={statsPending}
           statsFailed={statsFailed}
         />
 
