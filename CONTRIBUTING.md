@@ -14,7 +14,7 @@ repository is public, this is the part to check first.
 
 ## Setup
 
-Requires **Node.js ≥ 22** and **pnpm 9**. npm cannot install `nexus` — its
+Requires **Node.js ≥ 22** and **pnpm 9**. npm cannot install `oracle` — its
 packages reference each other with `workspace:*`, which npm rejects.
 
 ```bash
@@ -84,7 +84,7 @@ that was wrong.
 Say what you verified and how. "Tests pass" is weaker than "16/16 e2e green,
 and the noise-escalation rate went from 19.4% to 0 over 3,000 trials".
 
-CI runs three jobs: `oracle`, `nexus`, `deploy-script`. **Their names are
+CI runs two jobs: `oracle` and `deploy-script`. **Their names are
 load-bearing** — the deploy poller matches `DEPLOY_REQUIRED_CHECKS` against
 them, so renaming one means updating the server's configuration in the same
 change.
