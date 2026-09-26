@@ -248,7 +248,10 @@ function SignalCard({ row, t, locale }: { row: SignalRow; t: any; locale: string
             )}
           </div>
 
-          <p className="mt-2 text-sm sm:text-base text-gray-900 font-medium line-clamp-2">
+          {/* overflow-wrap:anywhere (not break-words) so a long unbroken token such
+              as a GitHub branch name also lowers the min-content width; otherwise
+              it widened the whole page to 414px on a 375px screen. */}
+          <p className="mt-2 text-sm sm:text-base text-gray-900 font-medium line-clamp-2 [overflow-wrap:anywhere]">
             {signal.description || `${t("signals.value")}: ${signal.value}`}
           </p>
 
