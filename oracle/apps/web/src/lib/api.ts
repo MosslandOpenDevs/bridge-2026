@@ -330,7 +330,10 @@ class APIClient {
   async getStats() {
     return this.fetch<{
       signals: {
+        /** Stored observation rows — most are the previous minute repeated. */
         total: number;
+        /** Observed rows stored in the last 24 hours. */
+        lastDay: number;
         byCategory: { category: string; count: number }[];
         adapterCount: number;
         synthetic: {
@@ -339,10 +342,14 @@ class APIClient {
         };
       };
       issues: {
+        /** Issue rows in any status: detections, not distinct problems. */
         total: number;
+        /** Distinct conditions among open issues. */
+        conditions: number;
         byStatus: { status: string; count: number }[];
         synthetic: {
           total: number;
+          conditions: number;
           byStatus: { status: string; count: number }[];
         };
       };
@@ -351,11 +358,20 @@ class APIClient {
         active: number;
         passed: number;
         rejected: number;
-        synthetic: { total: number; active: number; passed: number; rejected: number };
+        expired: number;
+        synthetic: {
+          total: number;
+          active: number;
+          passed: number;
+          rejected: number;
+          expired: number;
+        };
       };
       // successRate is null until something has actually been measured —
       // render it as "no data", not as zero.
       outcomes: { totalProofs: number; successRate: number | null };
+      /** When the server computed these figures; cached for up to 30s. */
+      asOf: string;
     }>("/api/stats");
   }
 }
