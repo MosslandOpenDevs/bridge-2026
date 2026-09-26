@@ -13,6 +13,7 @@ export { MockAdapter, type MockAdapterConfig } from "./adapters/mock.js";
 export { EtherscanAdapter, type EtherscanAdapterConfig } from "./adapters/etherscan.js";
 export {
   MosslandAdapter,
+  disclosureAlias,
   disclosureKey,
   DISCLOSURE_EVENT_CATEGORY,
   DISCLOSURE_TOTAL_CATEGORY,

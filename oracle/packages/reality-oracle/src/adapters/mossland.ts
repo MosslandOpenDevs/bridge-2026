@@ -17,8 +17,9 @@ export interface MosslandAdapterConfig {
  */
 export interface MosslandAdapterState {
   /**
-   * disclosureKey() of every disclosure already announced. Bare titles are
-   * accepted too: rows written before keys were stored carry only the title.
+   * disclosureKey() or disclosureAlias() of every disclosure already
+   * announced. Bare titles are accepted too: rows written before keys were
+   * stored carry only the title.
    */
   announcedDisclosures?: Iterable<string>;
   /** priceAlertKey() of every price alert already raised. */
@@ -69,7 +70,16 @@ export function priceAlertKey(tradeDate: string, direction: "RISE" | "FALL"): st
  */
 export function disclosureKey(doc: { url?: string; title: string; date: string }): string {
   const url = doc.url?.trim();
-  return url ? url : `${doc.title}|${doc.date}`;
+  return url ? url : disclosureAlias(doc);
+}
+
+/**
+ * A second identity for the same document, so one whose link is rewritten
+ * upstream (the list points at GitHub blob paths, web.archive.org snapshots,
+ * medium.com and more) is still recognised by its title and month.
+ */
+export function disclosureAlias(doc: { title: string; date: string }): string {
+  return `${doc.title}|${doc.date}`;
 }
 
 const translations = {
@@ -194,8 +204,6 @@ export class MosslandAdapter extends BaseAdapter {
 
   private config: MosslandAdapterConfig;
   private announcedDisclosures: Set<string>;
-  /** False until one disclosure list has been read since construction. */
-  private disclosuresBaselined = false;
   private raisedPriceAlerts: Set<string>;
   private lastPrice: number = 0;
 
@@ -231,6 +239,10 @@ export class MosslandAdapter extends BaseAdapter {
         const key = parseMetadata(row.metadata)?.key;
         if (typeof key === "string" && key) {
           announced.add(key);
+          const { title, date } = parseMetadata(row.metadata) ?? {};
+          if (typeof title === "string" && typeof date === "string") {
+            announced.add(disclosureAlias({ title, date }));
+          }
           continue;
         }
       }
@@ -324,30 +336,29 @@ export class MosslandAdapter extends BaseAdapter {
   /**
    * The documents on this list that have not been announced, newest first.
    *
-   * After the first read every unannounced document is new. The first read
-   * after construction is different: the list holds the whole history (53
-   * documents, back to 2020), most of which was never announced because it
-   * predates the collector. So on that read only the documents listed above
-   * the newest one already known count as new — those were published while
-   * the process was down. If nothing on the list is known there is nothing to
-   * tell new from old by, and the list is taken as the baseline silently:
-   * missing one announcement on a fresh install beats announcing fifty.
+   * The list is newest first (checked live: 0 of 53 out of order), so only the
+   * unknown documents listed above the newest known one count as new. The rule
+   * is the same on the first read after a restart (what was published while
+   * the process was down) and while running. "Every unknown document is new"
+   * would re-announce old documents whenever upstream rewrites their links, so
+   * everything below the newest known document is treated as history. If
+   * nothing on the list is known there is nothing to tell new from old by, and
+   * the list is taken as the baseline silently: missing one announcement on a
+   * fresh install beats announcing fifty.
    */
   private takeNewDisclosures(docs: Disclosure[]): Disclosure[] {
     const listed = docs.filter((d) => d && typeof d.title === "string");
+    const seen = this.announcedDisclosures;
     const known = (d: Disclosure) =>
-      this.announcedDisclosures.has(disclosureKey(d)) || this.announcedDisclosures.has(d.title);
+      seen.has(disclosureKey(d)) || seen.has(disclosureAlias(d)) || seen.has(d.title);
 
-    let fresh: Disclosure[];
-    if (this.disclosuresBaselined) {
-      fresh = listed.filter((d) => !known(d));
-    } else {
-      const newestKnown = listed.findIndex(known);
-      fresh = newestKnown === -1 ? [] : listed.slice(0, newestKnown);
-      this.disclosuresBaselined = true;
+    const newestKnown = listed.findIndex(known);
+    const fresh = newestKnown === -1 ? [] : listed.slice(0, newestKnown);
+
+    for (const doc of listed) {
+      seen.add(disclosureKey(doc));
+      seen.add(disclosureAlias(doc));
     }
-
-    for (const doc of listed) this.announcedDisclosures.add(disclosureKey(doc));
     return fresh;
   }
 

@@ -180,6 +180,49 @@ async function testAnnouncesOnlyOnce() {
   );
 }
 
+async function testRewrittenLinksAreNotNew() {
+  const store = signalStore();
+  disclosures = [doc(3), doc(2), doc(1)];
+  const adapter = new MosslandAdapter({
+    apiUrl: API_URL,
+    language: "en",
+    state: { announcedDisclosures: [doc(2).url] },
+  });
+  const first = await collect(adapter);
+  store.save(first);
+  assert(events(first).length === 1, "doc 3 is announced once");
+
+  // One old document's link moves (the live list has many web.archive.org
+  // and medium.com links).
+  disclosures = [doc(3), doc(2), { ...doc(1), url: "https://web.archive.org/web/2021/https://medium.com/doc-1" }];
+  const one = events(await collect(adapter));
+  assert(one.length === 0, `a rewritten link re-announced ${one.length} document(s)`);
+
+  // Every link under one prefix moves at once.
+  const moved = (d: Doc): Doc => ({ ...d, url: d.url.replace("/blob/main/", "/blob/master/") });
+  disclosures = [doc(3), doc(2), doc(1)].map(moved);
+  const bulk = events(await collect(adapter));
+  assert(bulk.length === 0, `a bulk link rewrite re-announced ${bulk.length} document(s)`);
+
+  // A restart after the move: doc 3 is stored under its old URL, and its
+  // title|date alias is what still recognises it.
+  const again = new MosslandAdapter({
+    apiUrl: API_URL,
+    language: "en",
+    state: loadMosslandAdapterState(store.db),
+  });
+  const restarted = events(await collect(again));
+  assert(restarted.length === 0, `a restart after a link rewrite re-announced ${restarted.length} document(s)`);
+
+  // A genuinely new document above them is still announced.
+  disclosures = [doc(4), ...disclosures];
+  const fresh = events(await collect(again));
+  assert(
+    fresh.length === 1 && fresh[0].metadata?.key === doc(4).url,
+    `a new document above rewritten links should be announced once, got ${fresh.length}`,
+  );
+}
+
 async function testNoReannouncementAfterRestart() {
   const store = signalStore();
   disclosures = [doc(2), doc(1)];
@@ -348,6 +391,7 @@ async function main() {
   console.log("\n🧪 MosslandAdapter\n");
   await runTest("Disclosure events and the total use separate categories", testEventAndGaugeAreSeparate);
   await runTest("A disclosure is announced once", testAnnouncesOnlyOnce);
+  await runTest("A rewritten link does not make an old disclosure new", testRewrittenLinksAreNotNew);
   await runTest("A restart does not re-announce a disclosure", testNoReannouncementAfterRestart);
   await runTest("Legacy rows seed the transition", testLegacyRowsSeedTheTransition);
   await runTest("Missing state does not stop the collector", testStateSurvivesAMissingTable);
