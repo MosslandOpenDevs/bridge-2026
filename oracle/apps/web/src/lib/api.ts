@@ -185,15 +185,27 @@ class APIClient {
   // production list is 164 rows and 3.36MB of uncompressed JSON (see
   // deploy/README.md), 143 of those rows are demo data the page hides by
   // default, and the API tallies every row it returns.
+  //
+  // limit (1-200) and offset page the filtered list; `count` is every match,
+  // `returned` the rows in this page.
   async getProposals(
-    options: { status?: string; synthetic?: "include" | "exclude" | "only" } = {},
+    options: {
+      status?: string;
+      synthetic?: "include" | "exclude" | "only";
+      limit?: number;
+      offset?: number;
+    } = {},
   ) {
     const params = new URLSearchParams();
     if (options.status) params.set("status", options.status);
     if (options.synthetic) params.set("synthetic", options.synthetic);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.offset !== undefined) params.set("offset", String(options.offset));
     const qs = params.toString();
     const query = qs ? `?${qs}` : "";
-    return this.fetch<{ proposals: ProposalListItem[]; count: number }>(`/api/proposals${query}`);
+    return this.fetch<{ proposals: ProposalListItem[]; count: number; returned: number }>(
+      `/api/proposals${query}`,
+    );
   }
 
   async createProposal(decisionPacket: any, proposer: string, options?: any) {

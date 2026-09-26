@@ -1040,6 +1040,73 @@ async function testProposalListMarksSynthetic() {
   assertStatus(invalid.response, 400, "unknown synthetic filter");
 }
 
+/**
+ * The full proposal list is 3.38MB in production and it could not be asked for
+ * less; limit and offset page it after the filters, and without them the
+ * answer is exactly what it was.
+ */
+async function testProposalListPaging() {
+  // At least three, whatever ran before.
+  await createProposal({ votingPeriod: 60_000 });
+  await createProposal({ votingPeriod: 60_000 });
+  await createProposal({ votingPeriod: 60_000 });
+
+  const full = await get("/api/proposals");
+  assertStatus(full.response, 200, "unpaged list");
+  const all: string[] = full.data.proposals.map((p: { id: string }) => p.id);
+  assert(
+    full.data.count === all.length && full.data.returned === all.length && all.length >= 3,
+    `unpaged list: count ${full.data.count} and returned ${full.data.returned} should both be ${all.length}`,
+  );
+
+  const first = await get("/api/proposals?limit=2");
+  assertStatus(first.response, 200, "first page");
+  assert(
+    first.data.count === all.length && first.data.returned === 2,
+    `first page: expected count ${all.length} and returned 2, got ${first.data.count}/${first.data.returned}`,
+  );
+  assert(
+    first.data.proposals.map((p: { id: string }) => p.id).join() === all.slice(0, 2).join(),
+    "first page should be the head of the unpaged list",
+  );
+  assert(
+    typeof first.data.proposals[0].tally === "object",
+    "paged rows should carry their tally like unpaged ones",
+  );
+
+  const second = await get("/api/proposals?limit=2&offset=1");
+  assert(
+    second.data.proposals.map((p: { id: string }) => p.id).join() === all.slice(1, 3).join(),
+    "offset should shift the page along the same order",
+  );
+
+  const past = await get(`/api/proposals?offset=${all.length}`);
+  assert(
+    past.data.returned === 0 && past.data.count === all.length,
+    "an offset past the end should return an empty page but the full count",
+  );
+
+  // count is the filtered total, not the table's.
+  const excluded = await get("/api/proposals?synthetic=exclude");
+  const excludedPage = await get("/api/proposals?synthetic=exclude&limit=1");
+  assert(
+    excludedPage.data.count === excluded.data.count && excludedPage.data.returned === 1,
+    "count should be the total matching the filters",
+  );
+
+  const oversized = await get("/api/proposals?limit=100000");
+  assertStatus(oversized.response, 200, "oversized limit");
+  assert(
+    oversized.data.returned === Math.min(all.length, 200),
+    `limit should be capped at 200, got ${oversized.data.returned}`,
+  );
+
+  for (const query of ["limit=0", "limit=abc", "limit=-1", "limit=1.5", "offset=-1", "offset=x"]) {
+    const bad = await get(`/api/proposals?${query}`);
+    assertStatus(bad.response, 400, `malformed paging ${query}`);
+  }
+}
+
 async function testVotingTimeline() {
   const proposal = await createProposal({ votingPeriod: 800 });
   await post(
@@ -1844,6 +1911,7 @@ async function main() {
     await runTest("Voting integrity", testVotingIntegrity);
     await runTest("Proposal responses carry a tally", testProposalListIncludesTally);
     await runTest("Proposal list marks synthetic proposals", testProposalListMarksSynthetic);
+    await runTest("Proposal list pages", testProposalListPaging);
     await runTest("Voting timeline is enforced", testVotingTimeline);
     await runTest("A vote without quorum expires", testUnquorateProposalExpires);
     await runTest("Execution and measured outcome", testExecutionAndMeasuredOutcome);

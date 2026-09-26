@@ -1113,6 +1113,21 @@ type SyntheticFilter = (typeof SYNTHETIC_FILTERS)[number];
 //
 // `?synthetic=` defaults to include: consumers that predate the field keep
 // receiving exactly the rows they did, with one more property on each.
+//
+// `?limit=` and `?offset=` page the filtered list. Without them the whole list
+// comes back, as it always has — 3.38MB uncompressed in production, which is
+// why monitor.moss.land stopped reading this endpoint: it had no way to ask
+// for less. `count` is every proposal that matched the filters, `returned` how
+// many are in this page, so a caller can tell a short page from the end.
+const PROPOSAL_PAGE_MAX = 200;
+
+/** A non-negative integer query value, or undefined when absent; NaN if malformed. */
+function intParam(raw: unknown): number | undefined {
+  if (raw === undefined) return undefined;
+  const text = String(raw);
+  return /^\d+$/.test(text) ? Number(text) : NaN;
+}
+
 app.get("/api/proposals", (req, res) => {
   try {
     const status = req.query.status as string | undefined;
@@ -1123,18 +1138,37 @@ app.get("/api/proposals", (req, res) => {
       });
     }
 
+    // Malformed paging is refused rather than ignored: falling back to the
+    // full list would hand a caller that asked for a page the very payload it
+    // was trying to avoid. An oversized limit is clamped, like the other list
+    // endpoints' limits, and `returned` shows what was applied.
+    const rawLimit = intParam(req.query.limit);
+    const offset = intParam(req.query.offset) ?? 0;
+    if (Number.isNaN(rawLimit) || rawLimit === 0) {
+      return res.status(400).json({
+        error: `limit must be an integer from 1 to ${PROPOSAL_PAGE_MAX}`,
+      });
+    }
+    if (Number.isNaN(offset)) {
+      return res.status(400).json({ error: "offset must be a non-negative integer" });
+    }
+    const limit = rawLimit === undefined ? undefined : Math.min(rawLimit, PROPOSAL_PAGE_MAX);
+
     const syntheticIds = new Set(
       (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
     );
-    const proposals = votingSystem
+    const matching = votingSystem
       .listProposals(status as any)
       .filter((p) =>
         syntheticFilter === "include"
           ? true
           : syntheticIds.has(p.id) === (syntheticFilter === "only"),
-      )
+      );
+    // Paged before tallying, so a page costs its own rows' tallies only.
+    const proposals = matching
+      .slice(offset, limit === undefined ? undefined : offset + limit)
       .map((p) => ({ ...withTally(p), synthetic: syntheticIds.has(p.id) }));
-    res.json({ proposals, count: proposals.length });
+    res.json({ proposals, count: matching.length, returned: proposals.length });
   } catch (error) {
     console.error("Failed to fetch proposals:", error);
     res.status(500).json({ error: "Failed to fetch proposals" });
