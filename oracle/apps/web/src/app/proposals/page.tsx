@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
 import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Zap, FlaskConical, Info, ExternalLink } from "lucide-react";
@@ -318,7 +318,16 @@ export default function ProposalsPage() {
     enabled: !showSynthetic,
   });
 
-  const now = Date.now();
+  // The clock that decides "Xm left" and whether Vote is offered has to tick
+  // on its own. Read during render, it only moved when something re-rendered,
+  // and a refetch returning identical data does not; with no votes ever cast
+  // in production the data never changes, so a page left open past
+  // votingEndsAt kept offering a vote the API would refuse.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
   const allProposals = data?.proposals ?? [];
   const hiddenSynthetic =
     showSynthetic || !stats ? 0 : hiddenSyntheticCount(filter, stats.proposals.synthetic);
