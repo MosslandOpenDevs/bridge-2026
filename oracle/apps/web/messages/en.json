@@ -233,7 +233,7 @@
     "aoRole": "Agentic Orchestrator",
     "newTab": "opens in new tab",
     "aiNotice": "This service includes AI-generated content. Some content may not have been reviewed by a person. For reference only.",
-    "aiNoticeScope": "Signals are collected from external sources; agent opinions and proposal drafts are written automatically by AI agents.",
+    "aiNoticeScope": "Observed signals come from external sources; items marked 'demo data' are generated for demonstration and were not observed. Agent opinions and proposal drafts are written automatically by AI agents.",
     "aiNoticePolicy": "AI-Generated Content Labelling Policy v1.0"
   },
   "experimental": {
