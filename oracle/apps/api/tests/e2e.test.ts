@@ -1845,6 +1845,8 @@ async function testStats() {
     ["signals.lastDay", data.signals.lastDay],
     ["issues.conditions", data.issues.conditions],
     ["issues.synthetic.conditions", data.issues.synthetic.conditions],
+    ["issues.openRows", data.issues.openRows],
+    ["issues.synthetic.openRows", data.issues.synthetic.openRows],
   ] as const) {
     assert(
       Number.isInteger(value) && value >= 0,
@@ -1855,11 +1857,13 @@ async function testStats() {
     data.signals.lastDay <= data.signals.total,
     `stats: ${data.signals.lastDay} rows in the last day exceeds ${data.signals.total} in total`,
   );
-  assert(
-    data.issues.conditions <= data.issues.total &&
-      data.issues.synthetic.conditions <= data.issues.synthetic.total,
-    "stats: conditions should never exceed issue rows",
-  );
+  // conditions are counted over openRows, which are a subset of all rows.
+  for (const scope of [data.issues, data.issues.synthetic]) {
+    assert(
+      scope.conditions <= scope.openRows && scope.openRows <= scope.total,
+      `stats: expected conditions <= openRows <= total, got ${scope.conditions}/${scope.openRows}/${scope.total}`,
+    );
+  }
   assert(
     typeof data.asOf === "string" && !Number.isNaN(Date.parse(data.asOf)),
     `stats: asOf should be a timestamp, got ${JSON.stringify(data.asOf)}`,
@@ -1970,6 +1974,12 @@ async function testStatsCache() {
       `stats: 4 open rows of 2 conditions should add 2 conditions, got ${
         fresh.data.issues.conditions - first.data.issues.conditions
       }`,
+    );
+    assert(
+      fresh.data.issues.openRows === first.data.issues.openRows + 4,
+      `stats: the resolved probe row should not count as open, got ${
+        fresh.data.issues.openRows - first.data.issues.openRows
+      } more open rows`,
     );
     agree(await socketStats(), fresh.data, "after a write");
 

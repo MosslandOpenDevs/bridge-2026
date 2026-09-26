@@ -623,15 +623,17 @@ export const issueDb = {
   `),
 
   /**
-   * Distinct conditions among open issues: one per fingerprint, however many
-   * rows it has accumulated. Pass 0 for observed issues, 1 for demo ones.
+   * Open issues, counted two ways over the same rows: `conditions` is one per
+   * fingerprint however many rows it has accumulated, `openRows` every open row.
+   * Pass 0 for observed issues, 1 for demo ones.
    *
    * Row counts overstate what is going on by the number of times each
    * condition was re-detected before open issues were folded by fingerprint:
    * the 2026-09-26 snapshot holds 754 open observed rows and 12 conditions.
+   * Both come from one WHERE so the pair always describes one population.
    */
-  countOpenConditions: db.prepare(`
-    SELECT COUNT(DISTINCT fingerprint) as count FROM issues
+  countOpen: db.prepare(`
+    SELECT COUNT(DISTINCT fingerprint) as conditions, COUNT(*) as openRows FROM issues
     WHERE synthetic = ? AND status IN ('detected', 'deliberating', 'proposed')
   `),
 

@@ -349,10 +349,13 @@ class APIClient {
         total: number;
         /** Distinct conditions among open issues. */
         conditions: number;
+        /** Open issue rows: the rows `conditions` is counted over. */
+        openRows: number;
         byStatus: { status: string; count: number }[];
         synthetic: {
           total: number;
           conditions: number;
+          openRows: number;
           byStatus: { status: string; count: number }[];
         };
       };

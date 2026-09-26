@@ -2322,8 +2322,10 @@ function computeStats() {
     signalDb.countByCategory.all(synthetic) as { category: string; count: number }[];
   const byStatus = (synthetic: 0 | 1) =>
     issueDb.countByStatus.all(synthetic) as { status: string; count: number }[];
-  const openConditions = (synthetic: 0 | 1) =>
-    (issueDb.countOpenConditions.get(synthetic) as { count: number }).count;
+  const openIssues = (synthetic: 0 | 1) =>
+    issueDb.countOpen.get(synthetic) as { conditions: number; openRows: number };
+  const openObserved = openIssues(0);
+  const openSynthetic = openIssues(1);
   const sum = (rows: { count: number }[]) => rows.reduce((n, row) => n + row.count, 0);
 
   // category is NOT NULL, so the per-category counts cover every row exactly
@@ -2374,11 +2376,18 @@ function computeStats() {
       // Distinct conditions among open issues. A condition that persisted used
       // to mint a new row on every detection pass, and those rows are still
       // open: 754 rows are 12 conditions on the 2026-09-26 snapshot.
-      conditions: openConditions(0),
+      conditions: openObserved.conditions,
+      // The open rows those conditions are counted over. Shown beside
+      // `conditions` rather than `total`, which also counts closed rows: once
+      // legacy duplicates are closed, conditions would shrink while total
+      // stayed at its all-time high, and the pair would stop describing the
+      // same thing.
+      openRows: openObserved.openRows,
       byStatus: byStatus(0),
       synthetic: {
         total: issueCounts.synthetic,
-        conditions: openConditions(1),
+        conditions: openSynthetic.conditions,
+        openRows: openSynthetic.openRows,
         byStatus: byStatus(1),
       },
     },

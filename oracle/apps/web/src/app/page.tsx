@@ -281,7 +281,9 @@ export default function Dashboard() {
           labelled as rows rather than as signals; the last-24h figure shows
           whether collection is still running. Issues lead with distinct open
           conditions: a persisting condition used to add a row every pass, and
-          754 rows were 12 conditions when this was written.
+          754 rows were 12 conditions when this was written. The secondary
+          figure is the open rows those conditions are counted over, not the
+          all-time total, so the two numbers always describe the same issues.
         */}
         <StatCard
           title={t("dashboard.totalSignals")}
@@ -298,7 +300,7 @@ export default function Dashboard() {
           title={t("dashboard.issueConditions")}
           value={statsPending ? "..." : num(stats?.issues.conditions)}
           detail={
-            stats ? t("dashboard.issueRecords", { count: num(stats.issues.total) }) : undefined
+            stats ? t("dashboard.issueOpenRows", { count: num(stats.issues.openRows) }) : undefined
           }
           icon={AlertTriangle}
           href="/issues"
