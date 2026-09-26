@@ -240,6 +240,8 @@ function parseJson<T>(raw: unknown, fallback: T): T {
 
 export interface HydrationReport {
   proposals: number;
+  /** Stored "rejected" proposals that never reached quorum, now "expired". */
+  relabelledExpired: number;
   votes: number;
   delegations: number;
   executions: number;
@@ -261,6 +263,7 @@ export function hydrate(deps: {
 }): HydrationReport {
   const report: HydrationReport = {
     proposals: 0,
+    relabelledExpired: 0,
     votes: 0,
     delegations: 0,
     executions: 0,
@@ -316,6 +319,9 @@ export function hydrate(deps: {
   }
 
   // Votes ----------------------------------------------------------
+  // Proposals that lost a vote row to a restore failure. Their in-memory tally
+  // is short, so it cannot be trusted to say quorum was missed.
+  const proposalsWithUnrestoredVotes = new Set<string>();
   for (const row of governanceDb.allVotes.all() as any[]) {
     try {
       if (!knownProposals.has(row.proposal_id)) {
@@ -334,9 +340,17 @@ export function hydrate(deps: {
       });
       report.votes++;
     } catch (error) {
+      if (row?.proposal_id) proposalsWithUnrestoredVotes.add(row.proposal_id);
       report.skipped.push(`vote ${row?.id}: ${(error as Error).message}`);
     }
   }
+
+  report.relabelledExpired = relabelUnquorateRejections(
+    deps.votingSystem,
+    knownProposals,
+    proposalsWithUnrestoredVotes,
+    report.skipped,
+  );
 
   // Delegations ----------------------------------------------------
   for (const row of governanceDb.allDelegations.all() as any[]) {
@@ -430,6 +444,51 @@ export function hydrate(deps: {
   }
 
   return report;
+}
+
+/**
+ * Give "expired" to stored proposals that were closed as "rejected" without
+ * reaching quorum.
+ *
+ * Until "expired" existed, finalizeProposal wrote "rejected" for any proposal
+ * that did not pass, including the ones nobody voted on. In production that is
+ * 163 of 164 proposals, every one closed with zero votes against the default
+ * quorum of 100 wallets, and all of them were published as rejections.
+ *
+ * Runs on every boot rather than once behind user_version: a rollback to a
+ * build that predates "expired" would write "rejected" again for whatever it
+ * finalizes, and the next boot of this build should put those right too. It
+ * is idempotent because it only ever reads "rejected" and only ever writes
+ * "expired". Must run after votes are restored — quorum is judged by the same
+ * tallyVotes the finalizer uses, over the votes storage actually holds.
+ */
+function relabelUnquorateRejections(
+  votingSystem: VotingSystem,
+  proposalIds: Set<string>,
+  withUnrestoredVotes: Set<string>,
+  skipped: string[],
+): number {
+  let relabelled = 0;
+  for (const id of proposalIds) {
+    const proposal = votingSystem.getProposal(id);
+    if (!proposal || proposal.status !== "rejected") continue;
+    // The write is permanent and the tally here only counts votes that
+    // restored. A quorate rejection with one unreadable vote row would look
+    // unquorate, and fixing the row later would not bring "rejected" back.
+    if (withUnrestoredVotes.has(id)) {
+      skipped.push(`proposal ${id}: not relabelled as expired, some of its votes could not be restored`);
+      continue;
+    }
+    try {
+      if (votingSystem.tallyVotes(id).quorumReached) continue;
+      governanceDb.markRejectedExpired.run(id);
+      proposal.status = "expired";
+      relabelled++;
+    } catch (error) {
+      skipped.push(`proposal ${id}: could not relabel as expired: ${(error as Error).message}`);
+    }
+  }
+  return relabelled;
 }
 
 /** JSON round-trips turn Dates into strings; put them back. */

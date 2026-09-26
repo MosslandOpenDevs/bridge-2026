@@ -1,12 +1,19 @@
 import { z } from "zod";
 import { DecisionPacketSchema } from "./agent.js";
 
-// Proposal status
+// Proposal status.
+//
+// "rejected" and "expired" are both closed-and-not-passed, and are kept apart
+// on purpose. "rejected" means holders voted and quorum was reached, but the
+// threshold was not: a decision. "expired" means voting ended without reaching
+// quorum: no decision at all. Reporting the second as the first turned 163
+// proposals nobody voted on into 163 rejections.
 export const ProposalStatusSchema = z.enum([
   "pending",
   "active",
   "passed",
   "rejected",
+  "expired",
   "executed",
   "cancelled",
 ]);
