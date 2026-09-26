@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
-import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Zap } from "lucide-react";
+import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Zap, FlaskConical } from "lucide-react";
 import { cn, getStatusColor, timeAgo, formatNumber } from "@/lib/utils";
 import { useSignMessage } from "wagmi";
 import { useVotingPower, useAccount } from "@/hooks/useMOC";
@@ -201,16 +201,25 @@ export default function ProposalsPage() {
   const hasAdminKey = useHasAdminKey();
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<string>("all");
+  const [showSynthetic, setShowSynthetic] = useState(false);
   const [votingProposal, setVotingProposal] = useState<any>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // One request for everything, filtered here: the toggle needs the number of
+  // demo proposals it is hiding.
   const { data, isLoading } = useQuery({
-    queryKey: ["proposals", filter],
-    queryFn: () => api.getProposals(filter === "all" ? undefined : filter),
+    queryKey: ["proposals"],
+    queryFn: () => api.getProposals(),
     refetchInterval: 30000,
   });
 
-  const proposals = data?.proposals ?? [];
+  const allProposals = data?.proposals ?? [];
+  const hiddenSyntheticCount = showSynthetic
+    ? 0
+    : allProposals.filter((p) => p.synthetic).length;
+  const proposals = allProposals
+    .filter((p) => showSynthetic || !p.synthetic)
+    .filter((p) => filter === "all" || p.status === filter);
 
   const handleVoteSuccess = () => {
     // Invalidate and refetch proposals
@@ -242,7 +251,21 @@ export default function ProposalsPage() {
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">{t("proposals.title")}</h1>
           <p className="mt-1 text-sm sm:text-base text-gray-500">{t("proposals.subtitle")}</p>
         </div>
-        <div className="flex items-center">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowSynthetic(!showSynthetic)}
+            aria-pressed={showSynthetic}
+            className={cn(
+              "inline-flex items-center justify-center gap-1 rounded-lg border px-3 py-2 text-sm",
+              showSynthetic
+                ? "border-amber-300 bg-amber-50 text-amber-800"
+                : "border-gray-300 bg-white text-gray-600 hover:border-gray-400"
+            )}
+          >
+            <FlaskConical className="w-4 h-4" aria-hidden="true" />
+            {t("proposals.showSynthetic")}
+          </button>
           <select
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
@@ -255,6 +278,13 @@ export default function ProposalsPage() {
           </select>
         </div>
       </div>
+
+      {hiddenSyntheticCount > 0 && (
+        <p className="flex items-center gap-1 text-xs text-gray-500">
+          <FlaskConical className="w-3 h-3" aria-hidden="true" />
+          {t("proposals.syntheticHidden", { count: hiddenSyntheticCount })}
+        </p>
+      )}
 
       {/* Proposals List */}
       <div className="space-y-4">
@@ -269,7 +299,7 @@ export default function ProposalsPage() {
             <p className="text-sm">{t("proposals.createFirst")}</p>
           </div>
         ) : (
-          proposals.map((proposal: any) => {
+          proposals.map((proposal) => {
             // The tally comes from the API. Reading forVotes/againstVotes off
             // the proposal itself always yielded 0: those fields never existed
             // on the object, so every proposal showed no votes however many
@@ -316,6 +346,15 @@ export default function ProposalsPage() {
                         <span className="badge bg-purple-50 text-purple-600 text-xs">
                           <Bot className="w-3 h-3 mr-1 inline" />
                           AI
+                        </span>
+                      )}
+                      {proposal.synthetic && (
+                        <span
+                          className="badge bg-amber-100 text-amber-800 flex items-center gap-1 text-xs"
+                          title={t("proposals.syntheticHint")}
+                        >
+                          <FlaskConical className="w-3 h-3" aria-hidden="true" />
+                          {t("common.synthetic")}
                         </span>
                       )}
                     </div>

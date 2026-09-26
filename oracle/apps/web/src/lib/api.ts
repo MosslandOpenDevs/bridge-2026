@@ -20,6 +20,29 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A proposal as GET /api/proposals lists it. Only the fields the list page
+ * branches on are spelled out; the decision packet and the rest stay loose.
+ */
+export interface ProposalListItem {
+  id: string;
+  /** "expired" is a proposal that closed without reaching quorum. */
+  status: "pending" | "active" | "passed" | "rejected" | "expired" | "executed";
+  votingEndsAt: string;
+  createdAt: string;
+  /** Raised on an issue detected from demo signals, not observed ones. */
+  synthetic: boolean;
+  tally?: {
+    forVotes: string;
+    againstVotes: string;
+    abstainVotes: string;
+    voteCount: number;
+    quorumReached: boolean;
+    passed: boolean;
+  };
+  [field: string]: any;
+}
+
 class APIClient {
   private baseUrl: string;
 
@@ -137,7 +160,7 @@ class APIClient {
   // Proposals
   async getProposals(status?: string) {
     const query = status ? `?status=${status}` : "";
-    return this.fetch<{ proposals: any[]; count: number }>(`/api/proposals${query}`);
+    return this.fetch<{ proposals: ProposalListItem[]; count: number }>(`/api/proposals${query}`);
   }
 
   async createProposal(decisionPacket: any, proposer: string, options?: any) {
