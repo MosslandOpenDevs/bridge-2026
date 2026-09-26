@@ -30,6 +30,30 @@ function displayStatus(proposal: ProposalListItem): DisplayStatus {
   return proposal.status;
 }
 
+/** Whether an active proposal can still take votes; the API refuses them after votingEndsAt. */
+function isOpenForVoting(proposal: ProposalListItem, now: number): boolean {
+  return proposal.status === "active" && new Date(proposal.votingEndsAt).getTime() > now;
+}
+
+/**
+ * Time left to vote. Rounding up to whole days read "0d" both for a proposal
+ * with hours left and for one whose voting had already ended but that nothing
+ * had closed out yet, so the two are told apart and short spans get hours.
+ */
+function remainingLabel(votingEndsAt: Date, now: number, t: any): string {
+  const ms = votingEndsAt.getTime() - now;
+  if (ms <= 0) return t("proposals.votingClosed");
+  const hours = Math.floor(ms / 3_600_000);
+  const days = Math.floor(hours / 24);
+  const span =
+    days >= 1
+      ? `${days}d ${hours % 24}h`
+      : hours >= 1
+        ? `${hours}h`
+        : `${Math.max(1, Math.ceil(ms / 60_000))}m`;
+  return t("proposals.timeLeft", { time: span });
+}
+
 /**
  * Active first, since those are the only ones anyone can act on, then newest
  * first. The API returns insertion order, which put the single active
@@ -246,6 +270,7 @@ export default function ProposalsPage() {
     refetchInterval: 30000,
   });
 
+  const now = Date.now();
   const allProposals = data?.proposals ?? [];
   const hiddenSyntheticCount = showSynthetic
     ? 0
@@ -352,6 +377,7 @@ export default function ProposalsPage() {
             const isExpanded = expandedId === proposal.id;
             const votingEndsAt = new Date(proposal.votingEndsAt);
             const status = displayStatus(proposal);
+            const openForVoting = isOpenForVoting(proposal, now);
 
             // Extract title and description from decisionPacket or direct fields
             const dp = proposal.decisionPacket;
@@ -422,7 +448,7 @@ export default function ProposalsPage() {
                       <span className="flex items-center">
                         <Clock className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
                         {proposal.status === "active"
-                          ? `${Math.max(0, Math.ceil((votingEndsAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000)))}d`
+                          ? remainingLabel(votingEndsAt, now, t)
                           : timeAgo(votingEndsAt)}
                       </span>
                       <span>{formatNumber(total)} MOC</span>
@@ -431,7 +457,7 @@ export default function ProposalsPage() {
                   </div>
 
                   <div className="flex flex-row sm:flex-col items-center sm:items-end gap-2 sm:ml-4">
-                    {proposal.status === "active" && isConnected && (
+                    {openForVoting && isConnected && (
                       <button
                         onClick={() => setVotingProposal(proposal)}
                         className="btn-primary text-sm py-2 px-4 flex-1 sm:flex-none"
