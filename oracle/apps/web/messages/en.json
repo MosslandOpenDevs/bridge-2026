@@ -83,7 +83,27 @@
       "medium": "Medium",
       "low": "Low"
     },
-    "maxDisplayNote": "Showing up to {max} recent signals"
+    "maxDisplayNote": "Showing up to {max} recent signals",
+    "noSignalsPublic": "Signals appear here as the collector records them.",
+    "telemetry": "Telemetry",
+    "unknownCategory": "unknown",
+    "blockPrefix": "Block #",
+    "fields": {
+      "signalId": "Signal ID",
+      "originalId": "Original ID",
+      "txHash": "Transaction Hash",
+      "blockNumber": "Block Number",
+      "apiEndpoint": "API Endpoint",
+      "rawData": "Raw Data"
+    },
+    "newCollected": "+{count} new signals collected",
+    "moreCategories": "+{count} more",
+    "clearSearch": "Clear search",
+    "showDetails": "Show details",
+    "hideDetails": "Hide details",
+    "repeated": "×{count, number} · {range}",
+    "repeatedHint": "The same observation was recorded {count} times in a row; shown once.",
+    "collapsedNote": "{observations, number} observations, identical repeats merged into {rows, number} rows"
   },
   "issues": {
     "title": "Issue Detection",
