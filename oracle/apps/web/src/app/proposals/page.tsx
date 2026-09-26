@@ -3,13 +3,16 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
-import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Zap, FlaskConical } from "lucide-react";
+import { Vote, Clock, CheckCircle, XCircle, Bot, ChevronDown, ChevronUp, Loader2, AlertCircle, Zap, FlaskConical, Info, ExternalLink } from "lucide-react";
 import { cn, getStatusColor, timeAgo, formatNumber } from "@/lib/utils";
 import { useSignMessage } from "wagmi";
 import { useVotingPower, useAccount } from "@/hooks/useMOC";
 import { useToast } from "@/contexts/ToastContext";
 import { api, type ProposalListItem } from "@/lib/api";
 import { useHasAdminKey } from "@/hooks/useAdminKey";
+
+// Where Mossland DAO actually decides. Nothing voted on this page binds it.
+const AGORA_URL = "https://agora.moss.land";
 
 type DisplayStatus = ProposalListItem["status"];
 
@@ -336,6 +339,32 @@ export default function ProposalsPage() {
             <option value="rejected">{t("proposals.rejected")}</option>
             <option value="expired">{t("proposals.expired")}</option>
           </select>
+        </div>
+      </div>
+
+      {/* Non-binding framing. BRIDGE is a lab: its agents write these
+          proposals and nothing voted here reaches the DAO. Mossland DAO
+          decides on Agora, and a reader who landed here should learn that
+          before reading any of the rows below as governance. */}
+      <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+        <div className="flex items-start gap-2">
+          <Info className="w-5 h-5 flex-shrink-0 text-blue-600 mt-0.5" aria-hidden="true" />
+          <div className="space-y-1">
+            <p className="font-semibold">{t("proposals.labNoticeTitle")}</p>
+            <p>{t("proposals.labNoticeBody")}</p>
+            <p>
+              {t("proposals.agoraNotice")}{" "}
+              <a
+                href={AGORA_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 font-medium text-blue-700 underline hover:text-blue-800"
+              >
+                {t("proposals.agoraLink")}
+                <ExternalLink className="w-3 h-3" aria-hidden="true" />
+              </a>
+            </p>
+          </div>
         </div>
       </div>
 
