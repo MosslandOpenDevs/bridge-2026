@@ -3,11 +3,16 @@
 import { useTranslations } from "next-intl";
 import { Twitter, BookOpen, Github, Mail, Globe } from "lucide-react";
 
-// Sister sites in the Mossland AI-governance family. Order and wording are
-// shared across bridge / algora / ao so the three sites read as one set.
+// Sister sites in the Mossland AI-governance family.
+//
+// Agora, not Algora: Algora was archived on 2026-09-02 (lifecycle "archive" in
+// the ecosystem registry), so linking it sent readers to a service that no
+// longer runs. Agora is where MossDAO actually decides — everything BRIDGE
+// produces is non-binding Lab output — so it is the link a reader leaving
+// this site most needs.
 const ECOSYSTEM = [
   { name: "BRIDGE", roleKey: "bridgeRole", href: "https://bridge.moss.land", current: true },
-  { name: "Algora", roleKey: "algoraRole", href: "https://algora.moss.land", current: false },
+  { name: "Agora", roleKey: "agoraRole", href: "https://agora.moss.land", current: false },
   { name: "MOSS.AO", roleKey: "aoRole", href: "https://ao.moss.land", current: false },
 ] as const;
 

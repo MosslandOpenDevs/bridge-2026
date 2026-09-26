@@ -229,7 +229,7 @@
     "experimental": "실험 환경 / 연구용 / 비프로덕션",
     "ecosystemLabel": "모스랜드 에코시스템",
     "bridgeRole": "거버넌스 OS",
-    "algoraRole": "AI 숙의 실험실",
+    "agoraRole": "공식 의사결정",
     "aoRole": "에이전트 오케스트레이터",
     "newTab": "새 탭에서 열림",
     "aiNotice": "이 서비스에는 AI가 자동 생성한 내용이 포함됩니다. 사람이 검토하지 않은 내용이 있을 수 있으며, 참고용입니다.",
