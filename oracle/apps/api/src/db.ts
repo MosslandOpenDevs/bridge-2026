@@ -738,6 +738,16 @@ export const governanceDb = {
 
   allProposals: db.prepare(`SELECT * FROM proposals ORDER BY created_at ASC`),
 
+  /**
+   * Relabel a closed proposal that never reached quorum. Guarded on the old
+   * status so it can only ever move "rejected" to "expired" — see
+   * relabelUnquorateRejections in governance-store.ts.
+   */
+  markRejectedExpired: db.prepare(`
+    UPDATE proposals SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = 'rejected'
+  `),
+
   insertVote: db.prepare(`
     INSERT INTO votes (id, proposal_id, voter, voter_key, choice, weight, reason, tx_hash, voted_at)
     VALUES (@id, @proposalId, @voter, @voterKey, @choice, @weight, @reason, @txHash, @votedAt)

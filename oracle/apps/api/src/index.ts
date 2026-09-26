@@ -2134,6 +2134,9 @@ app.get("/api/stats", (req, res) => {
       active: proposals.filter((p) => p.status === "active").length,
       passed: proposals.filter((p) => p.status === "passed").length,
       rejected: proposals.filter((p) => p.status === "rejected").length,
+      // Voting ended without reaching quorum: closed, but not decided. Counted
+      // apart from `rejected`, which it used to be folded into.
+      expired: proposals.filter((p) => p.status === "expired").length,
     });
 
     const proofs = outcomeTracker.listProofs();
@@ -2700,6 +2703,12 @@ console.log(
     `${hydration.executions} executions, ${hydration.proofs} proofs, ` +
     `${hydration.trustScores} trust scores`,
 );
+if (hydration.relabelledExpired > 0) {
+  console.log(
+    `🗳️  relabelled ${hydration.relabelledExpired} zero-quorum proposals as expired ` +
+      `(closed without reaching quorum, previously stored as rejected)`,
+  );
+}
 if (hydration.skipped.length > 0) {
   console.warn(`⚠️  ${hydration.skipped.length} record(s) could not be restored:`);
   for (const reason of hydration.skipped.slice(0, 10)) {

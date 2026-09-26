@@ -216,6 +216,20 @@ function stopServer(keepData = false) {
   }
 }
 
+/**
+ * Whether the server has written `text` since serverLog[from]. Waits briefly:
+ * stdout is a pipe, and on macOS a startup line can land a moment after
+ * /health first answers.
+ */
+async function logContains(text: string, from = 0, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (serverLog.slice(from).join("").includes(text)) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(50);
+  }
+}
+
 /* ------------------------------ fixtures ----------------------------- */
 
 let issueCounter = 0;
@@ -311,21 +325,12 @@ async function testHealthCheck() {
  * envFlag reads as "use the default".
  */
 async function testAutonomousLoopOffByDefault() {
-  const expected = [
+  for (const line of [
     "Auto deliberation: DISABLED",
     "Auto proposal promotion: DISABLED",
     "Outcome evaluation: DISABLED",
-  ];
-  // Startup lines are written from the listen callback; on a pipe they can
-  // land a moment after /health first answers.
-  const deadline = Date.now() + 2_000;
-  let log = serverLog.join("");
-  while (expected.some((line) => !log.includes(line)) && Date.now() < deadline) {
-    await sleep(50);
-    log = serverLog.join("");
-  }
-  for (const line of expected) {
-    assert(log.includes(line), `startup log should say "${line}"`);
+  ]) {
+    assert(await logContains(line), `startup log should say "${line}"`);
   }
 }
 
@@ -721,6 +726,79 @@ async function testVotingTimeline() {
   assertStatus(late.response, 400, "voting after finalization");
 }
 
+/**
+ * A vote that never reached quorum decided nothing, and must not be reported
+ * as a rejection. Production closed 163 proposals as "rejected" with zero
+ * votes each, which /api/stats then published as 163 decisions against.
+ *
+ * Three closes, one per branch of finalizeProposal: no votes at all, a
+ * unanimous "for" that still fell short of quorum, and a quorate "against" —
+ * the only one of the three that is a rejection.
+ */
+async function testUnquorateProposalExpires() {
+  const statsBefore = await get("/api/stats");
+  assertStatus(statsBefore.response, 200, "stats before expiry");
+  assert(
+    typeof statsBefore.data.proposals.expired === "number",
+    "stats: proposals should carry an expired count",
+  );
+  assert(
+    typeof statsBefore.data.proposals.synthetic.expired === "number",
+    "stats: the synthetic split should carry an expired count too",
+  );
+
+  const noVotes = await createProposal({ quorum: 1, votingPeriod: 800 });
+  const shortOfQuorum = await createProposal({ quorum: 2, votingPeriod: 800 });
+  const quorateAgainst = await createProposal({ quorum: 1, votingPeriod: 800 });
+
+  const forVote = await post(
+    `/api/proposals/${shortOfQuorum.id}/vote`,
+    { voter: voterAddress(51), choice: "for", weight: "10" },
+    false,
+  );
+  assertStatus(forVote.response, 201, "vote on the short-of-quorum proposal");
+  const againstVote = await post(
+    `/api/proposals/${quorateAgainst.id}/vote`,
+    { voter: voterAddress(52), choice: "against", weight: "10" },
+    false,
+  );
+  assertStatus(againstVote.response, 201, "vote on the quorate proposal");
+
+  await sleep(1000);
+
+  const expectations: [string, string, string][] = [
+    [noVotes.id, "expired", "zero votes"],
+    [shortOfQuorum.id, "expired", "one 'for' vote against a quorum of 2"],
+    [quorateAgainst.id, "rejected", "a quorate 'against' vote"],
+  ];
+  for (const [id, expected, label] of expectations) {
+    const finalized = await post(`/api/proposals/${id}/finalize`);
+    assertStatus(finalized.response, 200, `finalize with ${label}`);
+    assert(
+      finalized.data.proposal.status === expected,
+      `finalize with ${label}: expected ${expected}, got ${finalized.data.proposal.status}`,
+    );
+  }
+
+  const statsAfter = await get("/api/stats");
+  assert(
+    statsAfter.data.proposals.expired === statsBefore.data.proposals.expired + 2,
+    `stats: expected 2 more expired, got ${statsAfter.data.proposals.expired}`,
+  );
+  assert(
+    statsAfter.data.proposals.rejected === statsBefore.data.proposals.rejected + 1,
+    `stats: expected exactly 1 more rejected, got ${statsAfter.data.proposals.rejected}`,
+  );
+
+  const listed = await get("/api/proposals?status=expired");
+  assertStatus(listed.response, 200, "list expired proposals");
+  const listedIds = new Set(listed.data.proposals.map((p: any) => p.id));
+  assert(
+    listedIds.has(noVotes.id) && listedIds.has(shortOfQuorum.id) && !listedIds.has(quorateAgainst.id),
+    "status=expired should list exactly the two unquorate proposals from this test",
+  );
+}
+
 async function testExecutionAndMeasuredOutcome() {
   const proposal = await createProposal({ votingPeriod: 800 });
   await post(
@@ -1024,6 +1102,85 @@ async function testRestartRestoresState() {
 }
 
 /**
+ * Rows written before "expired" existed say "rejected" for every proposal that
+ * did not pass. Boot must relabel the ones that never reached quorum, persist
+ * that, leave a genuine rejection alone, and do nothing on the boot after.
+ *
+ * The old label is written straight into SQLite, which is exactly what an
+ * earlier build (or a rollback to one) leaves behind.
+ */
+async function testRestoredRejectionIsRelabelled() {
+  const unquorate = await createProposal({ quorum: 1, votingPeriod: 800 });
+  const genuine = await createProposal({ quorum: 1, votingPeriod: 800 });
+  const against = await post(
+    `/api/proposals/${genuine.id}/vote`,
+    { voter: voterAddress(61), choice: "against", weight: "10" },
+    false,
+  );
+  assertStatus(against.response, 201, "vote on the genuinely rejected proposal");
+  await sleep(1000);
+  for (const id of [unquorate.id, genuine.id]) {
+    assertStatus((await post(`/api/proposals/${id}/finalize`)).response, 200, "finalize");
+  }
+
+  // Put back what the old finalizer wrote for the unquorate one.
+  const readStatus = (id: string) => {
+    const db = new Database(join(dataDir, "e2e.db"), { readonly: true });
+    try {
+      return (db.prepare("SELECT status FROM proposals WHERE id = ?").get(id) as any)?.status;
+    } finally {
+      db.close();
+    }
+  };
+  const db = new Database(join(dataDir, "e2e.db"));
+  try {
+    db.prepare("UPDATE proposals SET status = 'rejected' WHERE id = ?").run(unquorate.id);
+  } finally {
+    db.close();
+  }
+  assert(readStatus(genuine.id) === "rejected", "the quorate proposal was stored as rejected");
+
+  const logMark = serverLog.length;
+  stopServer(true);
+  await sleep(500);
+  await startServer();
+
+  assert(
+    await logContains("relabelled 1 zero-quorum proposals as expired", logMark),
+    "boot should log the relabel with its count",
+  );
+
+  const relabelled = await get(`/api/proposals/${unquorate.id}`);
+  assert(
+    relabelled.data.proposal.status === "expired",
+    `restored unquorate proposal: expected expired, got ${relabelled.data.proposal.status}`,
+  );
+  assert(readStatus(unquorate.id) === "expired", "the relabel should be persisted, not only in memory");
+
+  const untouched = await get(`/api/proposals/${genuine.id}`);
+  assert(
+    untouched.data.proposal.status === "rejected",
+    `a quorate rejection must stay rejected, got ${untouched.data.proposal.status}`,
+  );
+
+  // Idempotent: nothing left to relabel on the next boot.
+  const secondMark = serverLog.length;
+  stopServer(true);
+  await sleep(500);
+  await startServer();
+  // The listen-time lines are the last a boot writes, so once they are in the
+  // log the hydration line would have been too.
+  assert(
+    await logContains("Auto finalize", secondMark),
+    "second boot should have finished logging its startup",
+  );
+  assert(
+    !serverLog.slice(secondMark).join("").includes("zero-quorum proposals as expired"),
+    "a second boot should find nothing to relabel",
+  );
+}
+
+/**
  * With signatures required — the production posture — an unsigned delegation
  * must be refused. The main delegation test runs with them off, so without
  * this the signature work has no coverage at all.
@@ -1175,12 +1332,14 @@ async function main() {
     await runTest("Voting integrity", testVotingIntegrity);
     await runTest("Proposal responses carry a tally", testProposalListIncludesTally);
     await runTest("Voting timeline is enforced", testVotingTimeline);
+    await runTest("A vote without quorum expires", testUnquorateProposalExpires);
     await runTest("Execution and measured outcome", testExecutionAndMeasuredOutcome);
     await runTest("Deliberation contract", testDeliberationContract);
     await runTest("Debate rounds are bounded", testDebateRoundsAreBounded);
     await runTest("Delegation authorization", testDelegationAuthorization);
     await runTest("Delegation requires a signature", testDelegationRequiresSignature);
     await runTest("Restart restores governance state", testRestartRestoresState);
+    await runTest("Stored zero-quorum rejections are relabelled", testRestoredRejectionIsRelabelled);
     // Runs after the restart test on purpose: that test asserts exactly one
     // measured proof survived, and this one mints a second.
     await runTest("A fully successful outcome", testFullySuccessfulOutcome);

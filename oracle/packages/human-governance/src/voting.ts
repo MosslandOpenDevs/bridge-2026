@@ -323,7 +323,14 @@ export class VotingSystem {
 
     const tally = this.tallyVotes(proposalId);
 
-    proposal.status = tally.passed ? "passed" : "rejected";
+    // Only a vote that reached quorum decides anything. Without quorum the
+    // proposal lapses as "expired" whatever the split, so a proposal with no
+    // votes at all is never reported as one holders turned down.
+    proposal.status = tally.passed
+      ? "passed"
+      : tally.quorumReached
+        ? "rejected"
+        : "expired";
     if (tally.passed) {
       // Timelock: mirrors the contract's executionDelay so a proposal that
       // slipped through can still be reacted to before it takes effect.
