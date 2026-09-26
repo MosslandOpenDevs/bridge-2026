@@ -5,8 +5,8 @@
  * deploy or restart announced the newest disclosure again, and those repeats
  * fed the anomaly detector that opened 18 of BRIDGE's 21 real proposals; the
  * day's price alert had the same problem. The stored signals are the only
- * record that survives a restart, so the state is read back from them. Takes the database as a parameter so tests can hand it
- * a throwaway one.
+ * record that survives a restart, so the state is read back from them. Takes
+ * the database as a parameter so tests can hand it a throwaway one.
  */
 
 import type { Database as SqliteDatabase } from "better-sqlite3";
@@ -22,34 +22,55 @@ import {
 /** Price alerts older than this cannot share a trading day with today. */
 const PRICE_ALERT_LOOKBACK_MS = 2 * 24 * 60 * 60 * 1000;
 
+function hasKey(metadata: StoredMosslandSignal["metadata"]): boolean {
+  if (!metadata) return false;
+  try {
+    const parsed = typeof metadata === "string" ? JSON.parse(metadata) : metadata;
+    return typeof parsed?.key === "string" && parsed.key.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function loadMosslandAdapterState(
   db: SqliteDatabase,
   now: Date = new Date(),
 ): MosslandAdapterState {
   try {
     // Separate selects rather than one OR so each uses idx_signals_category.
-    // The legacy branch scans the total's rows (~143k in production) for the
-    // few value = 1 announcements written before events had their own
-    // category; DISTINCT because each was repeated on every restart.
-    const rows = db
+    const events = db
       .prepare(
         `SELECT category, value, description, metadata
-           FROM signals WHERE category = @event
-         UNION ALL
-         SELECT DISTINCT category, value, description, NULL
-           FROM signals WHERE category = @total AND value = 1
-         UNION ALL
-         SELECT category, value, description, metadata
-           FROM signals
-          WHERE category = @alert AND timestamp >= @since AND metadata IS NOT NULL`,
+           FROM signals WHERE category = ?`,
       )
-      .all({
-        event: DISCLOSURE_EVENT_CATEGORY,
-        total: DISCLOSURE_TOTAL_CATEGORY,
-        alert: PRICE_ALERT_CATEGORY,
-        since: new Date(now.getTime() - PRICE_ALERT_LOOKBACK_MS).toISOString(),
-      }) as StoredMosslandSignal[];
-    return MosslandAdapter.stateFromStoredSignals(rows);
+      .all(DISCLOSURE_EVENT_CATEGORY) as StoredMosslandSignal[];
+    const alerts = db
+      .prepare(
+        `SELECT category, value, description, metadata
+           FROM signals
+          WHERE category = ? AND timestamp >= ? AND metadata IS NOT NULL`,
+      )
+      .all(
+        PRICE_ALERT_CATEGORY,
+        new Date(now.getTime() - PRICE_ALERT_LOOKBACK_MS).toISOString(),
+      ) as StoredMosslandSignal[];
+
+    // Transition only: before events had their own category they were value = 1
+    // rows among the total's, and finding them walks every gauge row (value is
+    // not indexed; ~143k rows now, one more a minute). Once a keyed event is
+    // stored it is newer than all of them, and the adapter only needs the
+    // newest known document to tell new from old, so the scan is skipped.
+    // DISTINCT because each legacy announcement was repeated on every restart.
+    const legacy = events.some((row) => hasKey(row.metadata))
+      ? []
+      : (db
+          .prepare(
+            `SELECT DISTINCT category, value, description, NULL AS metadata
+               FROM signals WHERE category = ? AND value = 1`,
+          )
+          .all(DISCLOSURE_TOTAL_CATEGORY) as StoredMosslandSignal[]);
+
+    return MosslandAdapter.stateFromStoredSignals([...events, ...legacy, ...alerts]);
   } catch (error) {
     // Starting without state costs at most one missed announcement (the
     // adapter takes an unrecognised list as its baseline); refusing to start

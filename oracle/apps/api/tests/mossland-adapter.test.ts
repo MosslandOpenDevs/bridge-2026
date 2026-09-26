@@ -295,6 +295,30 @@ async function testLegacyRowsSeedTheTransition() {
   assert([...(koState.announcedDisclosures ?? [])].includes(doc(2).title), "Korean legacy rows should seed");
 }
 
+async function testLegacyScanStopsOnceEventsAreKeyed() {
+  const store = signalStore();
+  store.row("mossland_disclosure", 1, `New disclosure: ${doc(1).title}`, null);
+  store.row(
+    "mossland_disclosure_published",
+    1,
+    `New disclosure: ${doc(2).title}`,
+    JSON.stringify({ key: doc(2).url, url: doc(2).url, title: doc(2).title, date: doc(2).date }),
+  );
+
+  const seeded = [...(loadMosslandAdapterState(store.db).announcedDisclosures ?? [])];
+  assert(!seeded.includes(doc(1).title), "the legacy rows are not scanned once a keyed event exists");
+  assert(
+    seeded.includes(doc(2).url) && seeded.includes(`${doc(2).title}|${doc(2).date}`),
+    `a keyed event seeds its URL and title|date alias, got ${JSON.stringify(seeded)}`,
+  );
+
+  // Knowing only the newest announced document is enough: the older one
+  // below it is history, not news.
+  disclosures = [doc(2), doc(1)];
+  const adapter = new MosslandAdapter({ apiUrl: API_URL, language: "en", state: loadMosslandAdapterState(store.db) });
+  assert(events(await collect(adapter)).length === 0, "nothing below the newest known document is new");
+}
+
 async function testStateSurvivesAMissingTable() {
   const db = new Database(":memory:");
   const state = loadMosslandAdapterState(db);
@@ -394,6 +418,7 @@ async function main() {
   await runTest("A rewritten link does not make an old disclosure new", testRewrittenLinksAreNotNew);
   await runTest("A restart does not re-announce a disclosure", testNoReannouncementAfterRestart);
   await runTest("Legacy rows seed the transition", testLegacyRowsSeedTheTransition);
+  await runTest("Legacy rows are not scanned once events are keyed", testLegacyScanStopsOnceEventsAreKeyed);
   await runTest("Missing state does not stop the collector", testStateSurvivesAMissingTable);
   await runTest("A price change keeps its sign", testPriceChangeKeepsItsSign);
   await runTest("A price alert fires once per trading day and direction", testPriceAlertOncePerDayAndDirection);
