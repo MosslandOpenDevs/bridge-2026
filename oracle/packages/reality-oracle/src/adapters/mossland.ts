@@ -21,6 +21,8 @@ export interface MosslandAdapterState {
    * accepted too: rows written before keys were stored carry only the title.
    */
   announcedDisclosures?: Iterable<string>;
+  /** priceAlertKey() of every price alert already raised. */
+  raisedPriceAlerts?: Iterable<string>;
 }
 
 /** A stored signal row, as much of it as seeding the state needs. */
@@ -46,6 +48,19 @@ export type MosslandNormalizedSignal = NormalizedSignal & {
 export const DISCLOSURE_EVENT_CATEGORY = "mossland_disclosure_published";
 /** The running number of published disclosures, a gauge. */
 export const DISCLOSURE_TOTAL_CATEGORY = "mossland_disclosure";
+/** A move of more than PRICE_ALERT_THRESHOLD against the previous close. */
+export const PRICE_ALERT_CATEGORY = "moc_price_alert";
+const PRICE_ALERT_THRESHOLD = 0.05;
+
+/**
+ * One price alert per trading day and direction. The day is Upbit's
+ * `trade_date`: change_rate is measured against the previous close, which
+ * Upbit takes at 00:00 UTC (09:00 KST), so its trading day runs 09:00 KST to
+ * 09:00 KST and the move being alerted on belongs to exactly one of them.
+ */
+export function priceAlertKey(tradeDate: string, direction: "RISE" | "FALL"): string {
+  return `${tradeDate}:${direction}`;
+}
 
 /**
  * Identity of a disclosure document that survives restarts and list reorders.
@@ -126,6 +141,8 @@ interface TickerData {
   /** The same rate with its sign, negative for a fall. */
   signed_change_rate?: number;
   change_price: number;
+  /** YYYYMMDD in UTC: the trading day change_rate is measured over. */
+  trade_date?: string;
 }
 
 /**
@@ -138,6 +155,15 @@ function signedChangeRate(ticker: TickerData): number {
   if (typeof ticker.signed_change_rate === "number") return ticker.signed_change_rate;
   const magnitude = Math.abs(ticker.change_rate || 0);
   return ticker.change === "FALL" ? -magnitude : magnitude;
+}
+
+/** Upbit's trading day as YYYYMMDD; see priceAlertKey. */
+function tradingDay(ticker: TickerData): string {
+  if (typeof ticker.trade_date === "string" && /^\d{8}$/.test(ticker.trade_date)) {
+    return ticker.trade_date;
+  }
+  const at = Number.isFinite(ticker.timestamp) ? ticker.timestamp : Date.now();
+  return new Date(at).toISOString().slice(0, 10).replace(/-/g, "");
 }
 
 interface Transaction {
@@ -170,6 +196,7 @@ export class MosslandAdapter extends BaseAdapter {
   private announcedDisclosures: Set<string>;
   /** False until one disclosure list has been read since construction. */
   private disclosuresBaselined = false;
+  private raisedPriceAlerts: Set<string>;
   private lastPrice: number = 0;
 
   constructor(config: MosslandAdapterConfig = {}) {
@@ -179,6 +206,7 @@ export class MosslandAdapter extends BaseAdapter {
       language: config.language || "ko",
     };
     this.announcedDisclosures = new Set(config.state?.announcedDisclosures ?? []);
+    this.raisedPriceAlerts = new Set(config.state?.raisedPriceAlerts ?? []);
   }
 
   /**
@@ -186,12 +214,19 @@ export class MosslandAdapter extends BaseAdapter {
    *
    * Reads new-style events by their metadata key and, for the transition,
    * the legacy events that shared the total's category (value 1, described as
-   * "New disclosure: <title>" in either language). Rows it does not recognise
-   * are ignored rather than guessed at.
+   * "New disclosure: <title>" in either language), and price alerts by their
+   * metadata key. Rows it does not recognise are ignored rather than guessed
+   * at; legacy price alerts carry no key and are among them.
    */
   static stateFromStoredSignals(rows: Iterable<StoredMosslandSignal>): MosslandAdapterState {
     const announced = new Set<string>();
+    const raised = new Set<string>();
     for (const row of rows) {
+      if (row.category === PRICE_ALERT_CATEGORY) {
+        const key = parseMetadata(row.metadata)?.key;
+        if (typeof key === "string" && key) raised.add(key);
+        continue;
+      }
       if (row.category === DISCLOSURE_EVENT_CATEGORY) {
         const key = parseMetadata(row.metadata)?.key;
         if (typeof key === "string" && key) {
@@ -207,7 +242,7 @@ export class MosslandAdapter extends BaseAdapter {
         if (title) announced.add(title);
       }
     }
-    return { announcedDisclosures: announced };
+    return { announcedDisclosures: announced, raisedPriceAlerts: raised };
   }
 
   async fetch(): Promise<RawSignal[]> {
@@ -352,18 +387,33 @@ export class MosslandAdapter extends BaseAdapter {
 
         this.lastPrice = ticker.trade_price;
 
-        // Alert for significant price changes
-        if (Math.abs(changeRate) > 0.05) { // 5% change
-          signals.push(this.createRawSignal(
-            `mossland-price-alert-${Date.now()}`,
-            {
-              type: "price_alert",
-              price: ticker.trade_price,
-              changeRate: changeRate * 100,
-              direction: changeRate < 0 ? "FALL" : "RISE",
-              isSignificant: true,
+        // Alert when the day's move crosses the threshold, once per direction.
+        // This used to fire on every tick while the move stayed past 5%, so
+        // one volatile day became hundreds of "alerts" (8,373 stored over 34
+        // day-directions), each a fresh input to the detectors.
+        if (Math.abs(changeRate) > PRICE_ALERT_THRESHOLD) {
+          const direction = changeRate < 0 ? "FALL" : "RISE";
+          const tradeDate = tradingDay(ticker);
+          const key = priceAlertKey(tradeDate, direction);
+          if (!this.raisedPriceAlerts.has(key)) {
+            // Earlier days can no longer match; keep the set to today's keys.
+            for (const raised of this.raisedPriceAlerts) {
+              if (!raised.startsWith(`${tradeDate}:`)) this.raisedPriceAlerts.delete(raised);
             }
-          ));
+            this.raisedPriceAlerts.add(key);
+            signals.push(this.createRawSignal(
+              `mossland-price-alert-${Date.now()}`,
+              {
+                type: "price_alert",
+                price: ticker.trade_price,
+                changeRate: changeRate * 100,
+                direction,
+                tradeDate,
+                key,
+                isSignificant: true,
+              }
+            ));
+          }
         }
       }
 
@@ -513,6 +563,7 @@ export class MosslandAdapter extends BaseAdapter {
       price?: number;
       changeRate?: number;
       direction?: string;
+      tradeDate?: string;
       isSignificant?: boolean;
       marketCapKrw?: number;
       marketCapUsd?: number;
@@ -571,13 +622,15 @@ export class MosslandAdapter extends BaseAdapter {
         break;
 
       case "price_alert":
-        category = "moc_price_alert";
+        category = PRICE_ALERT_CATEGORY;
         severity = Math.abs(data.changeRate || 0) > 10 ? "critical" : "high";
         value = data.changeRate || 0;
         unit = t.unit.percent;
         description = t.priceAlert
           .replace("{direction}", data.direction === "RISE" ? t.rise : t.fall)
           .replace("{change}", Math.abs(data.changeRate || 0).toFixed(2));
+        // The key is what stops a restart from raising today's alert again.
+        metadata = { key: data.key, tradeDate: data.tradeDate, direction: data.direction };
         break;
 
       case "market_overview":

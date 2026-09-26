@@ -105,18 +105,27 @@ function signalStore() {
     category TEXT NOT NULL,
     value REAL NOT NULL,
     description TEXT NOT NULL,
-    metadata TEXT
+    metadata TEXT,
+    timestamp TEXT NOT NULL
   )`);
   const insert = db.prepare(
-    `INSERT INTO signals (category, value, description, metadata) VALUES (?, ?, ?, ?)`,
+    `INSERT INTO signals (category, value, description, metadata, timestamp) VALUES (?, ?, ?, ?, ?)`,
   );
+  const row = (
+    category: string,
+    value: number,
+    description: string,
+    metadata: string | null = null,
+    timestamp = new Date().toISOString(),
+  ) => insert.run(category, value, description, metadata, timestamp);
   // As collectAndSaveSignals stores them: metadata serialized when present.
   const save = (signals: MosslandNormalizedSignal[]) => {
     for (const s of signals) {
-      insert.run(s.category, s.value, s.description, s.metadata ? JSON.stringify(s.metadata) : null);
+      row(s.category, s.value, s.description, s.metadata ? JSON.stringify(s.metadata) : null,
+        s.timestamp.toISOString());
     }
   };
-  return { db, insert, save };
+  return { db, row, save };
 }
 
 /* ------------------------------- tests ------------------------------- */
@@ -218,12 +227,12 @@ async function testLegacyRowsSeedTheTransition() {
   // What production holds: repeats of "New disclosure: <title>" at value 1 in
   // the gauge's category, next to the gauge itself.
   for (let i = 0; i < 17; i++) {
-    store.insert.run("mossland_disclosure", 1, `New disclosure: ${doc(2).title}`, null);
+    store.row("mossland_disclosure", 1, `New disclosure: ${doc(2).title}`, null);
   }
-  store.insert.run("mossland_disclosure", 1, `New disclosure: ${doc(1).title}`, null);
-  store.insert.run("mossland_disclosure", 53, "Disclosure status: 53 total", null);
+  store.row("mossland_disclosure", 1, `New disclosure: ${doc(1).title}`, null);
+  store.row("mossland_disclosure", 53, "Disclosure status: 53 total", null);
   // A total that happens to be 1 is not an announcement.
-  store.insert.run("mossland_disclosure", 1, "Disclosure status: 1 total", null);
+  store.row("mossland_disclosure", 1, "Disclosure status: 1 total", null);
 
   const state = loadMosslandAdapterState(store.db);
   const seeded = [...(state.announcedDisclosures ?? [])];
@@ -238,7 +247,7 @@ async function testLegacyRowsSeedTheTransition() {
 
   // Korean descriptions seed too, whatever language the process now runs in.
   const ko = signalStore();
-  ko.insert.run("mossland_disclosure", 1, `새 공시: ${doc(2).title}`, null);
+  ko.row("mossland_disclosure", 1, `새 공시: ${doc(2).title}`, null);
   const koState = loadMosslandAdapterState(ko.db);
   assert([...(koState.announcedDisclosures ?? [])].includes(doc(2).title), "Korean legacy rows should seed");
 }
@@ -276,6 +285,63 @@ async function testPriceChangeKeepsItsSign() {
   ticker = null;
 }
 
+async function testPriceAlertOncePerDayAndDirection() {
+  disclosures = [];
+  const adapter = new MosslandAdapter({ apiUrl: API_URL, language: "en" });
+  const alertsFor = async (rates: number[], tradeDate = "20260926") => {
+    const out: MosslandNormalizedSignal[] = [];
+    for (const rate of rates) {
+      ticker = tick(rate, tradeDate);
+      out.push(...priceAlerts(await collect(adapter)));
+    }
+    return out;
+  };
+
+  // An hour of ticks past -5%, deepening to -12%: one alert, from the crossing.
+  const falling = await alertsFor([-0.02, -0.049, ...Array.from({ length: 60 }, (_, i) => -0.051 - i * 0.001)]);
+  assert(falling.length === 1, `a day's fall should alert once, got ${falling.length}`);
+  assert(falling[0].metadata?.key === "20260926:FALL", `unexpected key ${falling[0].metadata?.key}`);
+
+  // Recovering inside the band and falling through again is the same day's fall.
+  assert((await alertsFor([-0.03, -0.07])).length === 0, "re-crossing the same direction does not alert again");
+
+  // The other direction is its own alert, also only once.
+  const rising = await alertsFor([0.02, 0.06, 0.07, 0.08]);
+  assert(rising.length === 1 && rising[0].value > 0, `a rise the same day alerts once, got ${rising.length}`);
+
+  // A new trading day re-arms both directions.
+  const nextDay = await alertsFor([-0.06, -0.06, 0.06], "20260927");
+  assert(nextDay.length === 2, `the next day alerts again per direction, got ${nextDay.length}`);
+
+  ticker = null;
+}
+
+async function testPriceAlertNotRepeatedAfterRestart() {
+  disclosures = [];
+  const store = signalStore();
+  // A legacy alert: no metadata, so it cannot say which day it covered.
+  store.row("moc_price_alert", 6.1, "MOC Price Alert: fall 6.10%");
+
+  ticker = tick(-0.061);
+  const first = new MosslandAdapter({ apiUrl: API_URL, language: "en", state: loadMosslandAdapterState(store.db) });
+  const firstSignals = await collect(first);
+  store.save(firstSignals);
+  assert(priceAlerts(firstSignals).length === 1, "the first process raises the day's alert");
+
+  const second = new MosslandAdapter({ apiUrl: API_URL, language: "en", state: loadMosslandAdapterState(store.db) });
+  assert(priceAlerts(await collect(second)).length === 0, "a restart the same trading day does not raise it again");
+
+  ticker = tick(-0.061, "20260927");
+  assert(priceAlerts(await collect(second)).length === 1, "the next trading day does");
+
+  // Alerts older than the lookback are not read back at all.
+  const later = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+  const stale = loadMosslandAdapterState(store.db, later);
+  assert([...(stale.raisedPriceAlerts ?? [])].length === 0, "alerts from days ago are not loaded");
+
+  ticker = null;
+}
+
 /* --------------------------------- run -------------------------------- */
 
 async function main() {
@@ -286,6 +352,8 @@ async function main() {
   await runTest("Legacy rows seed the transition", testLegacyRowsSeedTheTransition);
   await runTest("Missing state does not stop the collector", testStateSurvivesAMissingTable);
   await runTest("A price change keeps its sign", testPriceChangeKeepsItsSign);
+  await runTest("A price alert fires once per trading day and direction", testPriceAlertOncePerDayAndDirection);
+  await runTest("A restart does not repeat the day's price alert", testPriceAlertNotRepeatedAfterRestart);
   console.log(failures === 0 ? "\n   all passed\n" : `\n   ${failures} failed\n`);
   process.exit(failures === 0 ? 0 : 1);
 }

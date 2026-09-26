@@ -16,6 +16,8 @@ export {
   disclosureKey,
   DISCLOSURE_EVENT_CATEGORY,
   DISCLOSURE_TOTAL_CATEGORY,
+  PRICE_ALERT_CATEGORY,
+  priceAlertKey,
   type MosslandAdapterConfig,
   type MosslandAdapterState,
   type MosslandNormalizedSignal,
