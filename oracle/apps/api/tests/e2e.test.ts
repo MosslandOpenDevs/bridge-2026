@@ -303,6 +303,38 @@ async function createProposal(options: Record<string, unknown> = {}) {
   return data.proposal;
 }
 
+/**
+ * The `stats:update` payload a new Socket.IO connection receives.
+ *
+ * Spoken over Engine.IO's long-polling transport with plain fetch — open,
+ * CONNECT to the default namespace, read until the event arrives, close — so
+ * the suite needs no socket.io-client dependency.
+ */
+async function socketStats(): Promise<any> {
+  const base = `${baseUrl}/socket.io/?EIO=4&transport=polling`;
+  const open = await fetch(base);
+  assertStatus(open, 200, "socket handshake");
+  const { sid } = JSON.parse((await open.text()).slice(1));
+  const url = `${base}&sid=${sid}`;
+  const send = (packet: string) =>
+    fetch(url, { method: "POST", body: packet, headers: { "Content-Type": "text/plain" } });
+  try {
+    assertStatus(await send("40"), 200, "socket connect");
+    for (let poll = 0; poll < 3; poll++) {
+      const body = await (await fetch(url, { signal: AbortSignal.timeout(5000) })).text();
+      // Engine.IO v4 separates packets in one polling payload with 0x1e.
+      for (const packet of body.split("\x1e")) {
+        if (!packet.startsWith("42")) continue;
+        const [event, data] = JSON.parse(packet.slice(2));
+        if (event === "stats:update") return data;
+      }
+    }
+    throw new Error("socket: no stats:update after connecting");
+  } finally {
+    await send("1").catch(() => undefined);
+  }
+}
+
 /* -------------------------------- tests ------------------------------- */
 
 async function testHealthCheck() {
@@ -815,6 +847,74 @@ async function testSignalsAndIssues() {
 }
 
 /**
+ * Embedded signals are what made ?limit=500 a 6.8MB answer in production, so
+ * large pages leave them out unless asked, and no page exceeds 200 rows. Small
+ * pages — the issues page reads the default 50 — keep embedding, so existing
+ * consumers see no change.
+ */
+async function testIssueListDefaults() {
+  const category = "issue_list_probe";
+  const db = new Database(join(dataDir, "e2e.db"));
+  try {
+    // More open rows than the cap, so the cap is what limits the page.
+    const insert = db.prepare(
+      `INSERT INTO issues (id, title, description, category, priority, status, detected_at, signal_ids, synthetic, fingerprint)
+       VALUES (?, 'probe', 'probe', ?, 'low', 'detected', ?, '[]', 1, ?)`,
+    );
+    const at = new Date().toISOString();
+    db.transaction(() => {
+      for (let i = 0; i < 205; i++) insert.run(`ilp-${i}`, category, at, `${category}|issue|`);
+    })();
+  } finally {
+    db.close();
+  }
+
+  try {
+    const embedded = (issues: any[]) => issues.every((issue) => Array.isArray(issue.signals));
+    const bare = (issues: any[]) => issues.every((issue) => !("signals" in issue));
+
+    const small = await get("/api/issues");
+    assertStatus(small.response, 200, "default issue list");
+    assert(
+      small.data.signalsIncluded === true && small.data.count > 0 && embedded(small.data.issues),
+      "issues: the default page of 50 should still embed signals",
+    );
+
+    const large = await get("/api/issues?limit=51");
+    assertStatus(large.response, 200, "issue list of 51");
+    assert(
+      large.data.signalsIncluded === false && large.data.count === 51 && bare(large.data.issues),
+      `issues: a page over 50 should leave signals out by default, got signalsIncluded=${large.data.signalsIncluded}`,
+    );
+
+    const asked = await get("/api/issues?limit=51&includeSignals=true");
+    assert(
+      asked.data.signalsIncluded === true && embedded(asked.data.issues),
+      "issues: includeSignals=true should still embed on a large page",
+    );
+
+    const declined = await get("/api/issues?limit=10&includeSignals=false");
+    assert(
+      declined.data.signalsIncluded === false && bare(declined.data.issues),
+      "issues: includeSignals=false should hold on a small page",
+    );
+
+    const capped = await get("/api/issues?limit=1000");
+    assert(
+      capped.data.count === 200,
+      `issues: limit should be capped at 200, got ${capped.data.count}`,
+    );
+  } finally {
+    const cleanup = new Database(join(dataDir, "e2e.db"));
+    try {
+      cleanup.prepare(`DELETE FROM issues WHERE category = ?`).run(category);
+    } finally {
+      cleanup.close();
+    }
+  }
+}
+
+/**
  * A second detection over the same signals must report zero NEW issues.
  *
  * The condition is still open, so it folds into the existing row — but
@@ -1247,6 +1347,99 @@ async function testProposalListMarksSynthetic() {
 
   const invalid = await get("/api/proposals?synthetic=hide");
   assertStatus(invalid.response, 400, "unknown synthetic filter");
+}
+
+/**
+ * The full proposal list is 3.38MB in production and it could not be asked for
+ * less; limit and offset page it after the filters, and without them the
+ * answer is exactly what it was.
+ */
+async function testProposalListPaging() {
+  // At least three, whatever ran before.
+  await createProposal({ votingPeriod: 60_000 });
+  await createProposal({ votingPeriod: 60_000 });
+  const newest = await createProposal({ votingPeriod: 60_000 });
+
+  const full = await get("/api/proposals");
+  assertStatus(full.response, 200, "unpaged list");
+  const all: string[] = full.data.proposals.map((p: { id: string }) => p.id);
+  assert(
+    full.data.count === all.length && full.data.returned === all.length && all.length >= 3,
+    `unpaged list: count ${full.data.count} and returned ${full.data.returned} should both be ${all.length}`,
+  );
+
+  const first = await get("/api/proposals?limit=2");
+  assertStatus(first.response, 200, "first page");
+  assert(
+    first.data.count === all.length && first.data.returned === 2,
+    `first page: expected count ${all.length} and returned 2, got ${first.data.count}/${first.data.returned}`,
+  );
+  assert(
+    first.data.proposals.map((p: { id: string }) => p.id).join() === all.slice(0, 2).join(),
+    "first page should be the head of the unpaged list",
+  );
+  assert(
+    typeof first.data.proposals[0].tally === "object",
+    "paged rows should carry their tally like unpaged ones",
+  );
+
+  const second = await get("/api/proposals?limit=2&offset=1");
+  assert(
+    second.data.proposals.map((p: { id: string }) => p.id).join() === all.slice(1, 3).join(),
+    "offset should shift the page along the same order",
+  );
+
+  const past = await get(`/api/proposals?offset=${all.length}`);
+  assert(
+    past.data.returned === 0 && past.data.count === all.length,
+    "an offset past the end should return an empty page but the full count",
+  );
+
+  // Pages are cut oldest first unless asked otherwise: the default is the
+  // unpaged order, and order=desc puts the newest proposal on the first page.
+  const ids = (data: any) => data.proposals.map((p: { id: string }) => p.id).join();
+  const asc = await get("/api/proposals?order=asc");
+  assert(ids(asc.data) === all.join(), "order=asc should be the default, unpaged order");
+  const latest = await get("/api/proposals?order=desc&limit=1");
+  assertStatus(latest.response, 200, "newest page");
+  assert(
+    latest.data.returned === 1 && latest.data.proposals[0].id === newest.id,
+    `order=desc&limit=1 should be the proposal created last (${newest.id}), got ${ids(latest.data)}`,
+  );
+  const desc = await get("/api/proposals?order=desc");
+  const created = desc.data.proposals.map((p: { createdAt: string }) => Date.parse(p.createdAt));
+  assert(
+    desc.data.count === all.length &&
+      created.every((t: number, i: number) => i === 0 || created[i - 1] >= t),
+    "order=desc should list every proposal, newest createdAt first",
+  );
+  const descPage = await get("/api/proposals?order=desc&limit=2&offset=1");
+  assert(
+    ids(descPage.data) === desc.data.proposals.slice(1, 3).map((p: { id: string }) => p.id).join(),
+    "offset should shift a desc page along the desc order",
+  );
+  const badOrder = await get("/api/proposals?order=newest");
+  assertStatus(badOrder.response, 400, "unknown order");
+
+  // count is the filtered total, not the table's.
+  const excluded = await get("/api/proposals?synthetic=exclude");
+  const excludedPage = await get("/api/proposals?synthetic=exclude&limit=1");
+  assert(
+    excludedPage.data.count === excluded.data.count && excludedPage.data.returned === 1,
+    "count should be the total matching the filters",
+  );
+
+  const oversized = await get("/api/proposals?limit=100000");
+  assertStatus(oversized.response, 200, "oversized limit");
+  assert(
+    oversized.data.returned === Math.min(all.length, 200),
+    `limit should be capped at 200, got ${oversized.data.returned}`,
+  );
+
+  for (const query of ["limit=0", "limit=abc", "limit=-1", "limit=1.5", "offset=-1", "offset=x"]) {
+    const bad = await get(`/api/proposals?${query}`);
+    assertStatus(bad.response, 400, `malformed paging ${query}`);
+  }
 }
 
 async function testVotingTimeline() {
@@ -1886,6 +2079,170 @@ async function testStats() {
     data.outcomes.successRate === 0.5,
     `stats: expected 1 of 2 proofs successful, got ${data.outcomes.successRate}`,
   );
+
+  // Added fields. Conditions are distinct open fingerprints, so never more
+  // than the rows; the last day's rows are a subset of all rows.
+  for (const [label, value] of [
+    ["signals.lastDay", data.signals.lastDay],
+    ["issues.conditions", data.issues.conditions],
+    ["issues.synthetic.conditions", data.issues.synthetic.conditions],
+    ["issues.openRows", data.issues.openRows],
+    ["issues.synthetic.openRows", data.issues.synthetic.openRows],
+  ] as const) {
+    assert(
+      Number.isInteger(value) && value >= 0,
+      `stats: ${label} should be a count, got ${JSON.stringify(value)}`,
+    );
+  }
+  assert(
+    data.signals.lastDay <= data.signals.total,
+    `stats: ${data.signals.lastDay} rows in the last day exceeds ${data.signals.total} in total`,
+  );
+  // conditions are counted over openRows, which are a subset of all rows.
+  for (const scope of [data.issues, data.issues.synthetic]) {
+    assert(
+      scope.conditions <= scope.openRows && scope.openRows <= scope.total,
+      `stats: expected conditions <= openRows <= total, got ${scope.conditions}/${scope.openRows}/${scope.total}`,
+    );
+  }
+  assert(
+    typeof data.asOf === "string" && !Number.isNaN(Date.parse(data.asOf)),
+    `stats: asOf should be a timestamp, got ${JSON.stringify(data.asOf)}`,
+  );
+}
+
+/**
+ * /api/stats is served from a cache that the Socket.IO connect handler shares,
+ * dropped by a successful write that can move its figures and by nothing else.
+ *
+ * Also pins what `conditions` means: rows left over from before open issues
+ * were folded by fingerprint count once per condition, not once per row.
+ */
+async function testStatsCache() {
+  const first = await get("/api/stats");
+  assertStatus(first.response, 200, "stats");
+  const again = await get("/api/stats");
+  assert(
+    JSON.stringify(again.data) === JSON.stringify(first.data),
+    "stats: a second read inside the window should be the cached payload",
+  );
+
+  const agree = (socket: any, stats: any, label: string) =>
+    assert(
+      socket.signals === stats.signals.total &&
+        socket.issues === stats.issues.total &&
+        socket.proposals === stats.proposals.total &&
+        socket.activeProposals === stats.proposals.active &&
+        socket.synthetic.signals === stats.signals.synthetic.total &&
+        socket.synthetic.issues === stats.issues.synthetic.total &&
+        socket.synthetic.proposals === stats.proposals.synthetic.total,
+      `${label}: socket ${JSON.stringify(socket)} disagrees with /api/stats`,
+    );
+  agree(await socketStats(), first.data, "on connect");
+
+  // Three open rows of one condition, one of another, one closed: as legacy
+  // duplicates would sit in the table. Written behind the API's back, so the
+  // cache cannot know about them until something invalidates it.
+  const category = "conditions_probe";
+  const at = new Date().toISOString();
+  const db = new Database(join(dataDir, "e2e.db"));
+  try {
+    const insert = db.prepare(
+      `INSERT INTO issues (id, title, description, category, priority, status, detected_at, synthetic, fingerprint)
+       VALUES (?, 'probe', 'probe', ?, 'low', ?, ?, 0, ?)`,
+    );
+    insert.run("cp-1", category, "detected", at, `${category}|issue|up`);
+    insert.run("cp-2", category, "detected", at, `${category}|issue|up`);
+    insert.run("cp-3", category, "deliberating", at, `${category}|issue|up`);
+    insert.run("cp-4", category, "detected", at, `${category}|issue|down`);
+    insert.run("cp-5", category, "resolved", at, `${category}|anomaly|up`);
+  } finally {
+    db.close();
+  }
+
+  try {
+    const cached = await get("/api/stats");
+    assert(
+      cached.data.asOf === first.data.asOf && cached.data.issues.total === first.data.issues.total,
+      "stats: an out-of-band row should not show before the cache is dropped",
+    );
+    // The rows are in the table now, so a handler that counted per connection
+    // would report five more. Only one that reads the cache reports none.
+    const socketCached = await socketStats();
+    assert(
+      socketCached.issues === first.data.issues.total,
+      `stats: the socket should read the cache, got ${socketCached.issues} issue rows against ${first.data.issues.total} cached`,
+    );
+
+    // A refused write changed nothing, so it must not cost a recomputation.
+    const refused = await post("/api/proposals", { decisionPacket: {} });
+    assertStatus(refused.response, 400, "malformed proposal");
+    const stillCached = await get("/api/stats");
+    assert(
+      stillCached.data.asOf === first.data.asOf,
+      "stats: a failed write should leave the cache in place",
+    );
+
+    // Nor does a public write that succeeds but moves nothing stats counts:
+    // otherwise anyone could force a recomputation every other request.
+    const anyProposal = await get("/api/proposals?limit=1");
+    const tally = await post(
+      `/api/proposals/${anyProposal.data.proposals[0].id}/tally`,
+      undefined,
+      false,
+    );
+    assertStatus(tally.response, 200, "tally");
+    const afterTally = await get("/api/stats");
+    assert(
+      afterTally.data.asOf === first.data.asOf,
+      "stats: a read-only tally should leave the cache in place",
+    );
+
+    // Any successful write, not only the ones that recompute on purpose.
+    await createProposal({ votingPeriod: 60_000 });
+    const fresh = await get("/api/stats");
+    assert(fresh.data.asOf !== first.data.asOf, "stats: a successful write should drop the cache");
+    assert(
+      fresh.data.proposals.total === first.data.proposals.total + 1,
+      "stats: the new proposal should be counted after the write",
+    );
+    assert(
+      fresh.data.issues.total === first.data.issues.total + 5,
+      `stats: expected 5 more issue rows, got ${fresh.data.issues.total - first.data.issues.total}`,
+    );
+    assert(
+      fresh.data.issues.conditions === first.data.issues.conditions + 2,
+      `stats: 4 open rows of 2 conditions should add 2 conditions, got ${
+        fresh.data.issues.conditions - first.data.issues.conditions
+      }`,
+    );
+    assert(
+      fresh.data.issues.openRows === first.data.issues.openRows + 4,
+      `stats: the resolved probe row should not count as open, got ${
+        fresh.data.issues.openRows - first.data.issues.openRows
+      } more open rows`,
+    );
+    agree(await socketStats(), fresh.data, "after a write");
+
+    // A collection recomputes at once, so its event and the next read agree.
+    const collected = await post("/api/signals/collect");
+    assertStatus(collected.response, 200, "collect signals");
+    const afterCollect = await get("/api/stats");
+    assert(
+      afterCollect.data.signals.total + afterCollect.data.signals.synthetic.total ===
+        fresh.data.signals.total + fresh.data.signals.synthetic.total + collected.data.collected,
+      "stats: the collected rows should be counted after a collection",
+    );
+  } finally {
+    const cleanup = new Database(join(dataDir, "e2e.db"));
+    try {
+      cleanup.prepare(`DELETE FROM issues WHERE category = ?`).run(category);
+    } finally {
+      cleanup.close();
+    }
+    // Drop the cache again so nothing after this reads the probe rows.
+    await post("/api/signals/collect");
+  }
 }
 
 async function testNotFoundPaths() {
@@ -1917,6 +2274,7 @@ async function main() {
     await runTest("No success rate before anything is measured", testStatsBeforeAnyOutcome);
     await runTest("Admin endpoints require the key", testAdminAuthRequired);
     await runTest("Signals and issues", testSignalsAndIssues);
+    await runTest("Large issue pages leave signals out", testIssueListDefaults);
     await runTest("Detection counts only new rows", testDetectionCountsOnlyNewRows);
     await runTest("Legacy database upgrades and keeps health fast", testLegacyDatabaseUpgrade);
     await runTest("Proposal settings are validated", testProposalValidation);
@@ -1924,6 +2282,7 @@ async function main() {
     await runTest("Voting and delegation are off by default", testVotingOffByDefault);
     await runTest("Proposal responses carry a tally", testProposalListIncludesTally);
     await runTest("Proposal list marks synthetic proposals", testProposalListMarksSynthetic);
+    await runTest("Proposal list pages", testProposalListPaging);
     await runTest("Voting timeline is enforced", testVotingTimeline);
     await runTest("A vote without quorum expires", testUnquorateProposalExpires);
     await runTest("Execution and measured outcome", testExecutionAndMeasuredOutcome);
@@ -1937,6 +2296,7 @@ async function main() {
     // measured proof survived, and this one mints a second.
     await runTest("A fully successful outcome", testFullySuccessfulOutcome);
     await runTest("Stats", testStats);
+    await runTest("Stats cache is shared with the socket and dropped on writes", testStatsCache);
     await runTest("Unknown ids return 404", testNotFoundPaths);
     // Last: it deletes the observed signals earlier tests count.
     await runTest("Health is degraded while ingestion stalls", testHealthWhileIngestionStalls);

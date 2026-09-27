@@ -133,11 +133,16 @@ class APIClient {
     const params = new URLSearchParams();
     if (status) params.set("status", status);
     if (options?.limit) params.set("limit", String(options.limit));
-    // The API embeds every related signal by default, which a caller that only
-    // needs titles and times should not have to download.
-    if (options?.includeSignals === false) params.set("includeSignals", "false");
+    // Sent whenever it is given, either way: the API's default depends on the
+    // page size (signals embedded up to 50 rows, left out above), so only an
+    // explicit value makes the option mean what it says.
+    if (options?.includeSignals !== undefined) {
+      params.set("includeSignals", String(options.includeSignals));
+    }
     const query = params.toString();
-    return this.fetch<{ issues: any[]; count: number }>(
+    // signalsIncluded says whether `signals` was embedded: above 50 rows the
+    // API leaves it out unless asked.
+    return this.fetch<{ issues: any[]; count: number; signalsIncluded: boolean }>(
       `/api/issues${query ? `?${query}` : ""}`,
     );
   }
@@ -185,15 +190,30 @@ class APIClient {
   // production list is 164 rows and 3.36MB of uncompressed JSON (see
   // deploy/README.md), 143 of those rows are demo data the page hides by
   // default, and the API tallies every row it returns.
+  //
+  // limit (1-200) and offset page the filtered list; `count` is every match,
+  // `returned` the rows in this page. Pages are cut oldest first unless
+  // order is "desc" (newest createdAt first), so limit alone gets the oldest.
   async getProposals(
-    options: { status?: string; synthetic?: "include" | "exclude" | "only" } = {},
+    options: {
+      status?: string;
+      synthetic?: "include" | "exclude" | "only";
+      limit?: number;
+      offset?: number;
+      order?: "asc" | "desc";
+    } = {},
   ) {
     const params = new URLSearchParams();
     if (options.status) params.set("status", options.status);
     if (options.synthetic) params.set("synthetic", options.synthetic);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.offset !== undefined) params.set("offset", String(options.offset));
+    if (options.order) params.set("order", options.order);
     const qs = params.toString();
     const query = qs ? `?${qs}` : "";
-    return this.fetch<{ proposals: ProposalListItem[]; count: number }>(`/api/proposals${query}`);
+    return this.fetch<{ proposals: ProposalListItem[]; count: number; returned: number }>(
+      `/api/proposals${query}`,
+    );
   }
 
   async createProposal(decisionPacket: any, proposer: string, options?: any) {
@@ -316,7 +336,10 @@ class APIClient {
   async getStats() {
     return this.fetch<{
       signals: {
+        /** Stored observation rows — most are the previous minute repeated. */
         total: number;
+        /** Observed rows stored in the last 24 hours. */
+        lastDay: number;
         byCategory: { category: string; count: number }[];
         adapterCount: number;
         synthetic: {
@@ -325,10 +348,17 @@ class APIClient {
         };
       };
       issues: {
+        /** Issue rows in any status: detections, not distinct problems. */
         total: number;
+        /** Distinct conditions among open issues. */
+        conditions: number;
+        /** Open issue rows: the rows `conditions` is counted over. */
+        openRows: number;
         byStatus: { status: string; count: number }[];
         synthetic: {
           total: number;
+          conditions: number;
+          openRows: number;
           byStatus: { status: string; count: number }[];
         };
       };
@@ -337,11 +367,20 @@ class APIClient {
         active: number;
         passed: number;
         rejected: number;
-        synthetic: { total: number; active: number; passed: number; rejected: number };
+        expired: number;
+        synthetic: {
+          total: number;
+          active: number;
+          passed: number;
+          rejected: number;
+          expired: number;
+        };
       };
       // successRate is null until something has actually been measured —
       // render it as "no data", not as zero.
       outcomes: { totalProofs: number; successRate: number | null };
+      /** When the server computed these figures; cached for up to 30s. */
+      asOf: string;
     }>("/api/stats");
   }
 }

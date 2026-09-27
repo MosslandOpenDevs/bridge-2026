@@ -549,6 +549,18 @@ export const signalDb = {
   countByCategory: db.prepare(`
     SELECT category, COUNT(*) as count FROM signals WHERE synthetic = ? GROUP BY category
   `),
+
+  /**
+   * Observed rows whose timestamp is at or after the given ISO time. A range
+   * seek on idx_signals_synthetic_timestamp, so it costs the ~10k rows of a
+   * day rather than the whole table. `timestamp` is the collection time the
+   * adapter stamps, not the source's own date: over the day before the
+   * 2026-09-26 snapshot it counts 9,888 rows against 9,893 by created_at,
+   * which has no index.
+   */
+  countObservedSince: db.prepare(`
+    SELECT COUNT(*) as count FROM signals WHERE synthetic = 0 AND timestamp >= ?
+  `),
 };
 
 // Migrate existing database: add kind and direction columns if they don't exist
@@ -608,6 +620,21 @@ export const issueDb = {
   /** Pass 0 for observed issues, 1 for those detected on demo signals. */
   countByStatus: db.prepare(`
     SELECT status, COUNT(*) as count FROM issues WHERE synthetic = ? GROUP BY status
+  `),
+
+  /**
+   * Open issues, counted two ways over the same rows: `conditions` is one per
+   * fingerprint however many rows it has accumulated, `openRows` every open row.
+   * Pass 0 for observed issues, 1 for demo ones.
+   *
+   * Row counts overstate what is going on by the number of times each
+   * condition was re-detected before open issues were folded by fingerprint:
+   * the 2026-09-26 snapshot holds 754 open observed rows and 12 conditions.
+   * Both come from one WHERE so the pair always describes one population.
+   */
+  countOpen: db.prepare(`
+    SELECT COUNT(DISTINCT fingerprint) as conditions, COUNT(*) as openRows FROM issues
+    WHERE synthetic = ? AND status IN ('detected', 'deliberating', 'proposed')
   `),
 
   /**

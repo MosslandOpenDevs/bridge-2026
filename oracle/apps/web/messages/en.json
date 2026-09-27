@@ -35,7 +35,10 @@
   "dashboard": {
     "title": "Dashboard",
     "subtitle": "Real-time governance metrics and system status",
-    "totalSignals": "Total Signals",
+    "totalSignals": "Stored signal rows",
+    "signalRowsLastDay": "{count} stored in last 24h",
+    "issueConditions": "Open issue conditions",
+    "issueOpenRows": "{count} open rows recorded",
     "activeProposals": "Active Proposals",
     "successRate": "Success Rate",
     "recentSignals": "Recent Signals",
