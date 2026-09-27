@@ -156,7 +156,7 @@
     "pending": "Pending",
     "executed": "Executed",
     "labNoticeTitle": "AI-generated · non-binding",
-    "labNoticeBody": "These proposals are generated automatically by BRIDGE's AI agents as a lab experiment. Some content may not have been reviewed by a person; treat it as reference only. Voting here does not bind Mossland DAO.",
+    "labNoticeBody": "These proposals are generated automatically by BRIDGE's AI agents as a lab experiment. Some content may not have been reviewed by a person; treat it as reference only. Nothing here binds Mossland DAO.",
     "agoraNotice": "Mossland DAO's binding decisions are made on Agora.",
     "agoraLink": "Go to Agora",
     "showSynthetic": "Show demo data",
@@ -190,6 +190,9 @@
   "delegation": {
     "title": "Delegation Policies",
     "subtitle": "Automated voting delegation based on conditions",
+    "movedTitle": "Voting and delegation happen on Agora",
+    "movedBody": "BRIDGE does not take votes or delegations. Its proposals are AI-drafted and non-binding; Mossland DAO votes and delegates on Agora.",
+    "movedLink": "Go to Agora",
     "create": "Create Policy",
     "noPolicies": "No delegation policies",
     "createFirst": "Create your first delegation policy",

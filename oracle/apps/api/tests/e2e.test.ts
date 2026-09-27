@@ -169,6 +169,11 @@ async function startServer(overrides: Record<string, string> = {}): Promise<void
       AUTO_DELIBERATE_ENABLED: "",
       AUTO_PROPOSAL_ENABLED: "",
       OUTCOME_EVAL_ENABLED: "",
+      // BRIDGE's own voting is off by default (Mossland DAO votes on Agora),
+      // but the code stays behind VOTING_ENABLED and the governance tests keep
+      // exercising it. testVotingOffByDefault boots without this to pin the
+      // default.
+      VOTING_ENABLED: "1",
       // No chain access: demo weights, no signature requirement.
       MAINNET_RPC_URL: "off",
       REQUIRE_VOTE_SIGNATURE: "never",
@@ -888,6 +893,86 @@ async function testVotingIntegrity() {
     `tally: expected 150 for-votes, got ${tally.data.tally.forVotes}`,
   );
   assert(tally.data.tally.voteCount === 2, "tally: expected 2 ballots");
+}
+
+/**
+ * Voting and delegation moved to Agora: with VOTING_ENABLED left at its
+ * default, every vote and delegation write must answer 410 with a code and a
+ * link a client can act on, while the reads keep serving the history. Empty
+ * rather than omitted, as with the autonomous-loop flags, so an apps/api/.env
+ * that turns voting on cannot change what this pins.
+ */
+async function testVotingOffByDefault() {
+  // Created while voting is on, so the DELETE below has something real to refuse.
+  const owner = voterAddress(0xd1);
+  const conditions = [
+    { field: "decisionPacket.issue.category", operator: "in", value: ["governance"] },
+  ];
+  const created = await post(
+    "/api/delegations",
+    { delegator: owner, delegate: "risk-agent", conditions },
+    false,
+  );
+  assertStatus(created.response, 201, "delegation while voting is on");
+
+  stopServer(true);
+  await sleep(500);
+  const logFrom = serverLog.length;
+  await startServer({ VOTING_ENABLED: "" });
+  try {
+    assert(
+      await logContains("Voting and delegation: DISABLED", logFrom),
+      'startup log should say "Voting and delegation: DISABLED"',
+    );
+
+    const assertMoved = (context: string, result: { response: Response; data: any }) => {
+      assertStatus(result.response, 410, context);
+      assert(
+        result.data?.code === "VOTING_MOVED_TO_AGORA",
+        `${context}: expected code VOTING_MOVED_TO_AGORA, got ${result.data?.code}`,
+      );
+      assert(
+        result.data?.agoraUrl === "https://agora.moss.land",
+        `${context}: expected agoraUrl https://agora.moss.land, got ${result.data?.agoraUrl}`,
+      );
+    };
+
+    // Admin proposal creation is unaffected; only the public writes close.
+    const proposal = await createProposal({ votingPeriod: 60_000 });
+    assertMoved(
+      "vote with voting off",
+      await post(
+        `/api/proposals/${proposal.id}/vote`,
+        { voter: voterAddress(0xd2), choice: "for", weight: "100" },
+        false,
+      ),
+    );
+    assertMoved(
+      "delegation with voting off",
+      await post(
+        "/api/delegations",
+        { delegator: voterAddress(0xd3), delegate: "risk-agent", conditions },
+        false,
+      ),
+    );
+    assertMoved(
+      "revocation with voting off",
+      await del(`/api/delegations/${created.data.policy.id}`, undefined, false),
+    );
+
+    const detail = await get(`/api/proposals/${proposal.id}`);
+    assertStatus(detail.response, 200, "proposal detail with voting off");
+    const history = await get(`/api/delegations?delegator=${owner}`);
+    assertStatus(history.response, 200, "delegation history with voting off");
+    assert(
+      history.data.policies.some((p: any) => p.id === created.data.policy.id && p.active),
+      "a refused revocation must leave the stored delegation as it was",
+    );
+  } finally {
+    stopServer(true);
+    await sleep(500);
+    await startServer();
+  }
 }
 
 async function testProposalListIncludesTally() {
@@ -1678,6 +1763,7 @@ async function main() {
     await runTest("Legacy database upgrades and keeps health fast", testLegacyDatabaseUpgrade);
     await runTest("Proposal settings are validated", testProposalValidation);
     await runTest("Voting integrity", testVotingIntegrity);
+    await runTest("Voting and delegation are off by default", testVotingOffByDefault);
     await runTest("Proposal responses carry a tally", testProposalListIncludesTally);
     await runTest("Proposal list marks synthetic proposals", testProposalListMarksSynthetic);
     await runTest("Voting timeline is enforced", testVotingTimeline);
