@@ -522,7 +522,7 @@ async function testBindHostAndTrustedProxy() {
 
   // Same forged headers from a peer that is not the named proxy: they are
   // ignored, every request counts against the caller, and the fourth is 429.
-  const direct = await bootSide({ ...limit, TRUST_PROXY: "100.107.17.114" });
+  const direct = await bootSide({ ...limit, TRUST_PROXY: "192.0.2.20" });
   try {
     assert(direct.exitCode === null, `TRUST_PROXY=<ip> should boot:\n${direct.log()}`);
     const statuses: number[] = [];
@@ -537,7 +537,7 @@ async function testBindHostAndTrustedProxy() {
 }
 
 async function testInvalidTrustProxyStopsBoot() {
-  for (const value of ["true", "10.0.0.1, 2", "10.0.0.0/33", "nginx.internal"]) {
+  for (const value of ["true", "192.0.2.1, 2", "192.0.2.0/33", "nginx.internal"]) {
     const side = await bootSide({ TRUST_PROXY: value });
     if (side.exitCode === null) side.stop();
     assert(side.exitCode === 1, `TRUST_PROXY="${value}" should stop the boot, exit code ${side.exitCode}`);

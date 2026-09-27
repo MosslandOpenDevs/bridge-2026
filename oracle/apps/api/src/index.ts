@@ -446,7 +446,7 @@ const TRUST_PROXY_NAMES = new Set(["loopback", "linklocal", "uniquelocal"]);
 function refuseTrustProxy(raw: string, detail: string): never {
   console.error(
     `❌ Refusing to start: TRUST_PROXY must be a hop count (e.g. 1) or a comma-separated ` +
-      `list of proxy IPs/CIDRs (e.g. 100.107.17.114), got "${raw}": ${detail}`,
+      `list of proxy IPs/CIDRs (e.g. 192.0.2.20), got "${raw}": ${detail}`,
   );
   process.exit(1);
 }
@@ -460,7 +460,7 @@ function resolveTrustProxy(raw: string | undefined): number | string[] {
     const slash = entry.indexOf("/");
     const address = slash === -1 ? entry : entry.slice(0, slash);
     // node:net rather than proxy-addr's parser, which also takes "0x7f000001"
-    // and bare integers as IPv4, so "10.0.0.1,2" would mean 0.0.0.2.
+    // and bare integers as IPv4, so "192.0.2.1,2" would mean 0.0.0.2.
     if (isIP(address) === 0) refuseTrustProxy(raw ?? "", `"${entry}" is not an IP address or CIDR`);
   }
   return entries;
