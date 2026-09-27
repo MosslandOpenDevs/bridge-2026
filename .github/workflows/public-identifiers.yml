@@ -1,0 +1,52 @@
+name: public-identifiers
+
+# This repository is public, and so are its commit messages and pull request
+# text. See "Deployment details stay private" in CONTRIBUTING.md. Kept out of
+# ci.yml so that editing a PR description re-runs only this check, and so the
+# deploy gate (DEPLOY_REQUIRED_CHECKS=oracle,deploy-script) is unaffected.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: public-identifiers-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  public-identifiers:
+    name: public-identifiers
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The commit-message check walks the pushed or proposed range.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: ShellCheck
+        run: shellcheck --severity=warning .github/scripts/check-public-identifiers.sh
+
+      - name: Detector regression tests
+        run: python3 .github/scripts/test-public-identifiers.py
+
+      # The script reads PR text from GITHUB_EVENT_PATH. Step env is logged.
+      - name: Files, commit messages and PR text
+        env:
+          PR_RANGE: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            export RANGE="${PR_RANGE}"
+          elif [ -n "${PUSH_BEFORE}" ] && [ "${PUSH_BEFORE}" != "0000000000000000000000000000000000000000" ]; then
+            export RANGE="${PUSH_BEFORE}..${PUSH_AFTER}"
+          fi
+          .github/scripts/check-public-identifiers.sh
