@@ -138,6 +138,10 @@ async function startServer(overrides: Record<string, string> = {}): Promise<void
     env: {
       ...process.env,
       PORT: String(port),
+      // Listen where baseUrl points, even if apps/api/.env binds a tailnet
+      // address; empty for the same dotenv reason as the LLM keys below.
+      HOST: "",
+      TRUST_PROXY: "",
       DB_PATH: join(dataDir, "e2e.db"),
       ADMIN_API_KEY: ADMIN_KEY,
       NODE_ENV: "test",
@@ -358,6 +362,158 @@ async function testAutonomousLoopOffByDefault() {
     "Outcome evaluation: DISABLED",
   ]) {
     assert(await logContains(line), `startup log should say "${line}"`);
+  }
+}
+
+/**
+ * Boot a second, throwaway API process with its own port and database, for
+ * tests about how the process starts rather than what it serves. Resolves once
+ * GET /health answers (not /api/health, which the global rate limiter counts)
+ * or with the exit code if the process stops first.
+ */
+async function bootSide(
+  env: Record<string, string>,
+): Promise<{ url: string; exitCode: number | null; log: () => string; stop: () => void }> {
+  const dir = mkdtempSync(join(tmpdir(), "oracle-side-"));
+  const port = await freePort();
+  const out: string[] = [];
+  const child = spawn(process.execPath, [join(API_ROOT, "dist", "index.js")], {
+    cwd: API_ROOT,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "",
+      TRUST_PROXY: "",
+      DB_PATH: join(dir, "side.db"),
+      ADMIN_API_KEY: ADMIN_KEY,
+      NODE_ENV: "test",
+      ENABLE_MOCK_SIGNALS: "0",
+      ANTHROPIC_API_KEY: "",
+      OPENAI_API_KEY: "",
+      LLM_PROVIDER: "",
+      OLLAMA_BASE_URL: "",
+      SIGNAL_COLLECT_INTERVAL: "0",
+      ISSUE_DETECT_INTERVAL: "0",
+      AUTO_FINALIZE_INTERVAL: "0",
+      AUTO_DELIBERATE_ENABLED: "",
+      AUTO_PROPOSAL_ENABLED: "",
+      OUTCOME_EVAL_ENABLED: "",
+      MAINNET_RPC_URL: "off",
+      ...env,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", (c) => out.push(String(c)));
+  child.stderr?.on("data", (c) => out.push(String(c)));
+  // 'close', not 'exit': only then has the refusal message been read off the pipe.
+  const closed = new Promise((resolve) => child.on("close", resolve));
+  const stop = () => {
+    child.kill("SIGTERM");
+    rmSync(dir, { recursive: true, force: true });
+  };
+  const url = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) {
+      await closed;
+      stop();
+      return { url, exitCode: child.exitCode, log: () => out.join(""), stop };
+    }
+    try {
+      if ((await fetch(`${url}/health`)).ok) {
+        return { url, exitCode: null, log: () => out.join(""), stop };
+      }
+    } catch {
+      // not up yet
+    }
+    await sleep(100);
+  }
+  stop();
+  throw new Error(`side API neither came up nor exited:\n${out.join("")}`);
+}
+
+/** Whether this host can listen on ::1, i.e. has an IPv6 loopback at all. */
+async function hasIpv6Loopback(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const srv = createServer();
+    srv.once("error", () => resolve(false));
+    srv.listen(0, "::1", () => srv.close(() => resolve(true)));
+  });
+}
+
+/**
+ * HOST binds one address, and TRUST_PROXY decides whose X-Forwarded-For moves
+ * a caller into another rate-limit bucket. The second half is the reason the
+ * setting exists: with the default of one hop, anything reaching the port
+ * without nginx can name a new address per request and never be limited.
+ */
+async function testBindHostAndTrustedProxy() {
+  // Three /api/ requests a minute per client, so a shared bucket shows at once.
+  const limit = { RATE_LIMIT_GLOBAL: "3" };
+  const forged = (url: string, i: number) =>
+    fetch(`${url}/api/health`, { headers: { "X-Forwarded-For": `203.0.113.${i}` } });
+
+  const bound = await bootSide({ ...limit, HOST: "127.0.0.1", TRUST_PROXY: "127.0.0.1" });
+  try {
+    assert(bound.exitCode === null, `HOST=127.0.0.1 should boot:\n${bound.log()}`);
+    const health = await fetch(`${bound.url}/api/health`);
+    assertStatus(health, 200, "health on the bound address");
+    assert((await health.json()).service === "bridge", "health: bound server should answer as bridge");
+    const port = new URL(bound.url).port;
+    assert(
+      bound.log().includes(`Listening on 127.0.0.1:${port}, X-Forwarded-For trusted from 127.0.0.1`),
+      `startup log should name the bound address and the trusted proxy:\n${bound.log()}`,
+    );
+    // Answering on 127.0.0.1 is also what a wildcard bind does. The bind is
+    // only real if another local address is refused; ::1 is the one every
+    // dual-stack host has (skipped where it does not exist).
+    if (await hasIpv6Loopback()) {
+      const other = await fetch(`http://[::1]:${port}/health`).then(
+        (res) => `answered ${res.status}`,
+        (error: unknown) => {
+          const cause = (error as { cause?: { code?: string } }).cause;
+          return cause?.code ?? String(error);
+        },
+      );
+      assert(other === "ECONNREFUSED", `HOST=127.0.0.1 should refuse [::1]:${port}, got ${other}`);
+    } else {
+      console.log("    (no ::1 on this host; skipped the other-interface check)");
+    }
+    // The caller is the trusted proxy here, so each forwarded address is a
+    // client of its own and none of them reaches the limit.
+    for (let i = 1; i <= 5; i++) {
+      assertStatus(await forged(bound.url, i), 200, `forwarded client ${i} via the trusted proxy`);
+    }
+  } finally {
+    bound.stop();
+  }
+
+  // Same forged headers from a peer that is not the named proxy: they are
+  // ignored, every request counts against the caller, and the fourth is 429.
+  const direct = await bootSide({ ...limit, TRUST_PROXY: "100.107.17.114" });
+  try {
+    assert(direct.exitCode === null, `TRUST_PROXY=<ip> should boot:\n${direct.log()}`);
+    const statuses: number[] = [];
+    for (let i = 1; i <= 4; i++) statuses.push((await forged(direct.url, i)).status);
+    assert(
+      statuses.join(",") === "200,200,200,429",
+      `a direct caller should not escape the limit by forging X-Forwarded-For, got ${statuses.join(",")}`,
+    );
+  } finally {
+    direct.stop();
+  }
+}
+
+async function testInvalidTrustProxyStopsBoot() {
+  for (const value of ["true", "10.0.0.1, 2", "10.0.0.0/33", "nginx.internal"]) {
+    const side = await bootSide({ TRUST_PROXY: value });
+    if (side.exitCode === null) side.stop();
+    assert(side.exitCode === 1, `TRUST_PROXY="${value}" should stop the boot, exit code ${side.exitCode}`);
+    assert(
+      side.log().includes(`Refusing to start: TRUST_PROXY must be a hop count`) &&
+        side.log().includes(`got "${value}"`),
+      `TRUST_PROXY="${value}" should be named in the refusal:\n${side.log()}`,
+    );
   }
 }
 
@@ -1753,6 +1909,8 @@ async function main() {
   try {
     await runTest("Health check", testHealthCheck);
     await runTest("Autonomous loop is off by default", testAutonomousLoopOffByDefault);
+    await runTest("HOST binds one address and TRUST_PROXY names the proxy", testBindHostAndTrustedProxy);
+    await runTest("An invalid TRUST_PROXY stops the boot", testInvalidTrustProxyStopsBoot);
     await runTest("Health ignores synthetic signals", testHealthIgnoresSyntheticSignals);
     await runTest("Health staleness rule", testHealthStalenessRule);
     await runTest("Health reports down when the database cannot be read", testHealthReportsDown);
