@@ -22,7 +22,7 @@ import {
   saveProof,
   hydrate,
 } from "./governance-store.js";
-import {
+import db, {
   signalDb,
   issueDb,
   proposalDb,
@@ -50,6 +50,7 @@ import {
 // Import blockchain service
 import { blockchainService } from "./blockchain.js";
 import { deriveHealth, healthHttpStatus, resolveHealthConfig } from "./health.js";
+import { loadMosslandAdapterState } from "./mossland-state.js";
 
 // Import security utilities
 import {
@@ -206,10 +207,12 @@ if (ETHERSCAN_API_KEY) {
   console.log("✅ EtherscanAdapter registered");
 }
 
-// MosslandAdapter doesn't require API key
+// MosslandAdapter doesn't require API key. Seeded from the stored signals so a
+// restart does not announce an old disclosure as new.
 const mosslandAdapter = new MosslandAdapter({
   apiUrl: MOSSLAND_API_URL,
   language: SIGNAL_LANGUAGE,
+  state: loadMosslandAdapterState(db),
 });
 signalRegistry.registerAdapter(mosslandAdapter);
 console.log("✅ MosslandAdapter registered");

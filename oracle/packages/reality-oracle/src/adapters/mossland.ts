@@ -4,6 +4,82 @@ import { BaseAdapter } from "./base.js";
 export interface MosslandAdapterConfig {
   apiUrl?: string;
   language?: "en" | "ko";
+  /** What earlier runs already reported; see MosslandAdapterState. */
+  state?: MosslandAdapterState;
+}
+
+/**
+ * What the adapter has already reported, carried across restarts.
+ *
+ * This used to live in memory only, so every deploy or crash-restart announced
+ * the newest disclosure as "new" again. The API seeds it from the rows it has
+ * stored (MosslandAdapter.stateFromStoredSignals) before the first fetch.
+ */
+export interface MosslandAdapterState {
+  /**
+   * disclosureKey() or disclosureAlias() of every disclosure already
+   * announced. Bare titles are accepted too: rows written before keys were
+   * stored carry only the title.
+   */
+  announcedDisclosures?: Iterable<string>;
+  /** priceAlertKey() of every price alert already raised. */
+  raisedPriceAlerts?: Iterable<string>;
+}
+
+/** A stored signal row, as much of it as seeding the state needs. */
+export interface StoredMosslandSignal {
+  category: string;
+  value: number;
+  description: string;
+  /** The JSON column as stored, or already parsed. */
+  metadata?: string | Record<string, unknown> | null;
+}
+
+/** A normalized signal plus the metadata the API persists alongside it. */
+export type MosslandNormalizedSignal = NormalizedSignal & {
+  metadata?: Record<string, unknown>;
+};
+
+/**
+ * One event per disclosure document, value 1. Kept out of the total's
+ * category on purpose: the two used to share `mossland_disclosure`, so the
+ * anomaly detector z-scored a stream of ~53s against the occasional 1 and
+ * reported the announcement as an outlier of the total.
+ */
+export const DISCLOSURE_EVENT_CATEGORY = "mossland_disclosure_published";
+/** The running number of published disclosures, a gauge. */
+export const DISCLOSURE_TOTAL_CATEGORY = "mossland_disclosure";
+/** A move of more than PRICE_ALERT_THRESHOLD against the previous close. */
+export const PRICE_ALERT_CATEGORY = "moc_price_alert";
+const PRICE_ALERT_THRESHOLD = 0.05;
+
+/**
+ * One price alert per trading day and direction. The day is Upbit's
+ * `trade_date`: change_rate is measured against the previous close, which
+ * Upbit takes at 00:00 UTC (09:00 KST), so its trading day runs 09:00 KST to
+ * 09:00 KST and the move being alerted on belongs to exactly one of them.
+ */
+export function priceAlertKey(tradeDate: string, direction: "RISE" | "FALL"): string {
+  return `${tradeDate}:${direction}`;
+}
+
+/**
+ * Identity of a disclosure document that survives restarts and list reorders.
+ * The list's `date` is month-granular ("2026.09"), so it cannot tell two
+ * documents from the same month apart; the URL can.
+ */
+export function disclosureKey(doc: { url?: string; title: string; date: string }): string {
+  const url = doc.url?.trim();
+  return url ? url : disclosureAlias(doc);
+}
+
+/**
+ * A second identity for the same document, so one whose link is rewritten
+ * upstream (the list points at GitHub blob paths, web.archive.org snapshots,
+ * medium.com and more) is still recognised by its title and month.
+ */
+export function disclosureAlias(doc: { title: string; date: string }): string {
+  return `${doc.title}|${doc.date}`;
 }
 
 const translations = {
@@ -68,9 +144,36 @@ interface TickerData {
   acc_trade_price_24h: number;
   acc_trade_volume_24h: number;
   timestamp: number;
+  /** "RISE" | "EVEN" | "FALL" against the previous close. */
   change: string;
+  /** Unsigned: a 6% fall and a 6% rise both read 0.06. */
   change_rate: number;
+  /** The same rate with its sign, negative for a fall. */
+  signed_change_rate?: number;
   change_price: number;
+  /** YYYYMMDD in UTC: the trading day change_rate is measured over. */
+  trade_date?: string;
+}
+
+/**
+ * The day's change as a signed fraction. Upbit's change_rate is an absolute
+ * value, so reading it alone reported every fall as a rise of the same size;
+ * signed_change_rate carries the sign, and `change` recovers it if a payload
+ * ever lacks that field.
+ */
+function signedChangeRate(ticker: TickerData): number {
+  if (typeof ticker.signed_change_rate === "number") return ticker.signed_change_rate;
+  const magnitude = Math.abs(ticker.change_rate || 0);
+  return ticker.change === "FALL" ? -magnitude : magnitude;
+}
+
+/** Upbit's trading day as YYYYMMDD; see priceAlertKey. */
+function tradingDay(ticker: TickerData): string {
+  if (typeof ticker.trade_date === "string" && /^\d{8}$/.test(ticker.trade_date)) {
+    return ticker.trade_date;
+  }
+  const at = Number.isFinite(ticker.timestamp) ? ticker.timestamp : Date.now();
+  return new Date(at).toISOString().slice(0, 10).replace(/-/g, "");
 }
 
 interface Transaction {
@@ -100,7 +203,8 @@ export class MosslandAdapter extends BaseAdapter {
   readonly source: SignalSource = "api";
 
   private config: MosslandAdapterConfig;
-  private lastDisclosureDate: string = "";
+  private announcedDisclosures: Set<string>;
+  private raisedPriceAlerts: Set<string>;
   private lastPrice: number = 0;
 
   constructor(config: MosslandAdapterConfig = {}) {
@@ -109,6 +213,48 @@ export class MosslandAdapter extends BaseAdapter {
       apiUrl: config.apiUrl || DEFAULT_API_URL,
       language: config.language || "ko",
     };
+    this.announcedDisclosures = new Set(config.state?.announcedDisclosures ?? []);
+    this.raisedPriceAlerts = new Set(config.state?.raisedPriceAlerts ?? []);
+  }
+
+  /**
+   * Rebuild the adapter's state from the signals an earlier run stored.
+   *
+   * Reads new-style events by their metadata key and, for the transition,
+   * the legacy events that shared the total's category (value 1, described as
+   * "New disclosure: <title>" in either language), and price alerts by their
+   * metadata key. Rows it does not recognise are ignored rather than guessed
+   * at; legacy price alerts carry no key and are among them.
+   */
+  static stateFromStoredSignals(rows: Iterable<StoredMosslandSignal>): MosslandAdapterState {
+    const announced = new Set<string>();
+    const raised = new Set<string>();
+    for (const row of rows) {
+      if (row.category === PRICE_ALERT_CATEGORY) {
+        const key = parseMetadata(row.metadata)?.key;
+        if (typeof key === "string" && key) raised.add(key);
+        continue;
+      }
+      if (row.category === DISCLOSURE_EVENT_CATEGORY) {
+        const key = parseMetadata(row.metadata)?.key;
+        if (typeof key === "string" && key) {
+          announced.add(key);
+          const { title, date } = parseMetadata(row.metadata) ?? {};
+          if (typeof title === "string" && typeof date === "string") {
+            announced.add(disclosureAlias({ title, date }));
+          }
+          continue;
+        }
+      }
+      if (
+        row.category === DISCLOSURE_EVENT_CATEGORY ||
+        (row.category === DISCLOSURE_TOTAL_CATEGORY && row.value === 1)
+      ) {
+        const title = legacyDisclosureTitle(row.description);
+        if (title) announced.add(title);
+      }
+    }
+    return { announcedDisclosures: announced, raisedPriceAlerts: raised };
   }
 
   async fetch(): Promise<RawSignal[]> {
@@ -147,20 +293,17 @@ export class MosslandAdapter extends BaseAdapter {
       const data = await response.json() as Disclosure[];
 
       if (Array.isArray(data) && data.length > 0) {
-        // Check for new disclosures
-        const latestDate = data[0].date;
-        if (latestDate !== this.lastDisclosureDate) {
-          this.lastDisclosureDate = latestDate;
-
-          // Create signal for new disclosure
-          const latest = data[0];
+        // Oldest first, so a batch found after downtime is stored in the
+        // order it was published.
+        for (const doc of this.takeNewDisclosures(data).reverse()) {
           signals.push(this.createRawSignal(
             `mossland-disclosure-${Date.now()}`,
             {
               type: "disclosure",
-              title: latest.title,
-              date: latest.date,
-              url: latest.url,
+              title: doc.title,
+              date: doc.date,
+              url: doc.url,
+              key: disclosureKey(doc),
               isNew: true,
             },
             {
@@ -190,6 +333,35 @@ export class MosslandAdapter extends BaseAdapter {
     return signals;
   }
 
+  /**
+   * The documents on this list that have not been announced, newest first.
+   *
+   * The list is newest first (checked live: 0 of 53 out of order), so only the
+   * unknown documents listed above the newest known one count as new. The rule
+   * is the same on the first read after a restart (what was published while
+   * the process was down) and while running. "Every unknown document is new"
+   * would re-announce old documents whenever upstream rewrites their links, so
+   * everything below the newest known document is treated as history. If
+   * nothing on the list is known there is nothing to tell new from old by, and
+   * the list is taken as the baseline silently: missing one announcement on a
+   * fresh install beats announcing fifty.
+   */
+  private takeNewDisclosures(docs: Disclosure[]): Disclosure[] {
+    const listed = docs.filter((d) => d && typeof d.title === "string");
+    const seen = this.announcedDisclosures;
+    const known = (d: Disclosure) =>
+      seen.has(disclosureKey(d)) || seen.has(disclosureAlias(d)) || seen.has(d.title);
+
+    const newestKnown = listed.findIndex(known);
+    const fresh = newestKnown === -1 ? [] : listed.slice(0, newestKnown);
+
+    for (const doc of listed) {
+      seen.add(disclosureKey(doc));
+      seen.add(disclosureAlias(doc));
+    }
+    return fresh;
+  }
+
   private async fetchMarketData(): Promise<RawSignal[]> {
     const signals: RawSignal[] = [];
 
@@ -201,6 +373,7 @@ export class MosslandAdapter extends BaseAdapter {
 
       if (Array.isArray(tickerData) && tickerData.length > 0) {
         const ticker = tickerData[0] as TickerData;
+        const changeRate = signedChangeRate(ticker);
         const priceChange = this.lastPrice > 0
           ? ((ticker.trade_price - this.lastPrice) / this.lastPrice) * 100
           : 0;
@@ -212,7 +385,7 @@ export class MosslandAdapter extends BaseAdapter {
             price: ticker.trade_price,
             priceChange,
             change: ticker.change,
-            changeRate: ticker.change_rate * 100,
+            changeRate: changeRate * 100,
             changePrice: ticker.change_price,
             volume24h: ticker.acc_trade_volume_24h,
             volumeKrw24h: ticker.acc_trade_price_24h,
@@ -225,18 +398,33 @@ export class MosslandAdapter extends BaseAdapter {
 
         this.lastPrice = ticker.trade_price;
 
-        // Alert for significant price changes
-        if (Math.abs(ticker.change_rate) > 0.05) { // 5% change
-          signals.push(this.createRawSignal(
-            `mossland-price-alert-${Date.now()}`,
-            {
-              type: "price_alert",
-              price: ticker.trade_price,
-              changeRate: ticker.change_rate * 100,
-              direction: ticker.change,
-              isSignificant: true,
+        // Alert when the day's move crosses the threshold, once per direction.
+        // This used to fire on every tick while the move stayed past 5%, so
+        // one volatile day became hundreds of "alerts" (8,373 stored over 34
+        // day-directions), each a fresh input to the detectors.
+        if (Math.abs(changeRate) > PRICE_ALERT_THRESHOLD) {
+          const direction = changeRate < 0 ? "FALL" : "RISE";
+          const tradeDate = tradingDay(ticker);
+          const key = priceAlertKey(tradeDate, direction);
+          if (!this.raisedPriceAlerts.has(key)) {
+            // Earlier days can no longer match; keep the set to today's keys.
+            for (const raised of this.raisedPriceAlerts) {
+              if (!raised.startsWith(`${tradeDate}:`)) this.raisedPriceAlerts.delete(raised);
             }
-          ));
+            this.raisedPriceAlerts.add(key);
+            signals.push(this.createRawSignal(
+              `mossland-price-alert-${Date.now()}`,
+              {
+                type: "price_alert",
+                price: ticker.trade_price,
+                changeRate: changeRate * 100,
+                direction,
+                tradeDate,
+                key,
+                isSignificant: true,
+              }
+            ));
+          }
         }
       }
 
@@ -314,7 +502,13 @@ export class MosslandAdapter extends BaseAdapter {
         ));
       }
 
-      // Fetch recent transactions
+      // Fetch recent transactions.
+      //
+      // Dormant: the endpoint answers with a bare array of the last 10
+      // transfers, not { value: [...] }, so this branch never emits. Parsing
+      // the array is not the fix it looks like — `count` would be 10 on every
+      // tick, one constant row a minute that tells nobody anything. Reviving
+      // it wants a real measure (transfers newer than the last seen txHash).
       const lastTxUrl = `${this.config.apiUrl}/api/getLastTx`;
       const lastTxResponse = await fetch(lastTxUrl);
       const lastTxData = await lastTxResponse.json() as LastTxResponse;
@@ -375,16 +569,18 @@ export class MosslandAdapter extends BaseAdapter {
     return signals;
   }
 
-  normalize(signal: RawSignal): NormalizedSignal {
+  normalize(signal: RawSignal): MosslandNormalizedSignal {
     const data = signal.data as {
       type: string;
       title?: string;
       date?: string;
       url?: string;
+      key?: string;
       isNew?: boolean;
       price?: number;
       changeRate?: number;
       direction?: string;
+      tradeDate?: string;
       isSignificant?: boolean;
       marketCapKrw?: number;
       marketCapUsd?: number;
@@ -406,18 +602,22 @@ export class MosslandAdapter extends BaseAdapter {
     let value: number;
     let unit: string;
     let description: string;
+    let metadata: Record<string, unknown> | undefined;
 
     switch (data.type) {
       case "disclosure":
-        category = "mossland_disclosure";
+        category = DISCLOSURE_EVENT_CATEGORY;
         severity = "high";
         value = 1;
         unit = t.unit.count;
         description = `${t.newDisclosure}: ${data.title}`;
+        // Stored with the row, which is what lets the next process know this
+        // document has already been announced.
+        metadata = { key: data.key, url: data.url, title: data.title, date: data.date };
         break;
 
       case "disclosure_stats":
-        category = "mossland_disclosure";
+        category = DISCLOSURE_TOTAL_CATEGORY;
         severity = "low";
         value = data.totalCount || 0;
         unit = t.unit.count;
@@ -439,13 +639,15 @@ export class MosslandAdapter extends BaseAdapter {
         break;
 
       case "price_alert":
-        category = "moc_price_alert";
+        category = PRICE_ALERT_CATEGORY;
         severity = Math.abs(data.changeRate || 0) > 10 ? "critical" : "high";
         value = data.changeRate || 0;
         unit = t.unit.percent;
         description = t.priceAlert
           .replace("{direction}", data.direction === "RISE" ? t.rise : t.fall)
           .replace("{change}", Math.abs(data.changeRate || 0).toFixed(2));
+        // The key is what stops a restart from raising today's alert again.
+        metadata = { key: data.key, tradeDate: data.tradeDate, direction: data.direction };
         break;
 
       case "market_overview":
@@ -502,7 +704,8 @@ export class MosslandAdapter extends BaseAdapter {
         description = "Unknown Mossland signal";
     }
 
-    return this.createNormalizedSignal(signal, category, severity, value, unit, description);
+    const normalized = this.createNormalizedSignal(signal, category, severity, value, unit, description);
+    return metadata ? { ...normalized, metadata } : normalized;
   }
 
   private formatKrw(amount: number): string {
@@ -524,4 +727,29 @@ export class MosslandAdapter extends BaseAdapter {
     if (amount >= 1000) return "$" + (amount / 1000).toFixed(1) + "K";
     return "$" + amount.toFixed(0);
   }
+}
+
+function parseMetadata(
+  metadata: StoredMosslandSignal["metadata"],
+): Record<string, unknown> | null {
+  if (!metadata) return null;
+  if (typeof metadata !== "string") return metadata;
+  try {
+    const parsed = JSON.parse(metadata);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The title out of "New disclosure: <title>" / "새 공시: <title>", else null. */
+function legacyDisclosureTitle(description: string): string | null {
+  for (const t of Object.values(translations)) {
+    const prefix = `${t.newDisclosure}: `;
+    if (description.startsWith(prefix)) {
+      const title = description.slice(prefix.length);
+      return title || null;
+    }
+  }
+  return null;
 }
