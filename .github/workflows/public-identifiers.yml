@@ -34,11 +34,12 @@ jobs:
       - name: ShellCheck
         run: shellcheck --severity=warning .github/scripts/check-public-identifiers.sh
 
-      # Title and body arrive through env, never interpolated into the script.
+      - name: Detector regression tests
+        run: python3 .github/scripts/test-public-identifiers.py
+
+      # The script reads PR text from GITHUB_EVENT_PATH. Step env is logged.
       - name: Files, commit messages and PR text
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
           PR_RANGE: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_AFTER: ${{ github.sha }}

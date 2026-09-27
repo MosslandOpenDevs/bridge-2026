@@ -9,13 +9,21 @@
 #   RANGE     commits whose messages to check, e.g. "<base>..<head>"
 #   PR_TITLE  pull request title
 #   PR_BODY   pull request body
+#   GITHUB_EVENT_PATH  GitHub event JSON; overrides PR_TITLE and PR_BODY
 set -euo pipefail
+
+# Step-level env values are printed in the public Actions log. Read PR text
+# from the event file here so only the locations reported below reach stdout.
+if [ -n "${GITHUB_EVENT_PATH:-}" ]; then
+  PR_TITLE=$(jq -r '.pull_request.title // empty' "${GITHUB_EVENT_PATH}")
+  PR_BODY=$(jq -r '.pull_request.body // empty' "${GITHUB_EVENT_PATH}")
+fi
 
 # perl -ne program: prints "<file>:<line>" (or just "<line>" for stdin) for
 # each line that needs attention.
 FLAG='
-  my $hit = /[A-Za-z0-9-]+\.ts\.net\b/;
-  while (!$hit && /(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])/g) {
+  my $hit = /[A-Za-z0-9-]+\.ts\.net\b/i;
+  while (!$hit && /(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?!\d|\.\d)/g) {
     $hit = $1 !~ /^(?:127\.|0\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)/;
   }
   print(($ARGV eq "-" ? "" : "$ARGV:") . "$.\n") if $hit;
@@ -31,12 +39,14 @@ report() {
 while IFS= read -r loc; do
   report "file ${loc}"
 done < <(
-  git grep -I -l -z -E '([0-9]{1,3}\.){3}[0-9]{1,3}|\.ts\.net' -- . ':!oracle/pnpm-lock.yaml' \
+  git grep -I -i -l -z -E '([0-9]{1,3}\.){3}[0-9]{1,3}|\.ts\.net' -- . ':!oracle/pnpm-lock.yaml' \
     | xargs -0 -r perl -ne "${FLAG}"
 )
 
 if [ -n "${RANGE:-}" ]; then
-  for sha in $(git rev-list "${RANGE}"); do
+  # An assignment propagates a failed lookup; a for-loop substitution does not.
+  commits=$(git rev-list "${RANGE}")
+  for sha in ${commits}; do
     while IFS= read -r n; do
       report "commit ${sha:0:12} message line ${n}"
     done < <(git log -1 --format=%B "${sha}" | perl -ne "${FLAG}")
