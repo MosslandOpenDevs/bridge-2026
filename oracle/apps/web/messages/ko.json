@@ -86,7 +86,27 @@
       "medium": "보통",
       "low": "낮음"
     },
-    "maxDisplayNote": "최근 {max}개의 신호만 표시됩니다"
+    "maxDisplayNote": "최근 {max}개의 신호만 표시됩니다",
+    "noSignalsPublic": "수집기가 기록하는 대로 신호가 여기에 표시됩니다.",
+    "telemetry": "텔레메트리",
+    "unknownCategory": "미분류",
+    "blockPrefix": "블록 #",
+    "fields": {
+      "signalId": "신호 ID",
+      "originalId": "원본 ID",
+      "txHash": "트랜잭션 해시",
+      "blockNumber": "블록 번호",
+      "apiEndpoint": "API 엔드포인트",
+      "rawData": "원본 데이터"
+    },
+    "newCollected": "새 신호 {count}개 수집됨",
+    "moreCategories": "+{count}개 더",
+    "clearSearch": "검색어 지우기",
+    "showDetails": "자세히 보기",
+    "hideDetails": "접기",
+    "repeated": "×{count, number} · {range}",
+    "repeatedHint": "같은 관측값이 연속 {count}번 기록되어 한 번만 표시합니다.",
+    "collapsedNote": "관측 {observations, number}건 중 반복을 합쳐 {rows, number}줄로 표시"
   },
   "issues": {
     "title": "이슈 탐지",
@@ -114,7 +134,42 @@
     "mitigation": "완화 방안",
     "alternatives": "대안",
     "createProposal": "제안 생성",
-    "proposalCreated": "제안이 생성되었습니다! 이동 중..."
+    "proposalCreated": "제안이 생성되었습니다! 이동 중...",
+    "decisionPacket": "결정 패킷",
+    "debateInProgress": "여러 라운드에 걸친 토론 진행 중...",
+    "selectIssue": "이슈를 선택하면 결정 패킷을 볼 수 있습니다",
+    "firstDetected": "최초 감지 {time}",
+    "occurrences": "{count, number}회 감지 · 마지막 감지 {time}",
+    "priorityLabel": "우선순위",
+    "priorityHint": "규칙 기반 탐지기가 관련 신호의 중요도로 자동 지정한 값입니다. 사람이 평가한 것이 아닙니다.",
+    "priorityLevels": {
+      "urgent": "긴급",
+      "high": "높음",
+      "medium": "보통",
+      "low": "낮음"
+    },
+    "statusLabels": {
+      "detected": "탐지됨",
+      "deliberating": "심의 중",
+      "proposed": "제안됨",
+      "resolved": "해결됨"
+    },
+    "roles": {
+      "risk": "리스크",
+      "treasury": "재무",
+      "community": "커뮤니티",
+      "product": "프로덕트"
+    },
+    "progress": {
+      "risk": "Risk 에이전트 분석 중...",
+      "treasury": "Treasury 에이전트 분석 중...",
+      "community": "Community 에이전트 분석 중...",
+      "product": "Product 에이전트 분석 중...",
+      "moderator": "Moderator 종합 중...",
+      "analyzing": "분석 중...",
+      "eta": "약 15초 소요",
+      "summary": "4개 에이전트 심의 + Moderator 종합"
+    }
   },
   "debate": {
     "title": "에이전트 토론",
@@ -257,9 +312,11 @@
   },
   "experimental": {
     "banner": {
-      "title": "⚠️ 실험 환경 / 연구용 / 비프로덕션",
+      "title": "실험 환경 / 연구용 / 비프로덕션",
       "subtitle": "본 서비스는 연구·테스트·PoC 목적의 실험 환경입니다. 데이터 유실 및 서비스 중단이 발생할 수 있습니다.",
-      "dismiss": "닫기"
+      "dismiss": "닫기",
+      "details": "자세히",
+      "label": "실험 서비스 안내"
     },
     "modal": {
       "title": "실험 환경 안내",
@@ -283,7 +340,8 @@
         }
       },
       "footer": "위 사항을 이해하고 동의하신 경우에만 사용해주세요.",
-      "accept": "이해했습니다"
+      "accept": "이해했습니다",
+      "close": "닫기"
     }
   },
   "errors": {

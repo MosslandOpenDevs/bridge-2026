@@ -86,7 +86,27 @@
       "medium": "Medium",
       "low": "Low"
     },
-    "maxDisplayNote": "Showing up to {max} recent signals"
+    "maxDisplayNote": "Showing up to {max} recent signals",
+    "noSignalsPublic": "Signals appear here as the collector records them.",
+    "telemetry": "Telemetry",
+    "unknownCategory": "unknown",
+    "blockPrefix": "Block #",
+    "fields": {
+      "signalId": "Signal ID",
+      "originalId": "Original ID",
+      "txHash": "Transaction Hash",
+      "blockNumber": "Block Number",
+      "apiEndpoint": "API Endpoint",
+      "rawData": "Raw Data"
+    },
+    "newCollected": "+{count} new signals collected",
+    "moreCategories": "+{count} more",
+    "clearSearch": "Clear search",
+    "showDetails": "Show details",
+    "hideDetails": "Hide details",
+    "repeated": "×{count, number} · {range}",
+    "repeatedHint": "The same observation was recorded {count} times in a row; shown once.",
+    "collapsedNote": "{observations, number} observations, identical repeats merged into {rows, number} rows"
   },
   "issues": {
     "title": "Issue Detection",
@@ -114,7 +134,42 @@
     "mitigation": "Mitigation",
     "alternatives": "Alternatives",
     "createProposal": "Create Proposal",
-    "proposalCreated": "Proposal created! Redirecting..."
+    "proposalCreated": "Proposal created! Redirecting...",
+    "decisionPacket": "Decision Packet",
+    "debateInProgress": "Multi-round debate in progress...",
+    "selectIssue": "Select an issue to see its decision packet",
+    "firstDetected": "First detected {time}",
+    "occurrences": "Seen {count, plural, one {# time} other {# times}} · last seen {time}",
+    "priorityLabel": "Priority",
+    "priorityHint": "Set automatically by the rule-based detector from the severity of the signals involved. Not a human assessment.",
+    "priorityLevels": {
+      "urgent": "Urgent",
+      "high": "High",
+      "medium": "Medium",
+      "low": "Low"
+    },
+    "statusLabels": {
+      "detected": "Detected",
+      "deliberating": "Deliberating",
+      "proposed": "Proposed",
+      "resolved": "Resolved"
+    },
+    "roles": {
+      "risk": "Risk",
+      "treasury": "Treasury",
+      "community": "Community",
+      "product": "Product"
+    },
+    "progress": {
+      "risk": "Risk agent analysing...",
+      "treasury": "Treasury agent analysing...",
+      "community": "Community agent analysing...",
+      "product": "Product agent analysing...",
+      "moderator": "Moderator summarising...",
+      "analyzing": "Analysing...",
+      "eta": "About 15 seconds",
+      "summary": "4 agents deliberate, then the moderator summarises"
+    }
   },
   "debate": {
     "title": "Agent Debate",
@@ -257,9 +312,11 @@
   },
   "experimental": {
     "banner": {
-      "title": "⚠️ Experimental / Research / Non-Production",
+      "title": "Experimental / Research / Non-Production",
       "subtitle": "This service is an experimental environment for research, testing, and PoC purposes. Data loss and service interruptions may occur.",
-      "dismiss": "Dismiss"
+      "dismiss": "Dismiss",
+      "details": "Details",
+      "label": "Experimental service notice"
     },
     "modal": {
       "title": "Experimental Environment Notice",
@@ -283,7 +340,8 @@
         }
       },
       "footer": "Please use this service only if you understand and agree to the above terms.",
-      "accept": "I Understand"
+      "accept": "I Understand",
+      "close": "Close"
     }
   },
   "errors": {

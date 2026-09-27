@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { CheckCircle, XCircle, BarChart3, ExternalLink, Loader2 } from "lucide-react";
 import { cn, timeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -52,6 +52,7 @@ function KPICard({ kpi }: { kpi: KPI }) {
 
 export default function OutcomesPage() {
   const t = useTranslations();
+  const locale = useLocale();
   const [selectedOutcome, setSelectedOutcome] = useState<any>(null);
   const [leaderboardType, setLeaderboardType] = useState<string>("agent");
 
@@ -165,7 +166,7 @@ export default function OutcomesPage() {
                       )}
                     </div>
                     <h3 className="font-semibold text-gray-900 text-sm sm:text-base line-clamp-2">{outcome.proposalTitle}</h3>
-                    <p className="mt-1 text-xs sm:text-sm text-gray-500">{timeAgo(new Date(outcome.executedAt))}</p>
+                    <p className="mt-1 text-xs sm:text-sm text-gray-500">{timeAgo(outcome.executedAt, locale)}</p>
                   </div>
                   <div className="text-left sm:text-right flex sm:flex-col items-center sm:items-end gap-2 flex-shrink-0">
                     <p className="text-xs sm:text-sm text-gray-500">KPI {outcome.kpis.length}</p>

@@ -21,13 +21,52 @@ export function formatMOC(value: bigint, decimals: number = 18): string {
   return `${formatNumber(Number(integerPart))}.${fractionalStr} MOC`;
 }
 
-export function timeAgo(date: Date): string {
-  const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
+// Largest unit first; a span is shown in the first unit it fills at least once.
+const RELATIVE_UNITS: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+  ["year", 365 * 24 * 60 * 60],
+  ["month", 30 * 24 * 60 * 60],
+  ["day", 24 * 60 * 60],
+  ["hour", 60 * 60],
+  ["minute", 60],
+  ["second", 1],
+];
 
-  if (seconds < 60) return `${seconds}초 전`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}분 전`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}시간 전`;
-  return `${Math.floor(seconds / 86400)}일 전`;
+function documentLocale(): string {
+  // The root layout renders <html lang={locale}> from the same cookie
+  // next-intl reads, so this is the active UI locale in the browser. It is a
+  // fallback for callers that have not been handed the locale explicitly.
+  if (typeof document !== "undefined" && document.documentElement.lang) {
+    return document.documentElement.lang;
+  }
+  return "en";
+}
+
+/**
+ * "3 days ago" / "3일 전", or "in 30 days" / "30일 후" for a future date, in the
+ * given locale (pass next-intl's `useLocale()`).
+ *
+ * This used to build Korean strings by hand, so the English UI read "93일 전",
+ * and it assumed every date was in the past, so a delegation expiring next
+ * month rendered as "-2591999초 전".
+ */
+export function timeAgo(
+  date: Date | string | number,
+  locale: string = documentLocale(),
+  now: number = Date.now(),
+): string {
+  const then = date instanceof Date ? date.getTime() : new Date(date).getTime();
+  if (Number.isNaN(then)) return "";
+
+  // Negative = past, which is what Intl.RelativeTimeFormat expects.
+  const diffSeconds = (then - now) / 1000;
+  const abs = Math.abs(diffSeconds);
+  const [unit, size] =
+    RELATIVE_UNITS.find(([, s]) => abs >= s) ?? RELATIVE_UNITS[RELATIVE_UNITS.length - 1];
+  // Truncate toward zero so "59 minutes" never rounds up to "1 hour" early.
+  const value = Math.trunc(diffSeconds / size);
+
+  // numeric: "auto" turns 0 seconds into "now" and -1 day into "yesterday".
+  return new Intl.RelativeTimeFormat(locale, { numeric: "auto" }).format(value, unit);
 }
 
 export function getSeverityColor(severity: string): string {
