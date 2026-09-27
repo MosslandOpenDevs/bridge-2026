@@ -3,6 +3,8 @@ import { BaseAdapter } from "./base.js";
 
 export interface SocialAdapterConfig {
   mediumRssUrl?: string;
+  /** The RSS-to-JSON service the feed is read through; see fetchMediumRss. */
+  rssToJsonUrl?: string;
   twitterBearerToken?: string;
   twitterUsername?: string;
   language?: "en" | "ko";
@@ -40,6 +42,7 @@ const translations = {
 };
 
 const DEFAULT_MEDIUM_RSS = "https://medium.com/feed/mossland-blog";
+const DEFAULT_RSS_TO_JSON = "https://api.rss2json.com/v1/api.json";
 const DEFAULT_TWITTER_USER = "TheMossland";
 const TWITTER_API = "https://api.twitter.com/2";
 
@@ -102,6 +105,7 @@ export class SocialAdapter extends BaseAdapter {
     super();
     this.config = {
       mediumRssUrl: config.mediumRssUrl || DEFAULT_MEDIUM_RSS,
+      rssToJsonUrl: config.rssToJsonUrl || DEFAULT_RSS_TO_JSON,
       twitterBearerToken: config.twitterBearerToken,
       twitterUsername: config.twitterUsername || DEFAULT_TWITTER_USER,
       language: config.language || "en",
@@ -138,7 +142,7 @@ export class SocialAdapter extends BaseAdapter {
 
     try {
       // Use RSS2JSON API for parsing (free tier available)
-      const rssUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(this.config.mediumRssUrl!)}`;
+      const rssUrl = `${this.config.rssToJsonUrl}?rss_url=${encodeURIComponent(this.config.mediumRssUrl!)}`;
       const response = await fetch(rssUrl);
       const data = await response.json() as RssResponse;
 

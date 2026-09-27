@@ -121,6 +121,21 @@ async function freePort(): Promise<number> {
 }
 
 /**
+ * For a boot with collection on: every collector's endpoint on a closed port,
+ * and the ones that need a credential left unconfigured (empty rather than
+ * unset, for the dotenv reason in startServer). Collection on runs a pass at
+ * boot, and the suite must not reach Mossland, GitHub or Medium from it, nor
+ * store whatever they answer into the database the later tests share.
+ */
+const OFFLINE_COLLECTORS = {
+  MOSSLAND_API_URL: "http://127.0.0.1:9",
+  GITHUB_API_URL: "http://127.0.0.1:9",
+  RSS_TO_JSON_URL: "http://127.0.0.1:9",
+  ETHERSCAN_API_KEY: "",
+  TWITTER_BEARER_TOKEN: "",
+};
+
+/**
  * Boot an API process. Reused for the restart test, which needs a second
  * process over the same database file, so the port and data directory are only
  * allocated on the first call.
@@ -727,9 +742,9 @@ async function testHealthReportsDown() {
  * collection off, so without this the handler could ignore HEALTH_CONFIG, or
  * answer 503 for degraded under ?strict=1, and still pass.
  *
- * Made deterministic without cutting the network: the newest observed signal
- * is a day old, and a trigger makes every insert into `signals` fail, so
- * whatever the adapters fetch never lands. A pass that cannot store its
+ * Made deterministic with the collectors offline (OFFLINE_COLLECTORS): the
+ * newest observed signal is a day old, and a trigger makes every insert into
+ * `signals` fail, so not even the demo adapter's readings land. A pass that cannot store its
  * readings does not count as an observation either (the change filter learns
  * a pass only after its write commits), which is what a stalled pipeline looks
  * like from here. Reads are untouched, so this is degraded and not down.
@@ -765,7 +780,7 @@ async function testHealthWhileIngestionStalls() {
   }
 
   try {
-    await startServer({ SIGNAL_COLLECT_INTERVAL: "3600", MOSSLAND_API_URL: "http://127.0.0.1:9" });
+    await startServer({ SIGNAL_COLLECT_INTERVAL: "3600", ...OFFLINE_COLLECTORS });
 
     const { response, data } = await get("/api/health");
     assertStatus(response, 200, "health while ingestion stalls");
@@ -1279,6 +1294,150 @@ async function testDetectionCountsOnlyNewRows() {
     } finally {
       db.close();
     }
+  }
+}
+
+/**
+ * A condition that holds without changing stays detected.
+ *
+ * Production's medium_activity has read 0 since before change-only storage,
+ * so it is stored once and never again. Detection used to read the newest
+ * 1,000 rows; after ~3 days of other streams' changes that row was no longer
+ * among them, and the open "Low blog activity" issue stopped being re-seen —
+ * last_seen_at froze while the blog was still silent. Detection now reads a
+ * time window and carries each gauge's row in force into it
+ * (detection-input.ts), so the issue is re-seen on every pass.
+ *
+ * Collection has to be on for that (with it off nothing is carried in), so
+ * this boots with an hourly interval and a recorded last observation of now.
+ * At that interval the 120-minute default holds too few samples for the trend
+ * fit, so the window is widened to five intervals (effectiveWindowMinutes).
+ * Turning collection on runs a pass at boot, so every collector is pointed at
+ * a closed port (and Etherscan and Twitter left unconfigured): the suite stays
+ * off the network, and the seeded row is the only medium_activity reading.
+ * The medium stream is then taken as observed when the recorded last
+ * observation says, as after any restart (SignalChangeFilter). 1,200 newer
+ * rows of another stream, all older than the window, are what pushed the row
+ * out of the old read: with them, reverting to the newest-1,000 read fails
+ * this test.
+ */
+async function testPersistingGaugeStaysDetected() {
+  const dbPath = join(dataDir, "e2e.db");
+  const fingerprint = "medium_activity|issue|";
+  const fourDaysAgo = new Date(Date.now() - 4 * 24 * 3600 * 1000).toISOString();
+  const startedAt = new Date().toISOString();
+
+  stopServer(true);
+  await sleep(500);
+  let db = new Database(dbPath);
+  let recordedBefore: string | undefined;
+  try {
+    recordedBefore = (
+      db.prepare(`SELECT last_observed_at FROM collector_state WHERE id = 1`).get() as
+        | { last_observed_at: string }
+        | undefined
+    )?.last_observed_at;
+    db.transaction(() => {
+      db.prepare(`DELETE FROM issues WHERE fingerprint = ?`).run(fingerprint);
+      db.prepare(`DELETE FROM signals WHERE category = 'medium_activity'`).run();
+      db.prepare(
+        `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic, stream)
+         VALUES ('persisting-medium', 'persisting-medium', 'api', ?, 'medium_activity', 'low', 0, 'posts/week',
+                 'Medium blog: 0 posts in last week', 0, 'medium_activity|blog_activity')`,
+      ).run(fourDaysAgo);
+      const filler = db.prepare(
+        `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic, stream)
+         VALUES (?, ?, 'window-probe', ?, 'window_probe', 'low', ?, 'n/a', 'probe', 0, 'window_probe|probe')`,
+      );
+      // Every 3 minutes from ~66 h to 6 h ago: newer than the medium row,
+      // outside the 5 h window.
+      for (let i = 0; i < 1200; i++) {
+        const at = new Date(Date.now() - (6 * 3600 + i * 180) * 1000).toISOString();
+        filler.run(`wp-${i}`, `wp-${i}`, at, 1);
+      }
+      db.prepare(
+        `INSERT INTO collector_state (id, last_observed_at) VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET last_observed_at = excluded.last_observed_at`,
+      ).run(new Date().toISOString());
+    })();
+  } finally {
+    db.close();
+  }
+
+  const openRow = () => {
+    const reader = new Database(dbPath, { readonly: true });
+    try {
+      return reader
+        .prepare(`SELECT id, last_seen_at, signal_ids, description FROM issues
+                  WHERE fingerprint = ? AND status = 'detected'`)
+        .all(fingerprint) as { id: string; last_seen_at: string; signal_ids: string; description: string }[];
+    } finally {
+      reader.close();
+    }
+  };
+
+  try {
+    await startServer({ SIGNAL_COLLECT_INTERVAL: "3600", ...OFFLINE_COLLECTORS });
+
+    const first = await post("/api/issues/detect");
+    assertStatus(first.response, 200, "first detection");
+    assert(first.data.input?.stepSeconds === 3600, `detect: gauges sampled hourly, got ${JSON.stringify(first.data.input)}`);
+    assert(
+      Date.parse(first.data.input.to) - Date.parse(first.data.input.from) === 5 * 3600 * 1000,
+      `detect: a 120-min window widened to five hourly intervals, got ${JSON.stringify(first.data.input)}`,
+    );
+    const [row] = openRow();
+    assert(row, "detect: a medium_activity stored four days ago should still raise its issue");
+    assert(row.description.includes("Low blog activity"), `detect: the threshold rule, got ${row.description}`);
+    const ids: string[] = JSON.parse(row.signal_ids);
+    assert(
+      ids.length === 1 && ids[0] === "persisting-medium",
+      `signal_ids: the stored row once, however many samples it was, got ${row.signal_ids}`,
+    );
+
+    await sleep(20);
+    const second = await post("/api/issues/detect");
+    assertStatus(second.response, 200, "second detection");
+    const after = openRow();
+    assert(after.length === 1 && after[0].id === row.id, "detect: the open issue is re-seen, not duplicated");
+    assert(
+      Date.parse(after[0].last_seen_at) > Date.parse(row.last_seen_at),
+      `detect: last_seen_at should advance while the condition holds: ${row.last_seen_at} -> ${after[0].last_seen_at}`,
+    );
+
+    const listed = await get("/api/issues?limit=50");
+    const issue = listed.data.issues.find((i: { id: string }) => i.id === row.id);
+    assert(
+      issue && issue.signals.length === 1 && issue.signals[0].id === "persisting-medium" &&
+        issue.signals[0].timestamp === fourDaysAgo,
+      "issues: the embedded signal is the stored row, with its own timestamp",
+    );
+
+    const reader = new Database(dbPath, { readonly: true });
+    try {
+      const live = reader
+        .prepare(`SELECT category FROM signals WHERE synthetic = 0 AND timestamp >= ?`)
+        .all(startedAt) as { category: string }[];
+      assert(live.length === 0, `collection stayed offline, but stored ${live.map((r) => r.category).join(", ")}`);
+    } finally {
+      reader.close();
+    }
+  } finally {
+    stopServer(true);
+    await sleep(500);
+    db = new Database(dbPath);
+    try {
+      db.prepare(`DELETE FROM signals WHERE category IN ('medium_activity', 'window_probe')`).run();
+      // Anything else observed while collection was on, should a collector
+      // ever reach past the closed port, and the observation time it recorded.
+      db.prepare(`DELETE FROM signals WHERE synthetic = 0 AND timestamp >= ?`).run(startedAt);
+      db.prepare(`DELETE FROM issues WHERE fingerprint = ? OR category = 'window_probe'`).run(fingerprint);
+      if (recordedBefore === undefined) db.prepare(`DELETE FROM collector_state WHERE id = 1`).run();
+      else db.prepare(`UPDATE collector_state SET last_observed_at = ? WHERE id = 1`).run(recordedBefore);
+    } finally {
+      db.close();
+    }
+    await startServer();
   }
 }
 
@@ -2586,6 +2745,7 @@ async function main() {
     await runTest("Unchanged signals are not stored", testUnchangedSignalsAreNotStored);
     await runTest("Large issue pages leave signals out", testIssueListDefaults);
     await runTest("Detection counts only new rows", testDetectionCountsOnlyNewRows);
+    await runTest("A persisting condition stays detected", testPersistingGaugeStaysDetected);
     await runTest("Legacy database upgrades and keeps health fast", testLegacyDatabaseUpgrade);
     await runTest("Proposal settings are validated", testProposalValidation);
     await runTest("Voting integrity", testVotingIntegrity);
