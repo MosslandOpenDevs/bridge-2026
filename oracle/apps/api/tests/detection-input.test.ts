@@ -251,6 +251,24 @@ function testEachGaugeStopsAtItsOwnLastObservation() {
   );
   assert(partial.length === 91, `samples from -120 to -30 min, got ${partial.length}`);
 
+  // One pass reads its adapters in turn: a stream read a few seconds before
+  // the last reading of the pass still has the newest sample.
+  const samePass = buildDetectionInput(
+    { inWindow: [], carriedIn: [price, blog] },
+    window60(NOW.toISOString(), new Map([
+      ["moc_price|price", new Date(NOW.getTime() - 3_000).toISOString()],
+      ["medium_activity|blog_activity", new Date(NOW.getTime() - 61_000).toISOString()],
+    ])),
+  );
+  assert(
+    samePass.filter((s) => s.id === "price").length === 121 && samePass[0].timestamp === NOW.toISOString(),
+    "read 3 s before the pass's last reading: still the newest sample",
+  );
+  assert(
+    samePass.filter((s) => s.id === "blog").length === 120,
+    "last read 61 s before it, a pass that did not reach it: not the newest sample",
+  );
+
   // No time at all for the stream (never observed since boot): no samples
   // past its own newest row, which is itself an observation.
   const none = buildDetectionInput({ inWindow: [], carriedIn: [blog] }, window60(NOW.toISOString(), new Map()));

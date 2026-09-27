@@ -171,9 +171,10 @@ export interface DetectionWindow {
   sampleEnd: string | null;
   /**
    * When each stream last produced a reading (SignalChangeFilter). A gauge is
-   * sampled only up to its own stream's time, or its newest stored row when
-   * that is later: `sampleEnd` alone would carry a silent adapter's last
-   * reading forward for as long as any other adapter kept answering.
+   * sampled only while its own stream was observed — up to one step after its
+   * time, or after its newest stored row when that is later: `sampleEnd`
+   * alone would carry a silent adapter's last reading forward for as long as
+   * any other adapter kept answering.
    */
   streamObservedAt: ReadonlyMap<string, string>;
   /** Sampling step. Null when collection is off: nothing is resampled. */
@@ -319,14 +320,20 @@ export function buildDetectionInput(rows: DetectionRows, window: DetectionWindow
           Number(Boolean(a.stream)) - Number(Boolean(b.stream)),
       );
       // A stored row is itself an observation, which covers rows written by
-      // something other than a collection pass.
+      // something other than a collection pass. A sample stands for the
+      // collection interval ending at it, so a stream observed within that
+      // interval backs it: one pass fetches its adapters one after another,
+      // and `sampleEnd` is the last of them, a few seconds after the rest.
+      // Capping at the stream's own time exactly would drop the newest sample
+      // of every stream but the last one fetched (119 of 120 samples for six
+      // of seven streams in the 2026-09-26 replay).
       const observed = laterIso(window.streamObservedAt.get(stream), list[list.length - 1].timestamp);
-      const until = observed < window.sampleEnd ? observed : window.sampleEnd;
+      const untilMs = Date.parse(observed) + stepMs;
       let next = 0;
       let inForce: StoredSignalRow | undefined;
       for (const t of times) {
+        if (t >= untilMs) break;
         const at = new Date(t).toISOString();
-        if (at > until) break;
         while (next < list.length && list[next].timestamp <= at) inForce = list[next++];
         if (inForce) out.push({ ...inForce, timestamp: at });
       }
