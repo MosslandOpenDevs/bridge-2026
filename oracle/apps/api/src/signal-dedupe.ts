@@ -66,8 +66,23 @@ export function signalStream(
   return kind ? `${category}|${kind}` : category;
 }
 
+/**
+ * Values are compared as numbers. Some adapters pass a reading through as the
+ * upstream sent it — /api/market reports market cap as the string
+ * "13772181754.00" — while the stored row comes back from SQLite as a REAL.
+ * Strict equality then saw every such stream as changed on the first pass
+ * after a restart and stored one duplicate row per stream per boot. Values
+ * that are not numbers at all fall back to strict equality.
+ */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  const na = typeof a === "string" && a.trim() !== "" ? Number(a) : a;
+  const nb = typeof b === "string" && b.trim() !== "" ? Number(b) : b;
+  return typeof na === "number" && typeof nb === "number" && !Number.isNaN(na) && na === nb;
+}
+
 export function sameReading(a: Reading, b: Reading): boolean {
-  return a.value === b.value && a.description === b.description && a.severity === b.severity;
+  return sameValue(a.value, b.value) && a.description === b.description && a.severity === b.severity;
 }
 
 function isoOf(at: Date | string): string | null {

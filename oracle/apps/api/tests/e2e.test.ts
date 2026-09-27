@@ -957,6 +957,26 @@ async function testSignalChangeFilterRule() {
   );
   assert(twice.stored === 1 && twice.skipped === 1, "a repeat inside one pass is skipped");
 
+  // /api/market sends market cap as a string; the seeded row is a REAL from
+  // SQLite. The same reading must match across that, or every restart stores
+  // one duplicate row per such stream.
+  const market = new SignalChangeFilter(
+    [{ stream: "moc_market|market", value: 13772181754, description: "MOC market cap", severity: "low" }],
+    null,
+  );
+  const restartPass = market.plan(
+    [typed(reading("moc_market", "13772181754.00" as unknown as number, "MOC market cap", 8), "market")],
+    streamOf,
+  );
+  assert(
+    restartPass.stored === 0 && restartPass.skipped === 1,
+    `a numeric string equal to the stored REAL is the same reading, got stored=${restartPass.stored}`,
+  );
+  const movedPass = market.plan(
+    [typed(reading("moc_market", "13772181755.00" as unknown as number, "MOC market cap", 9), "market")],
+    streamOf,
+  );
+  assert(movedPass.stored === 1, "a numeric string that differs is a change");
 }
 
 /**
