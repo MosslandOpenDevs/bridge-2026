@@ -1,5 +1,24 @@
 # BRIDGE 2026 Oracle: 24/7 Live Governance Engine 업그레이드 계획
 
+> **Superseded (2026-09-26) — 구현되지 않은 계획입니다. 기록으로만 남겨 둡니다.**
+>
+> - 이 문서가 설계한 것 — 30인 Grand Council, Dynamic Summoning, 3티어 스케줄러와
+>   Budget Manager, 24/7 Activity Log, Daily Ops Report, `/engine`·`/disclosure`·
+>   `/agents`·`/agora` 페이지와 `agora_sessions`/`agora_messages` 테이블 — 은
+>   코드에 없습니다. 실제로 들어간 것은 LLM 공급자로 Ollama 를 고를 수 있는
+>   정도입니다.
+> - 이 문서의 "아고라(Agora)" 는 BRIDGE 안의 에이전트 토론방을 뜻하는데, 그
+>   이름은 이미 모스랜드 DAO 의 실제 거버넌스 서비스
+>   [Agora](https://agora.moss.land) 가 쓰고 있습니다. 모스랜드의 구속력 있는
+>   결정은 그 Agora 에서 내려지고(MIP-1 도 거기서 비준됐습니다), BRIDGE 는 자체
+>   투표·위임을 끄고 그쪽으로 안내합니다([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)). 같은 이름의 BRIDGE 로컬 페이지를
+>   만들면 둘을 혼동하게 되므로, 이 계획을 되살리더라도 그 이름은 쓰지 마세요.
+> - 이 계획이 전제한 "항상 작동하는" 자율 심의·제안 루프는 기본으로 꺼져 있습니다([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)).
+>   BRIDGE 의 현재 상태는 [`PROGRESS.md`](PROGRESS.md), 방향 검토는
+>   [루트 README](../README.md#direction-under-review) 를 보세요.
+
+---
+
 ## 개요
 
 이 계획은 BRIDGE 2026 Oracle을 "항상 작동하는 라이브 거버넌스 엔진"으로 업그레이드합니다.
