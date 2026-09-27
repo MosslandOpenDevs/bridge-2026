@@ -78,8 +78,7 @@ Always name the apps with `--only` (add `bridge-db-backup` once it is
 enabled): given the whole file, pm2 restarts the apps that are running and
 then **starts every other app in the file** ("Applications … not running,
 starting…" — `_startJson` in pm2's `lib/API.js`), which would switch on
-opt-in apps such as `bridge-db-backup` as a side effect. The command the
-deploy log's NOTE prints does not have `--only` yet; use this one.
+opt-in apps such as `bridge-db-backup` as a side effect.
 
 Useful invocations on the server:
 
@@ -89,6 +88,72 @@ oracle/scripts/deploy.sh           # deploy now if the remote moved
 oracle/scripts/deploy.sh --force   # override guards (discards local edits!)
 tail -f ~/bridge-2026/oracle/logs/deploy.log
 ```
+
+## Binding to one address
+
+Deploy and sync the binding support **before** changing the listen address.
+An older deploy script still probes loopback and would reject a healthy app
+bound to a different address, including during rollback.
+
+For managed deployments, create `oracle/config.local.json` on the app host
+with restrictive permissions. This file is already gitignored. It contains
+only the shared listen address; credentials stay in the existing environment
+files. Example (the documentation address must be replaced locally):
+
+```json
+{ "bindHost": "192.0.2.10" }
+```
+
+The shared helper, `scripts/bind-config.cjs`, supplies API `HOST`, Next's
+`--hostname`, and both deploy health URLs from that file. Use a literal IPv4
+or IPv6 address assigned to the app host; host names, malformed JSON, and
+unknown keys are rejected without printing their values. When the file is
+absent or empty (`{}`), the original listen and loopback-probe defaults apply.
+Explicit `DEPLOY_API_URL` / `DEPLOY_WEB_URL` environment overrides still win;
+check for stale overrides before changing the shared address. A standalone
+API's `.env` `HOST` does not configure the web or deploy checks.
+
+Binding restricts the destination address. Binding to the app host's tailnet
+address prevents connections to its LAN address. It does not bind the socket
+to a network interface: a LAN peer with a custom route to that destination
+may still reach it through Linux's local address delivery. Tailnet policies
+govern traffic through Tailscale, not packets arriving outside that path.
+Keep `TRUST_PROXY` restricted to the intended proxy. Binding alone does not
+authenticate a peer or its forwarded headers; use an additional ingress
+control when authenticated tailnet-only access is required.
+
+Apply from a clean login shell in `oracle/`, after a successful code deploy:
+
+1. Confirm no deployment is running (`logs/.deploy.lock`), then temporarily
+   deregister **only** `bridge-deploy` with `pm2 delete bridge-deploy`.
+   `pm2 stop` leaves its cron active. Keep a private copy of its stored
+   environment for re-registration, including any CI credential or overrides;
+   never print or commit that copy. Do not `pm2 save` while it is absent.
+2. Write the local config atomically, mode 0600. Validate it with
+   `node scripts/bind-config.cjs api-url` and `web-url`; the output contains
+   private deployment addresses, so keep it out of public logs or issues.
+3. Run `pm2 restart ecosystem.config.cjs --only oracle-api,oracle-web --update-env`.
+   The API reads `HOST` from its PM2 environment; Next requires its explicit
+   hostname argument. Editing the file alone does not change running apps.
+4. Verify the actual listener addresses, API strict health, web response,
+   reverse-proxy response, and failure to connect to the host's LAN address.
+   For local probes use `curl -fsS "$(node scripts/bind-config.cjs api-url)/api/health?strict=1"`
+   and `curl -fsS -o /dev/null "$(node scripts/bind-config.cjs web-url)/"`.
+5. Restore the poller's private environment and register only `bridge-deploy`
+   from the ecosystem file. Confirm the deploy and rollback health checks use
+   the same new destinations, then run `pm2 save` to persist the definitions.
+
+The two app definitions use an explicit one-second `min_uptime` and
+five-second restart delay. With PM2's unstable-restart window, this keeps an
+unavailable interface from exhausting the restart limit during startup.
+Check this behavior when upgrading PM2. Ensure PM2 startup is enabled and the
+saved definitions are current; a successful live restart is not a reboot test.
+No shared PM2 service restart or host reboot is needed to apply this change.
+
+To undo a binding change, restore the previous private config and re-register
+the same named apps. If removing binding entirely, also explicitly clear any
+saved PM2 `HOST` and `.env` `HOST`: deleting the config does not remove an old
+environment value from PM2. Verify listeners and health before saving again.
 
 ## Scheduled backups & restore
 
@@ -258,8 +323,8 @@ mv data/oracle.db.restoring data/oracle.db
 #    mv), check, then re-register the auto-deployer, which runs one tick at
 #    once.
 pm2 start oracle-api
-curl -s localhost:3101/api/health; echo
-curl -s localhost:3101/api/stats | head -c 300; echo
+curl -fsS "$(node ../../scripts/bind-config.cjs api-url)/api/health?strict=1"; echo
+curl -fsS "$(node ../../scripts/bind-config.cjs api-url)/api/stats" | head -c 300; echo
 (cd ../.. && pm2 start ecosystem.config.cjs --only bridge-deploy)
 ```
 
@@ -390,7 +455,7 @@ rc=$?
 # 4. Start again and check -- only if step 3 exited 0.
 if [ "$rc" -eq 0 ]; then
   pm2 start oracle-api bridge-deploy
-  curl -s 'http://localhost:3101/api/health?strict=1'
+  curl -fsS "$(node scripts/bind-config.cjs api-url)/api/health?strict=1"
 else
   echo "compaction exited $rc: do NOT start the API; see the exit codes below"
 fi

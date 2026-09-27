@@ -1,3 +1,6 @@
+const { loadBindingConfig } = require('./scripts/bind-config.cjs');
+const { bindHost } = loadBindingConfig(__dirname);
+
 module.exports = {
   apps: [
     {
@@ -21,11 +24,18 @@ module.exports = {
       env: {
         PORT: 3101,
         NODE_ENV: 'production',
+        // Omit HOST when unconfigured, preserving existing .env behavior.
+        // Removing a previous binding also requires clearing PM2's saved HOST.
+        ...(bindHost ? { HOST: bindHost } : {}),
       },
       watch: false,
       autorestart: true,
       max_restarts: 10,
-      restart_delay: 1000,
+      // A private interface can appear after PM2 during boot. PM2 counts
+      // unstable starts only inside min_uptime * max_restarts; spacing them
+      // beyond that budget keeps retrying until the address is available.
+      min_uptime: 1000,
+      restart_delay: 5000,
       error_file: './logs/api-error.log',
       out_file: './logs/api-out.log',
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
@@ -35,7 +45,8 @@ module.exports = {
       name: 'oracle-web',
       cwd: './apps/web',
       script: './node_modules/.bin/next',
-      args: 'start --port 3100',
+      // Next's CLI does not read HOST; pass its hostname option explicitly.
+      args: ['start', '--port', '3100', ...(bindHost ? ['--hostname', bindHost] : [])],
       interpreter: 'none',
       env: {
         NODE_ENV: 'production',
@@ -48,7 +59,9 @@ module.exports = {
       watch: false,
       autorestart: true,
       max_restarts: 10,
-      restart_delay: 1000,
+      // Same late-interface recovery policy as oracle-api above.
+      min_uptime: 1000,
+      restart_delay: 5000,
       error_file: './logs/web-error.log',
       out_file: './logs/web-out.log',
       log_date_format: 'YYYY-MM-DD HH:mm:ss',

@@ -56,8 +56,10 @@
 #                          (default: oracle,deploy-script — the job names in
 #                          .github/workflows/ci.yml)
 #   DEPLOY_GITHUB_REPO     owner/name used for the CI query
-#   DEPLOY_API_URL         backend health URL                  (:3101)
-#   DEPLOY_WEB_URL         frontend health URL                 (:3100)
+#   DEPLOY_API_URL         override backend health URL         (:3101)
+#   DEPLOY_WEB_URL         override frontend health URL        (:3100)
+#                          Defaults follow config.local.json bindHost;
+#                          without it they use loopback.
 #   DEPLOY_HEALTH_RETRIES  health poll attempts                (default: 20)
 #   DEPLOY_HEALTH_INTERVAL seconds between attempts            (default: 3)
 #   DEPLOY_MAX_FAILURES    park a commit after this many failed
@@ -97,8 +99,11 @@ DEPLOY_REMOTE=${DEPLOY_REMOTE:-origin}
 DEPLOY_REQUIRE_CI=${DEPLOY_REQUIRE_CI:-1}
 DEPLOY_REQUIRED_CHECKS=${DEPLOY_REQUIRED_CHECKS:-oracle,deploy-script}
 DEPLOY_GITHUB_REPO=${DEPLOY_GITHUB_REPO:-MosslandOpenDevs/bridge-2026}
-DEPLOY_API_URL=${DEPLOY_API_URL:-http://127.0.0.1:3101}
-DEPLOY_WEB_URL=${DEPLOY_WEB_URL:-http://127.0.0.1:3100}
+# Resolve once before any git reset so deploy and rollback use the same
+# host-local settings, even if the helper changes between commits. The helper
+# needs only Node built-ins and reads no credentials from application .env.
+DEPLOY_API_URL=$(node "${SCRIPT_DIR}/bind-config.cjs" api-url)
+DEPLOY_WEB_URL=$(node "${SCRIPT_DIR}/bind-config.cjs" web-url)
 DEPLOY_HEALTH_RETRIES=${DEPLOY_HEALTH_RETRIES:-20}
 DEPLOY_HEALTH_INTERVAL=${DEPLOY_HEALTH_INTERVAL:-3}
 DEPLOY_MAX_FAILURES=${DEPLOY_MAX_FAILURES:-3}
@@ -711,7 +716,8 @@ deps=${DEPS_CHANGED} ecosystem=${ECOSYSTEM_CHANGED} infra=${INFRA_CHANGED})"
   if [ "${ECOSYSTEM_CHANGED}" = "1" ]; then
     log "NOTE ecosystem.config.cjs changed -- process definitions (cron, env) are"
     log "     NOT re-registered automatically. Run on the server when convenient:"
-    log "     cd oracle && pm2 restart ecosystem.config.cjs --update-env && pm2 save"
+    log "     cd oracle && pm2 restart ecosystem.config.cjs --only oracle-api,oracle-web,bridge-deploy --update-env && pm2 save"
+    log "     (add bridge-db-backup to --only only if it is already enabled)"
     log "     (from a login shell only -- never from inside a PM2-managed process:"
     log "      PM2 injects config keys like cron_restart into the environment and"
     log "      --update-env would copy them onto every app)"
