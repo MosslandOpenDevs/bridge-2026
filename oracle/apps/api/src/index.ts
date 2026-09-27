@@ -180,6 +180,11 @@ const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const MOSSLAND_API_URL = process.env.MOSSLAND_API_URL || "https://disclosure.moss.land";
+// The other collectors' endpoints can be moved the same way. The e2e suite
+// points all of them at a closed port when it turns collection on, so it
+// exercises the collection path without reaching GitHub or Medium.
+const GITHUB_API_URL = process.env.GITHUB_API_URL || undefined;
+const RSS_TO_JSON_URL = process.env.RSS_TO_JSON_URL || undefined;
 
 // Language setting from environment (default: en)
 const SIGNAL_LANGUAGE = (process.env.SIGNAL_LANGUAGE || "en") as "en" | "ko";
@@ -231,6 +236,7 @@ console.log("✅ MosslandAdapter registered");
 // GitHubAdapter works without token but with rate limits
 const githubAdapter = new GitHubAdapter({
   token: GITHUB_TOKEN,
+  apiUrl: GITHUB_API_URL,
   organization: "mossland",
   language: SIGNAL_LANGUAGE,
 });
@@ -242,6 +248,7 @@ const TWITTER_DISABLED = process.env.DISABLE_TWITTER === "1";
 const effectiveTwitterToken = TWITTER_DISABLED ? undefined : TWITTER_BEARER_TOKEN;
 const socialAdapter = new SocialAdapter({
   mediumRssUrl: "https://medium.com/feed/mossland-blog",
+  rssToJsonUrl: RSS_TO_JSON_URL,
   twitterBearerToken: effectiveTwitterToken,
   twitterUsername: "TheMossland",
   language: SIGNAL_LANGUAGE,
