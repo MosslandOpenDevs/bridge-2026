@@ -36,6 +36,7 @@ import db, {
   serializeIssue,
   deserializeIssue,
   inTransaction,
+  detectionRowSource,
 } from "./db.js";
 
 // Import learning service
@@ -53,6 +54,14 @@ import { blockchainService } from "./blockchain.js";
 import { deriveHealth, healthHttpStatus, resolveHealthConfig } from "./health.js";
 import { loadMosslandAdapterState } from "./mossland-state.js";
 import { SignalChangeFilter, laterTimestamp, signalStream } from "./signal-dedupe.js";
+import {
+  MIN_GAUGE_SAMPLES,
+  buildDetectionInput,
+  collapseRepeatedSignals,
+  detectionWindow,
+  effectiveWindowMinutes,
+  readDetectionRows,
+} from "./detection-input.js";
 
 // Import security utilities
 import {
@@ -171,6 +180,11 @@ const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const MOSSLAND_API_URL = process.env.MOSSLAND_API_URL || "https://disclosure.moss.land";
+// The other collectors' endpoints can be moved the same way. The e2e suite
+// points all of them at a closed port when it turns collection on, so it
+// exercises the collection path without reaching GitHub or Medium.
+const GITHUB_API_URL = process.env.GITHUB_API_URL || undefined;
+const RSS_TO_JSON_URL = process.env.RSS_TO_JSON_URL || undefined;
 
 // Language setting from environment (default: en)
 const SIGNAL_LANGUAGE = (process.env.SIGNAL_LANGUAGE || "en") as "en" | "ko";
@@ -222,6 +236,7 @@ console.log("✅ MosslandAdapter registered");
 // GitHubAdapter works without token but with rate limits
 const githubAdapter = new GitHubAdapter({
   token: GITHUB_TOKEN,
+  apiUrl: GITHUB_API_URL,
   organization: "mossland",
   language: SIGNAL_LANGUAGE,
 });
@@ -233,6 +248,7 @@ const TWITTER_DISABLED = process.env.DISABLE_TWITTER === "1";
 const effectiveTwitterToken = TWITTER_DISABLED ? undefined : TWITTER_BEARER_TOKEN;
 const socialAdapter = new SocialAdapter({
   mediumRssUrl: "https://medium.com/feed/mossland-blog",
+  rssToJsonUrl: RSS_TO_JSON_URL,
   twitterBearerToken: effectiveTwitterToken,
   twitterUsername: "TheMossland",
   language: SIGNAL_LANGUAGE,
@@ -798,16 +814,7 @@ app.get("/api/issues", async (req, res) => {
 
 app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
   try {
-    // Get signals from database
-    const signalRows = signalDb.getRecent.all(1000);
-    const signals = signalRows.map(deserializeSignal);
-
-    // Detect issues
-    const detectedIssues = [
-      ...anomalyDetector.analyze(signals),
-      ...thresholdDetector.analyze(signals),
-      ...trendDetector.analyze(signals),
-    ];
+    const { issues: detectedIssues, window, signals } = runDetectors();
 
     const { saved: savedIssues, inserted, escalations } =
       saveDetectedIssues(detectedIssues);
@@ -834,6 +841,15 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
       saved: savedIssues.length,
       issues: allIssues,
       count: allIssues.length,
+      // What the detectors read, so a surprising result can be traced to its
+      // input: the window, how far gauges were sampled, and how many readings.
+      input: {
+        from: window.start,
+        to: window.end,
+        sampledUntil: window.stepMs === null ? null : window.sampleEnd,
+        stepSeconds: window.stepMs === null ? null : window.stepMs / 1000,
+        signals,
+      },
     });
   } catch (error) {
     console.error("Failed to detect issues:", error);
@@ -2582,6 +2598,31 @@ if (HEALTH_CONFIG.overrideRejected) {
   );
 }
 const ISSUE_DETECT_INTERVAL = parseInt(process.env.ISSUE_DETECT_INTERVAL || "300", 10); // 5 minutes
+// How far back each detection pass reads (detection-input.ts). 120 minutes is
+// about what the detectors saw while every reading was stored every minute:
+// the newest 1,000 rows they read spanned ~124 minutes until 2026-08-08, when
+// the demo adapter still wrote three rows a minute, and 125-166 (median 143)
+// in the week before the 2026-09-26 snapshot, depending on how many
+// collectors answered. The shorter end also clears an ended event sooner.
+const DETECTION_WINDOW_CONFIGURED = envInt("DETECTION_WINDOW_MINUTES", 120);
+if (DETECTION_WINDOW_CONFIGURED === 0) {
+  console.error("❌ Refusing to start: DETECTION_WINDOW_MINUTES must be at least 1");
+  process.exit(1);
+}
+// That length assumes the production interval of 60 s. A slower one leaves
+// too few samples per gauge for the trend fit, so the window is stretched to
+// cover MIN_GAUGE_SAMPLES of them (effectiveWindowMinutes), and says so.
+const DETECTION_WINDOW_MINUTES = effectiveWindowMinutes(
+  DETECTION_WINDOW_CONFIGURED,
+  SIGNAL_COLLECT_INTERVAL,
+);
+if (DETECTION_WINDOW_MINUTES !== DETECTION_WINDOW_CONFIGURED) {
+  console.warn(
+    `⚠️  DETECTION_WINDOW_MINUTES=${DETECTION_WINDOW_CONFIGURED} holds fewer than ` +
+      `${MIN_GAUGE_SAMPLES} readings per gauge at SIGNAL_COLLECT_INTERVAL=${SIGNAL_COLLECT_INTERVAL}s; ` +
+      `detection reads the last ${DETECTION_WINDOW_MINUTES} min instead`,
+  );
+}
 // The autonomous governance loop is opt-in.
 //
 // It used to be on by default, so adding an LLM key was enough to have the
@@ -2823,16 +2864,39 @@ function saveDetectedIssues(detectedIssues: DetectedIssue[]): {
   return { saved, inserted, recurrences, escalations };
 }
 
-// Helper function for background issue detection
-async function detectAndSaveIssues() {
-  const signalRows = signalDb.getRecent.all(1000);
-  const signals = signalRows.map(deserializeSignal);
+/**
+ * Run the detectors over the last DETECTION_WINDOW_MINUTES.
+ *
+ * Both detect paths share this, like saveDetectedIssues, so the HTTP route and
+ * the scheduler cannot read different inputs. What the input is, and why it is
+ * no longer the newest 1,000 rows, is in detection-input.ts.
+ */
+function runDetectors(now = new Date()) {
+  // The collector's clock, or the newest observed row when that is later
+  // (a row written by something other than a collection pass) or unknown —
+  // the same rule /api/health applies.
+  const newest = signalDb.getLatestObservedTimestamp.get() as { timestamp?: string } | undefined;
+  const window = detectionWindow({
+    now,
+    windowMinutes: DETECTION_WINDOW_MINUTES,
+    collectIntervalSeconds: SIGNAL_COLLECT_INTERVAL,
+    lastObservedAt: laterTimestamp(newest?.timestamp, signalChanges.lastObservedAt),
+    streamObservedAt: signalChanges.streamLastObservedAt,
+  });
+  const rows = buildDetectionInput(readDetectionRows(detectionRowSource, window), window);
+  const signals = rows.map(deserializeSignal);
 
-  const detectedIssues = [
+  const issues = [
     ...anomalyDetector.analyze(signals),
     ...thresholdDetector.analyze(signals),
     ...trendDetector.analyze(signals),
-  ];
+  ].map(collapseRepeatedSignals);
+  return { issues, window, signals: signals.length };
+}
+
+// Helper function for background issue detection
+async function detectAndSaveIssues() {
+  const { issues: detectedIssues } = runDetectors();
 
   const { saved: savedIssues, inserted: insertedCount, recurrences, escalations } =
     saveDetectedIssues(detectedIssues);
@@ -3314,7 +3378,9 @@ httpServer.listen({ port: Number(PORT), host: HOST }, () => {
 
   // Auto issue detection
   if (ISSUE_DETECT_INTERVAL > 0) {
-    console.log(`🔍 Auto issue detection: every ${ISSUE_DETECT_INTERVAL}s`);
+    console.log(
+      `🔍 Auto issue detection: every ${ISSUE_DETECT_INTERVAL}s over the last ${DETECTION_WINDOW_MINUTES} min`,
+    );
 
     // Initial detection after a short delay
     setTimeout(async () => {

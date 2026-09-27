@@ -3,6 +3,8 @@ import { BaseAdapter } from "./base.js";
 
 export interface GitHubAdapterConfig {
   token?: string;
+  /** API base, https://api.github.com unless a test points it elsewhere. */
+  apiUrl?: string;
   organization?: string;
   repositories?: string[];
   language?: "en" | "ko";
@@ -134,6 +136,7 @@ export class GitHubAdapter extends BaseAdapter {
       organization: config.organization || DEFAULT_ORG,
       repositories: config.repositories || [],
       token: config.token,
+      apiUrl: config.apiUrl || GITHUB_API,
       language: config.language || "en",
     };
     this.headers = {
@@ -186,7 +189,7 @@ export class GitHubAdapter extends BaseAdapter {
 
   private async fetchRepositories(): Promise<RawSignal[]> {
     const signals: RawSignal[] = [];
-    const url = `${GITHUB_API}/orgs/${this.config.organization}/repos?sort=pushed&per_page=10`;
+    const url = `${this.config.apiUrl}/orgs/${this.config.organization}/repos?sort=pushed&per_page=10`;
 
     try {
       const response = await fetch(url, { headers: this.headers });
@@ -275,7 +278,7 @@ export class GitHubAdapter extends BaseAdapter {
       : ["mossverse", "mossland-marketplace"];
 
     for (const repoName of mainRepos) {
-      const url = `${GITHUB_API}/repos/${this.config.organization}/${repoName}/commits?per_page=5`;
+      const url = `${this.config.apiUrl}/repos/${this.config.organization}/${repoName}/commits?per_page=5`;
 
       try {
         const response = await fetch(url, { headers: this.headers });
@@ -325,7 +328,7 @@ export class GitHubAdapter extends BaseAdapter {
 
   private async fetchReleases(): Promise<RawSignal[]> {
     const signals: RawSignal[] = [];
-    const url = `${GITHUB_API}/orgs/${this.config.organization}/repos?per_page=10`;
+    const url = `${this.config.apiUrl}/orgs/${this.config.organization}/repos?per_page=10`;
 
     try {
       const reposResponse = await fetch(url, { headers: this.headers });
@@ -334,7 +337,7 @@ export class GitHubAdapter extends BaseAdapter {
       if (!Array.isArray(repos)) return signals;
 
       for (const repo of repos.slice(0, 5)) {
-        const releaseUrl = `${GITHUB_API}/repos/${this.config.organization}/${repo.name}/releases?per_page=1`;
+        const releaseUrl = `${this.config.apiUrl}/repos/${this.config.organization}/${repo.name}/releases?per_page=1`;
         const releaseResponse = await fetch(releaseUrl, { headers: this.headers });
 
         if (!releaseResponse.ok) continue;
@@ -379,7 +382,7 @@ export class GitHubAdapter extends BaseAdapter {
 
   private async fetchEvents(): Promise<RawSignal[]> {
     const signals: RawSignal[] = [];
-    const url = `${GITHUB_API}/orgs/${this.config.organization}/events?per_page=30`;
+    const url = `${this.config.apiUrl}/orgs/${this.config.organization}/events?per_page=30`;
 
     try {
       const response = await fetch(url, { headers: this.headers });
