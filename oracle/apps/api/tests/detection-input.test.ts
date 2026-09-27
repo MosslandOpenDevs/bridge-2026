@@ -15,6 +15,7 @@ import {
   buildDetectionInput,
   collapseRepeatedSignals,
   detectionWindow,
+  effectiveWindowMinutes,
   GAUGE_STREAMS,
   gaugeStreamOf,
   readDetectionRows,
@@ -312,6 +313,37 @@ function testTheFilterRecordsEachStreamsLastObservation() {
   assert(noBoot.streamLastObservedAt.size === 0, "nothing ever observed: no stream time to seed");
 }
 
+function testSlowCollectionStillGivesTheTrendFitEnoughSamples() {
+  // Production: 60 s, the configured window stands.
+  assert(effectiveWindowMinutes(120, 60) === 120, "60 s: 120 min");
+  assert(effectiveWindowMinutes(120, 1440) === 120, "24 min: 120 min already holds 5 intervals");
+  assert(effectiveWindowMinutes(120, 1800) === 150, "30 min: stretched to 5 intervals");
+  assert(effectiveWindowMinutes(120, 3600) === 300, "hourly: 5 h");
+  assert(effectiveWindowMinutes(120, 0) === 120, "collection off: nothing is sampled, the window stands");
+
+  // Whatever the lag of the last observation behind the pass (up to one
+  // interval), a gauge that held all along gets at least 5 samples, which is
+  // what TrendDetector needs; at 120 min it would get 4.
+  const stored = mediumActivity(ago(4 * 24 * 60 * MIN));
+  for (const lagMinutes of [0, 17, 59]) {
+    const at = ago(lagMinutes * MIN);
+    const samplesFor = (windowMinutes: number) =>
+      buildDetectionInput(
+        { inWindow: [], carriedIn: [stored] },
+        detectionWindow({
+          now: NOW,
+          windowMinutes,
+          collectIntervalSeconds: 3600,
+          lastObservedAt: at,
+          streamObservedAt: allObservedAt(at),
+        }),
+      ).length;
+    const n = samplesFor(effectiveWindowMinutes(120, 3600));
+    assert(n >= 5, `hourly, last observed ${lagMinutes} min before the pass: ${n} samples`);
+    if (lagMinutes > 0) assert(samplesFor(120) < 5, `the unstretched window would give ${samplesFor(120)}`);
+  }
+}
+
 function testIssuesReferenceEachStoredRowOnce() {
   const window = window60(NOW.toISOString());
   const before = mediumActivity(ago(3 * 24 * 60 * MIN), 1, "ma-before");
@@ -464,6 +496,7 @@ async function main() {
   await runTest("Resampled change points equal the per-minute series", testResampledChangePointsEqualThePerMinuteSeries);
   await runTest("Issues reference each stored row once", testIssuesReferenceEachStoredRowOnce);
   await runTest("Collection off reads rows as stored", testCollectionOffReadsRowsAsStored);
+  await runTest("Slow collection still gives the trend fit enough samples", testSlowCollectionStillGivesTheTrendFitEnoughSamples);
   await runTest("What counts as a gauge", testWhatCountsAsAGauge);
   await runTest("Legacy rows join their stream", testLegacyRowsJoinTheirStream);
   await runTest("Reads go through the indexed statements", testReadsGoThroughTheIndexedStatements);

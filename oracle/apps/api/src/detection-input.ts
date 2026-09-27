@@ -131,6 +131,30 @@ export function gaugeStreamOf(row: Pick<StoredSignalRow, "category" | "stream" |
 }
 
 /**
+ * The fewest samples a gauge must get per window.
+ *
+ * TrendDetector fits nothing below 5 points per category (its default
+ * minDataPoints, which index.ts keeps) and AnomalyDetector nothing below 3.
+ * A fixed window does not grow with the collection interval the way the old
+ * newest-1,000 read did: 120 minutes at a 1,800 s interval is 4-5 samples,
+ * depending on how far the last observation trails the pass, so trend
+ * detection on gauges would stop without a word.
+ */
+export const MIN_GAUGE_SAMPLES = 5;
+
+/**
+ * The window length to use: the configured one, or long enough for
+ * MIN_GAUGE_SAMPLES when the collection interval is too slow for it. The last
+ * observation can trail the pass by up to one interval, so that takes
+ * MIN_GAUGE_SAMPLES intervals rather than one fewer. Collection off samples
+ * nothing, so the configured length stands.
+ */
+export function effectiveWindowMinutes(windowMinutes: number, collectIntervalSeconds: number): number {
+  if (!Number.isFinite(collectIntervalSeconds) || collectIntervalSeconds <= 0) return windowMinutes;
+  return Math.max(windowMinutes, Math.ceil((MIN_GAUGE_SAMPLES * collectIntervalSeconds) / 60));
+}
+
+/**
  * The time span one detection pass reads, as ISO strings so they compare with
  * stored timestamps as text.
  */

@@ -55,9 +55,11 @@ import { deriveHealth, healthHttpStatus, resolveHealthConfig } from "./health.js
 import { loadMosslandAdapterState } from "./mossland-state.js";
 import { SignalChangeFilter, laterTimestamp, signalStream } from "./signal-dedupe.js";
 import {
+  MIN_GAUGE_SAMPLES,
   buildDetectionInput,
   collapseRepeatedSignals,
   detectionWindow,
+  effectiveWindowMinutes,
   readDetectionRows,
 } from "./detection-input.js";
 
@@ -2595,10 +2597,24 @@ const ISSUE_DETECT_INTERVAL = parseInt(process.env.ISSUE_DETECT_INTERVAL || "300
 // the demo adapter still wrote three rows a minute, and 125-166 (median 143)
 // in the week before the 2026-09-26 snapshot, depending on how many
 // collectors answered. The shorter end also clears an ended event sooner.
-const DETECTION_WINDOW_MINUTES = envInt("DETECTION_WINDOW_MINUTES", 120);
-if (DETECTION_WINDOW_MINUTES === 0) {
+const DETECTION_WINDOW_CONFIGURED = envInt("DETECTION_WINDOW_MINUTES", 120);
+if (DETECTION_WINDOW_CONFIGURED === 0) {
   console.error("❌ Refusing to start: DETECTION_WINDOW_MINUTES must be at least 1");
   process.exit(1);
+}
+// That length assumes the production interval of 60 s. A slower one leaves
+// too few samples per gauge for the trend fit, so the window is stretched to
+// cover MIN_GAUGE_SAMPLES of them (effectiveWindowMinutes), and says so.
+const DETECTION_WINDOW_MINUTES = effectiveWindowMinutes(
+  DETECTION_WINDOW_CONFIGURED,
+  SIGNAL_COLLECT_INTERVAL,
+);
+if (DETECTION_WINDOW_MINUTES !== DETECTION_WINDOW_CONFIGURED) {
+  console.warn(
+    `⚠️  DETECTION_WINDOW_MINUTES=${DETECTION_WINDOW_CONFIGURED} holds fewer than ` +
+      `${MIN_GAUGE_SAMPLES} readings per gauge at SIGNAL_COLLECT_INTERVAL=${SIGNAL_COLLECT_INTERVAL}s; ` +
+      `detection reads the last ${DETECTION_WINDOW_MINUTES} min instead`,
+  );
 }
 // The autonomous governance loop is opt-in.
 //

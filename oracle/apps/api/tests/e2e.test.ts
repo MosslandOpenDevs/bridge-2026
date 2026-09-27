@@ -1295,6 +1295,8 @@ async function testDetectionCountsOnlyNewRows() {
  *
  * Collection has to be on for that (with it off nothing is carried in), so
  * this boots with an hourly interval and a recorded last observation of now.
+ * At that interval the 120-minute default holds too few samples for the trend
+ * fit, so the window is widened to five intervals (effectiveWindowMinutes).
  * A trigger drops any medium_activity reading the live adapter might store,
  * so the seeded row is the only one. 1,200 newer rows of another stream, all
  * older than the window, are what pushed the row out of the old read: with
@@ -1321,10 +1323,10 @@ async function testPersistingGaugeStaysDetected() {
         `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic, stream)
          VALUES (?, ?, 'window-probe', ?, 'window_probe', 'low', ?, 'n/a', 'probe', 0, 'window_probe|probe')`,
       );
-      // Every 3 minutes from ~63 h to 3 h ago: newer than the medium row,
-      // outside the 2 h window.
+      // Every 3 minutes from ~66 h to 6 h ago: newer than the medium row,
+      // outside the 5 h window.
       for (let i = 0; i < 1200; i++) {
-        const at = new Date(Date.now() - (3 * 3600 + i * 180) * 1000).toISOString();
+        const at = new Date(Date.now() - (6 * 3600 + i * 180) * 1000).toISOString();
         filler.run(`wp-${i}`, `wp-${i}`, at, 1);
       }
       db.prepare(
@@ -1356,6 +1358,10 @@ async function testPersistingGaugeStaysDetected() {
     const first = await post("/api/issues/detect");
     assertStatus(first.response, 200, "first detection");
     assert(first.data.input?.stepSeconds === 3600, `detect: gauges sampled hourly, got ${JSON.stringify(first.data.input)}`);
+    assert(
+      Date.parse(first.data.input.to) - Date.parse(first.data.input.from) === 5 * 3600 * 1000,
+      `detect: a 120-min window widened to five hourly intervals, got ${JSON.stringify(first.data.input)}`,
+    );
     const [row] = openRow();
     assert(row, "detect: a medium_activity stored four days ago should still raise its issue");
     assert(row.description.includes("Low blog activity"), `detect: the threshold rule, got ${row.description}`);
