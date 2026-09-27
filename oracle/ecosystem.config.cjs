@@ -70,5 +70,28 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       merge_logs: true,
     },
+    {
+      // Daily verified SQLite backup (apps/api/scripts/db-backup.cjs): VACUUM
+      // INTO, quick_check, sha256, rotation, optional rsync off the host.
+      // Opt-in like bridge-deploy -- registered only by
+      // `pm2 start ecosystem.config.cjs --only bridge-db-backup`, see
+      // deploy/README.md "Scheduled backups & restore". pm2 evaluates the cron
+      // in the server's local time. :17 is off the 5-minute grid the pollers
+      // on this box tick on (algora :01, bridge :03, moss-ao :04); a deploy
+      // snapshot that does overlap is harmless -- both copies read the live
+      // database through read-only handles.
+      // Settings (BACKUP_*) are read from apps/api/.env by the script itself.
+      name: 'bridge-db-backup',
+      cwd: '.',
+      script: './apps/api/scripts/db-backup.cjs',
+      interpreter: 'node',
+      autorestart: false,
+      cron_restart: '17 4 * * *',
+      watch: false,
+      error_file: './logs/db-backup-error.log',
+      out_file: './logs/db-backup-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      merge_logs: true,
+    },
   ],
 };
