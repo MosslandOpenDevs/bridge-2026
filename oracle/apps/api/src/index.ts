@@ -35,6 +35,7 @@ import db, {
   deserializeSignal,
   serializeIssue,
   deserializeIssue,
+  inTransaction,
 } from "./db.js";
 
 // Import learning service
@@ -51,6 +52,7 @@ import {
 import { blockchainService } from "./blockchain.js";
 import { deriveHealth, healthHttpStatus, resolveHealthConfig } from "./health.js";
 import { loadMosslandAdapterState } from "./mossland-state.js";
+import { SignalChangeFilter, laterTimestamp, signalStream } from "./signal-dedupe.js";
 
 // Import security utilities
 import {
@@ -651,10 +653,18 @@ const healthHandler = (req: express.Request, res: express.Response) => {
         // when real collection is dead, so counting them here would report a
         // stalled pipeline as healthy — the exact failure this field exists to
         // surface. (Roughly a third of stored signals are synthetic.)
+        //
+        // The read stays even though the collector's own clock usually wins
+        // below: it is what finds a database that cannot be read ("down").
         const row = signalDb.getLatestObservedTimestamp.get() as
           | { timestamp?: string }
           | undefined;
-        return row?.timestamp ?? null;
+        // Unchanged readings are no longer stored (signal-dedupe.ts), so the
+        // newest row dates the last *change*, not the last observation — a
+        // quiet market would read as a stalled pipeline. The change filter
+        // remembers when a collection pass last returned an observed reading,
+        // stored or not; the later of the two is the answer.
+        return laterTimestamp(row?.timestamp, signalChanges.lastObservedAt);
       } catch (error) {
         console.error("health: could not read the latest observed signal time:", error);
         throw error;
@@ -719,22 +729,10 @@ app.get("/api/signals", async (req, res) => {
 
 app.post("/api/signals/collect", requireAdminKey, async (req, res) => {
   try {
-    const signals = await signalRegistry.collectSignals();
-
-    // Save to database
-    for (const signal of signals) {
-      signalDb.insert.run(serializeSignal(signal));
-    }
-
-    // Emit real-time event. The total comes from recomputed stats, so the
-    // event and the next GET /api/stats report the same number.
-    io.emit("signals:collected", {
-      count: signals.length,
-      total: refreshStats().signals.total,
-      signals: signals.slice(0, 5), // Send latest 5 for preview
-    });
-
-    res.json({ collected: signals.length, signals });
+    // The scheduler's path, so a manual pass stores and skips by the same rule.
+    // `signals` is everything collected, stored or not: what was observed.
+    const { signals, stored, skipped, synthetic } = await collectAndSaveSignals();
+    res.json({ collected: signals.length, stored, skipped, synthetic, signals });
   } catch (error) {
     console.error("Failed to collect signals:", error);
     res.status(500).json({ error: "Failed to collect signals" });
@@ -2666,25 +2664,101 @@ function requireVotingEnabled(
   });
 }
 
-// Helper function for background signal collection
+// Last stored reading per stream, seeded from the database before the server
+// listens so a restart compares against what is stored rather than storing
+// every stream again. That matters beyond one extra row each: an adapter that
+// keeps its last-seen item only in memory re-emits it after every restart
+// (SocialAdapter's latest Medium post does; MosslandAdapter no longer does,
+// since it is seeded from stored disclosures), and the seed is what
+// recognises such a reading as the row already stored.
+//
+// One DISTINCT over the partial idx_signals_stream plus one seek per stream.
+// Measured on a copy of the 2026-09-26 production database (1.1M rows) with a
+// month of change-only rows replayed into it: 10 streams seeded in under 1 ms.
+// Building the index is a one-time 0.2 s on the first boot.
+const signalChanges = (() => {
+  const started = performance.now();
+  const streams = signalDb.streams.all() as { stream: string }[];
+  const seed = streams.map(
+    ({ stream }) =>
+      signalDb.latestInStream.get(stream) as {
+        stream: string;
+        value: number;
+        description: string;
+        severity: string;
+      },
+  );
+  // The recorded last observation, or the newest observed row for a database
+  // that predates it. The row alone would date the last change, and a boot
+  // after a quiet stretch would start out reporting that as the last time the
+  // world was seen.
+  const latest = signalDb.getLatestObservedTimestamp.get() as { timestamp?: string } | undefined;
+  const recorded = signalDb.getLastObservedAt.get() as { last_observed_at?: string } | undefined;
+  const filter = new SignalChangeFilter(
+    seed,
+    laterTimestamp(recorded?.last_observed_at, latest?.timestamp),
+  );
+  console.log(
+    `🧮 Signal change filter: ${filter.streamCount} stream(s) seeded in ` +
+      `${(performance.now() - started).toFixed(1)}ms`,
+  );
+  return filter;
+})();
+
+/**
+ * Collect once and store what changed.
+ *
+ * An observed reading is stored only when (value, description, severity)
+ * differs from the last stored reading of its stream; synthetic readings are
+ * stored as before. See signal-dedupe.ts for why, and for what a stream is.
+ *
+ * The writes are one transaction and the filter learns them only after it
+ * commits: a pass that cannot write leaves the filter as it was and does not
+ * count as an observation, so /api/health goes stale on a database that
+ * refuses writes instead of reporting the readings it dropped as seen.
+ *
+ * The transaction always records the observation time as well, even when no
+ * reading changed. Otherwise a pass with nothing to store would commit an
+ * empty transaction — which succeeds on a read-only or locked database — and
+ * health would keep saying "ok" until some stream happened to move, up to
+ * ~2.5 h on the production series instead of staleAfter.
+ */
 async function collectAndSaveSignals() {
   const signals = await signalRegistry.collectSignals();
-  for (const signal of signals) {
-    signalDb.insert.run(serializeSignal(signal));
-  }
+  const plan = signalChanges.plan(signals, (signal) =>
+    signalStream(signal.category, signalRegistry.getRawSignal(signal.originalId)),
+  );
 
-  // A collection tick is the main thing that moves the stats, so they are
-  // recomputed here rather than on the next read; the event then carries the
-  // same total GET /api/stats will serve, without a second count of its own.
-  if (signals.length > 0) {
+  inTransaction(() => {
+    for (const { signal, stream } of plan.writes) {
+      signalDb.insert.run({ ...serializeSignal(signal), stream });
+    }
+    if (plan.lastObservedAt) signalDb.setLastObservedAt.run(plan.lastObservedAt);
+  });
+  signalChanges.commit(plan);
+
+  // Only when a row was written: the event tells the web client to refetch
+  // /api/signals and toasts "{count} new signals", and neither is true of a
+  // pass that changed nothing.
+  if (plan.writes.length > 0) {
     io.emit("signals:collected", {
-      count: signals.length,
+      // Rows written, synthetic included — the number of new entries a client
+      // will find. It used to be every reading collected.
+      count: plan.writes.length,
+      stored: plan.stored,
+      skipped: plan.skipped,
+      synthetic: plan.synthetic,
       total: refreshStats().signals.total,
-      signals: signals.slice(0, 5),
+      signals: plan.writes.slice(0, 5).map(({ signal }) => signal),
     });
   }
 
-  return signals;
+  return {
+    signals,
+    stored: plan.stored,
+    skipped: plan.skipped,
+    synthetic: plan.synthetic,
+  };
 }
 
 // Absent ranks below every real priority, so "never deliberated" always counts
@@ -3219,16 +3293,22 @@ httpServer.listen({ port: Number(PORT), host: HOST }, () => {
     console.log(`\n🔄 Auto signal collection: every ${SIGNAL_COLLECT_INTERVAL}s`);
 
     // Initial collection on startup
-    collectAndSaveSignals().then((signals) => {
-      console.log(`   ✅ Initial collection: ${signals.length} signals saved to DB`);
+    collectAndSaveSignals().then(({ signals, stored, skipped, synthetic }) => {
+      console.log(
+        `   ✅ Initial collection: ${signals.length} signals, ${stored} stored, ` +
+          `${skipped} unchanged, ${synthetic} synthetic`,
+      );
     }).catch((err) => {
       console.error("   ❌ Initial collection failed:", err);
     });
 
     // Periodic collection
     everyInterval("Auto-collection", SIGNAL_COLLECT_INTERVAL, async () => {
-      const signals = await collectAndSaveSignals();
-      console.log(`🔄 Collected ${signals.length} signals at ${new Date().toLocaleTimeString()}`);
+      const { signals, stored, skipped, synthetic } = await collectAndSaveSignals();
+      console.log(
+        `🔄 Collected ${signals.length} signals: ${stored} stored, ${skipped} unchanged, ` +
+          `${synthetic} synthetic at ${new Date().toLocaleTimeString()}`,
+      );
     });
   }
 

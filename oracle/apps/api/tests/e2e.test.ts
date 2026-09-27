@@ -728,21 +728,31 @@ async function testHealthReportsDown() {
  * answer 503 for degraded under ?strict=1, and still pass.
  *
  * Made deterministic without cutting the network: the newest observed signal
- * is a day old, and a trigger silently drops every insert into `signals`, so
- * whatever the adapters fetch never lands, which is what a stalled pipeline
- * looks like from here. Reads are untouched, so this is degraded and not down.
+ * is a day old, and a trigger makes every insert into `signals` fail, so
+ * whatever the adapters fetch never lands. A pass that cannot store its
+ * readings does not count as an observation either (the change filter learns
+ * a pass only after its write commits), which is what a stalled pipeline looks
+ * like from here. Reads are untouched, so this is degraded and not down.
+ *
+ * The trigger used to drop inserts silently with RAISE(IGNORE). Freshness no
+ * longer comes from the newest row alone — unchanged readings are not stored —
+ * so a write that reports success is taken at its word; a failing one is the
+ * stall this process can actually see.
  */
 async function testHealthWhileIngestionStalls() {
   const dbPath = join(dataDir, "e2e.db");
   const lastObserved = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const setUp = (db: InstanceType<typeof Database>) => {
     db.prepare("DELETE FROM signals WHERE synthetic = 0").run();
+    // Earlier passes recorded when they last observed; a day-old signal is
+    // only the last observation once that record is gone too.
+    db.prepare("DELETE FROM collector_state").run();
     db.prepare(
       `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic)
        VALUES ('stall-obs', 'stall-obs', 'health-probe', ?, 'health_probe_obs', 'low', 0, 'n/a', 'observed', 0)`,
     ).run(lastObserved);
     db.exec(`CREATE TRIGGER e2e_stall_ingestion BEFORE INSERT ON signals
-             BEGIN SELECT RAISE(IGNORE); END`);
+             BEGIN SELECT RAISE(ABORT, 'e2e: ingestion stalled'); END`);
   };
 
   stopServer(true);
@@ -844,6 +854,301 @@ async function testSignalsAndIssues() {
   const issues = await get("/api/issues");
   assertStatus(issues.response, 200, "list issues");
   assert(Array.isArray(issues.data.issues), "list issues: should be an array");
+}
+
+/**
+ * The store-on-change rule itself, exercised without a server. The cases are
+ * the production ones: the disclosure adapter's event and total share a
+ * category and must not defeat each other, moc_price's severity moves with the
+ * reading, and a pass whose write fails must leave nothing behind.
+ */
+async function testSignalChangeFilterRule() {
+  const { SignalChangeFilter, signalStream, laterTimestamp } = await import(
+    "../src/signal-dedupe.js"
+  );
+  const at = (minute: number) => new Date(Date.parse("2026-09-26T00:00:00.000Z") + minute * 60_000);
+  const reading = (category: string, value: number, description: string, minute: number, extra = {}) => ({
+    category,
+    value,
+    description,
+    severity: "low",
+    timestamp: at(minute),
+    ...extra,
+  });
+  const kinds = new Map<object, string>();
+  const typed = <T extends object>(signal: T, type: string) => {
+    kinds.set(signal, type);
+    return signal;
+  };
+  const streamOf = (signal: { category: string }) =>
+    signalStream(signal.category, { data: { type: kinds.get(signal) } });
+
+  assert(signalStream("moc_price", { data: { type: "price" } }) === "moc_price|price", "stream: category and type");
+  assert(signalStream("custom", { data: { _endpoint: "tvl" } }) === "custom|tvl", "stream: APIAdapter endpoint name");
+  assert(signalStream("custom", undefined) === "custom", "stream: category alone without a raw signal");
+  assert(laterTimestamp(null, undefined) === null, "laterTimestamp: nothing known");
+  assert(
+    laterTimestamp("2026-09-26T00:00:00.000Z", "2026-09-26T00:01:00.000Z") === "2026-09-26T00:01:00.000Z",
+    "laterTimestamp: the later one",
+  );
+
+  // Seeded with what is stored: the disclosure total, and the event a restart
+  // is about to re-emit.
+  const filter = new SignalChangeFilter(
+    [
+      { stream: "mossland_disclosure|disclosure_stats", value: 53, description: "Total 53 disclosures", severity: "low" },
+      { stream: "mossland_disclosure|disclosure", value: 1, description: "New disclosure: A", severity: "high" },
+    ],
+    "2026-09-25T23:59:00.000Z",
+  );
+  assert(filter.streamCount === 2, "seed: two streams");
+
+  const pass1 = [
+    typed(reading("mossland_disclosure", 1, "New disclosure: A", 1, { severity: "high" }), "disclosure"),
+    typed(reading("mossland_disclosure", 53, "Total 53 disclosures", 1), "disclosure_stats"),
+    typed(reading("moc_price", 41, "MOC 41", 1), "price"),
+    reading("token_price", 12.3, "demo", 1, { synthetic: true }),
+  ];
+  const plan1 = filter.plan(pass1, streamOf);
+  assert(plan1.skipped === 2, `restart re-emission and unchanged total skipped, got ${plan1.skipped}`);
+  assert(plan1.stored === 1 && plan1.synthetic === 1, "new stream stored, synthetic kept");
+  assert(
+    plan1.writes.map((w) => w.stream).join(",") === "moc_price|price,",
+    `writes: the new stream, then the synthetic row with no stream, got ${plan1.writes.map((w) => w.stream)}`,
+  );
+  assert(plan1.observedAt === at(1).toISOString(), "observedAt: newest observed reading, synthetic ignored");
+  assert(plan1.lastObservedAt === at(1).toISOString(), "lastObservedAt: what to record once the pass commits");
+  const demoOnly = filter.plan([reading("token_price", 1, "demo", 1, { synthetic: true })], streamOf);
+  assert(demoOnly.lastObservedAt === null, "a pass that observed nothing records no observation");
+
+  // The write failed: nothing is learned, and the next pass stores it again.
+  const retry = filter.plan(pass1, streamOf);
+  assert(retry.stored === 1, "an uncommitted plan leaves the filter unchanged");
+  assert(filter.lastObservedAt === "2026-09-25T23:59:00.000Z", "an uncommitted pass is not an observation");
+  filter.commit(retry);
+  assert(filter.lastObservedAt === at(1).toISOString(), "a committed pass is an observation");
+
+  // Severity alone changing is a change; so is the value moving and coming back.
+  const sequence = [
+    reading("moc_price", 41, "MOC 41", 2),
+    reading("moc_price", 41, "MOC 41", 3, { severity: "medium" }),
+    reading("moc_price", 42, "MOC 42", 4),
+    reading("moc_price", 41, "MOC 41", 5),
+    reading("moc_price", 41, "MOC 41", 6),
+  ].map((s) => typed(s, "price"));
+  const storedFlags = sequence.map((signal) => {
+    const plan = filter.plan([signal], streamOf);
+    filter.commit(plan);
+    return plan.stored;
+  });
+  assert(
+    storedFlags.join("") === "01110",
+    `moc_price: unchanged, severity change, value change, back again, unchanged -> 01110, got ${storedFlags.join("")}`,
+  );
+  assert(filter.lastObservedAt === at(6).toISOString(), "freshness advances on skipped readings too");
+
+  // Twice in one pass: judged against the reading about to be stored.
+  const twice = filter.plan(
+    [
+      typed(reading("moc_tx_alert", 7, "7 tx", 7), "transaction_alert"),
+      typed(reading("moc_tx_alert", 7, "7 tx", 7), "transaction_alert"),
+    ],
+    streamOf,
+  );
+  assert(twice.stored === 1 && twice.skipped === 1, "a repeat inside one pass is skipped");
+
+  // /api/market sends market cap as a string; the seeded row is a REAL from
+  // SQLite. The same reading must match across that, or every restart stores
+  // one duplicate row per such stream.
+  const market = new SignalChangeFilter(
+    [{ stream: "moc_market|market", value: 13772181754, description: "MOC market cap", severity: "low" }],
+    null,
+  );
+  const restartPass = market.plan(
+    [typed(reading("moc_market", "13772181754.00" as unknown as number, "MOC market cap", 8), "market")],
+    streamOf,
+  );
+  assert(
+    restartPass.stored === 0 && restartPass.skipped === 1,
+    `a numeric string equal to the stored REAL is the same reading, got stored=${restartPass.stored}`,
+  );
+  const movedPass = market.plan(
+    [typed(reading("moc_market", "13772181755.00" as unknown as number, "MOC market cap", 9), "market")],
+    streamOf,
+  );
+  assert(movedPass.stored === 1, "a numeric string that differs is a change");
+}
+
+/**
+ * Collection stores changes only, end to end, against a stub of the Mossland
+ * API so the readings are ours to hold still or move.
+ *
+ * Covers what the rule is for: an unchanged reading is not stored again, a
+ * changed one is, /api/health still advances when nothing was stored (its
+ * freshness must not start meaning "the market last moved"), and after a
+ * restart an unchanged reading is recognised from the seeded filter instead
+ * of being stored again. MosslandAdapter itself no longer re-announces the
+ * latest disclosure after a restart (it is seeded from stored events), which
+ * the restart step checks too.
+ */
+async function testUnchangedSignalsAreNotStored() {
+  const { createServer: createHttpServer } = await import("node:http");
+  const dbPath = join(dataDir, "e2e.db");
+  let disclosures = [
+    { title: "E2E disclosure C", date: "2026-09-03", url: "https://example.invalid/c" },
+    { title: "E2E disclosure B", date: "2026-09-02", url: "https://example.invalid/b" },
+    { title: "E2E disclosure A", date: "2026-09-01", url: "https://example.invalid/a" },
+  ];
+  // Only the disclosure list is served; every other Mossland endpoint 404s,
+  // which the adapter already treats as "no reading".
+  const stub = createHttpServer((req, res) => {
+    if (req.url?.startsWith("/api/disclosure")) {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(disclosures));
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
+  const address = stub.address();
+  const stubUrl = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+
+  type Row = { id: string; timestamp: string; value: number; description: string; stream: string | null };
+  const disclosureRows = (): Row[] => {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return db
+        .prepare(
+          `SELECT id, timestamp, value, description, stream FROM signals
+           WHERE category IN ('mossland_disclosure', 'mossland_disclosure_published')
+           ORDER BY timestamp`,
+        )
+        .all() as Row[];
+    } finally {
+      db.close();
+    }
+  };
+  // Rows an earlier collection stored from the live API stay out of the counts.
+  const before = new Set(disclosureRows().map((row) => row.id));
+  const ours = () => disclosureRows().filter((row) => !before.has(row.id));
+  const collect = async (label: string) => {
+    const result = await post("/api/signals/collect");
+    assertStatus(result.response, 200, label);
+    return result.data;
+  };
+
+  // No demo adapter: its rows are written on every pass, so with it on no
+  // pass is ever one with nothing to store, and the locked-database step
+  // below would fail on the demo insert whether or not an unchanged pass
+  // still writes.
+  const env = { MOSSLAND_API_URL: stubUrl, ENABLE_MOCK_SIGNALS: "0" };
+
+  stopServer(true);
+  await sleep(500);
+  try {
+    await startServer(env);
+
+    // An unrecognised list is the adapter's baseline: no event, only the total.
+    await collect("first collection");
+    const first = ours();
+    assert(first.length === 1, `first pass: only the total should be stored, got ${first.length}`);
+    assert(
+      first[0].stream === "mossland_disclosure|disclosure_stats",
+      `first pass: the total's stream, got ${first[0].stream}`,
+    );
+
+    const second = await collect("repeated collection");
+    const total = second.signals.find(
+      (s: { category: string; value: number }) => s.category === "mossland_disclosure" && s.value === 3,
+    );
+    assert(total, "second pass: the unchanged total should still be collected");
+    assert(ours().length === 1, `second pass: an unchanged reading must not be stored, got ${ours().length} rows`);
+    assert(second.skipped >= 1, `second pass: the response should count the skip, got ${second.skipped}`);
+
+    const health = await get("/api/health");
+    const lastObserved = Date.parse(health.data.lastObservedSignalAt);
+    assert(
+      lastObserved >= Date.parse(total.timestamp),
+      `health: lastObservedSignalAt should reach the unstored reading at ${total.timestamp}, got ${health.data.lastObservedSignalAt}`,
+    );
+    assert(
+      lastObserved > Math.max(...ours().map((row) => Date.parse(row.timestamp))),
+      "health: freshness should move past the newest stored disclosure row",
+    );
+
+    // A database that refuses writes has to fail a pass with nothing to store
+    // as well, or health reports it fresh until some stream happens to move.
+    // Holding the write lock from here is such a database whatever table the
+    // pass touches: an unchanged pass used to commit an empty transaction,
+    // which takes no lock, and advanced lastObservedSignalAt regardless.
+    const observedBeforeLock = health.data.lastObservedSignalAt;
+    const locker = new Database(dbPath);
+    try {
+      locker.exec("BEGIN IMMEDIATE");
+      const blocked = await post("/api/signals/collect");
+      assert(
+        blocked.response.status === 500,
+        `locked database: an unchanged pass should fail, got ${blocked.response.status}`,
+      );
+    } finally {
+      if (locker.inTransaction) locker.exec("ROLLBACK");
+      locker.close();
+    }
+    const afterLock = await get("/api/health");
+    assert(
+      afterLock.data.lastObservedSignalAt === observedBeforeLock,
+      `locked database: a pass that could not write is not an observation, got ${afterLock.data.lastObservedSignalAt}`,
+    );
+
+    disclosures = [
+      { title: "E2E disclosure D", date: "2026-09-04", url: "https://example.invalid/d" },
+      ...disclosures,
+    ];
+    await collect("collection after a change");
+    const changed = ours();
+    assert(changed.length === 3, `changed pass: the new event and the new total should be stored, got ${changed.length}`);
+    assert(
+      changed.some(
+        (row) =>
+          row.description.includes("E2E disclosure D") &&
+          row.stream === "mossland_disclosure_published|disclosure",
+      ) && changed.some((row) => row.stream?.endsWith("disclosure_stats") && row.value === 4),
+      "changed pass: an event row for disclosure D and a total of 4",
+    );
+
+    stopServer(true);
+    await sleep(500);
+    await startServer(env);
+    // The adapter is seeded from the stored events, so D is not announced
+    // again; the unchanged total is still collected, and the filter, seeded
+    // from the database, knows it is stored.
+    const afterRestart = await collect("collection after a restart");
+    assert(
+      !afterRestart.signals.some(
+        (s: { description: string }) => s.description.includes("E2E disclosure D"),
+      ),
+      "restart: the adapter should not re-announce the latest disclosure",
+    );
+    assert(
+      afterRestart.skipped >= 1,
+      `restart: the unchanged total should be skipped, got skipped=${afterRestart.skipped}`,
+    );
+    assert(ours().length === 3, `restart: nothing unchanged may be stored again, got ${ours().length} rows`);
+  } finally {
+    await new Promise<void>((resolve) => stub.close(() => resolve()));
+    stopServer(true);
+    await sleep(500);
+    // Leave no trace: later tests count what the live adapters stored.
+    const db = new Database(dbPath);
+    try {
+      const remove = db.prepare("DELETE FROM signals WHERE id = ?");
+      for (const row of ours()) remove.run(row.id);
+    } finally {
+      db.close();
+    }
+    await startServer();
+  }
 }
 
 /**
@@ -2230,7 +2535,10 @@ async function testStatsCache() {
     const afterCollect = await get("/api/stats");
     assert(
       afterCollect.data.signals.total + afterCollect.data.signals.synthetic.total ===
-        fresh.data.signals.total + fresh.data.signals.synthetic.total + collected.data.collected,
+        fresh.data.signals.total +
+          fresh.data.signals.synthetic.total +
+          collected.data.stored +
+          collected.data.synthetic,
       "stats: the collected rows should be counted after a collection",
     );
   } finally {
@@ -2274,6 +2582,8 @@ async function main() {
     await runTest("No success rate before anything is measured", testStatsBeforeAnyOutcome);
     await runTest("Admin endpoints require the key", testAdminAuthRequired);
     await runTest("Signals and issues", testSignalsAndIssues);
+    await runTest("Signal change filter rule", testSignalChangeFilterRule);
+    await runTest("Unchanged signals are not stored", testUnchangedSignalsAreNotStored);
     await runTest("Large issue pages leave signals out", testIssueListDefaults);
     await runTest("Detection counts only new rows", testDetectionCountsOnlyNewRows);
     await runTest("Legacy database upgrades and keeps health fast", testLegacyDatabaseUpgrade);
