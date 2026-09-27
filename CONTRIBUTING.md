@@ -73,6 +73,22 @@ git config --global user.email <id>+<username>@users.noreply.github.com
 GitHub → Settings → Emails → "Keep my email address private" and "Block
 command line pushes that expose my email".
 
+### Deployment details stay private
+
+The same permanence applies to what you write about the servers. This
+repository, its commit messages, and its PR descriptions and comments are all
+public, so none of them should name how production is laid out: host names,
+user names, home paths, IP addresses (LAN, tailnet or public), which ports are
+open, whether a firewall is on. Write `<app-host>` or `<proxy-ip>`, or an
+RFC 5737 documentation address such as `192.0.2.10` when an example needs a
+real-looking value, and keep the evidence itself in the private ops notes.
+
+A commit message cannot be changed once it is on `main`. PR text can be edited,
+but every earlier version stays readable in its "edited" history until someone
+with write access deletes it. The `public-identifiers` check fails on IPv4
+literals and tailnet names in files, in the commits of a push or PR, and in the
+PR title and body, and prints only where it found them.
+
 ## Pull requests
 
 Branch from `main`, open a PR, keep it reviewable. Most PRs here touch ten
@@ -87,6 +103,6 @@ and the noise-escalation rate went from 19.4% to 0 over 3,000 trials".
 CI runs two jobs: `oracle` and `deploy-script`. **Their names are
 load-bearing** — the deploy poller matches `DEPLOY_REQUIRED_CHECKS` against
 them, so renaming one means updating the server's configuration in the same
-change.
+change. The separate `public-identifiers` check is not part of that gate.
 
 `main` deploys. A merge is a production release.
