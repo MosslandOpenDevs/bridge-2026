@@ -36,6 +36,7 @@ import db, {
   serializeIssue,
   deserializeIssue,
   inTransaction,
+  detectionRowSource,
 } from "./db.js";
 
 // Import learning service
@@ -53,6 +54,12 @@ import { blockchainService } from "./blockchain.js";
 import { deriveHealth, healthHttpStatus, resolveHealthConfig } from "./health.js";
 import { loadMosslandAdapterState } from "./mossland-state.js";
 import { SignalChangeFilter, laterTimestamp, signalStream } from "./signal-dedupe.js";
+import {
+  buildDetectionInput,
+  collapseRepeatedSignals,
+  detectionWindow,
+  readDetectionRows,
+} from "./detection-input.js";
 
 // Import security utilities
 import {
@@ -798,16 +805,7 @@ app.get("/api/issues", async (req, res) => {
 
 app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
   try {
-    // Get signals from database
-    const signalRows = signalDb.getRecent.all(1000);
-    const signals = signalRows.map(deserializeSignal);
-
-    // Detect issues
-    const detectedIssues = [
-      ...anomalyDetector.analyze(signals),
-      ...thresholdDetector.analyze(signals),
-      ...trendDetector.analyze(signals),
-    ];
+    const { issues: detectedIssues, window, signals } = runDetectors();
 
     const { saved: savedIssues, inserted, escalations } =
       saveDetectedIssues(detectedIssues);
@@ -834,6 +832,15 @@ app.post("/api/issues/detect", requireAdminKey, async (req, res) => {
       saved: savedIssues.length,
       issues: allIssues,
       count: allIssues.length,
+      // What the detectors read, so a surprising result can be traced to its
+      // input: the window, how far gauges were sampled, and how many readings.
+      input: {
+        from: window.start,
+        to: window.end,
+        sampledUntil: window.stepMs === null ? null : window.sampleEnd,
+        stepSeconds: window.stepMs === null ? null : window.stepMs / 1000,
+        signals,
+      },
     });
   } catch (error) {
     console.error("Failed to detect issues:", error);
@@ -2582,6 +2589,17 @@ if (HEALTH_CONFIG.overrideRejected) {
   );
 }
 const ISSUE_DETECT_INTERVAL = parseInt(process.env.ISSUE_DETECT_INTERVAL || "300", 10); // 5 minutes
+// How far back each detection pass reads (detection-input.ts). 120 minutes is
+// about what the detectors saw while every reading was stored every minute:
+// the newest 1,000 rows they read spanned ~124 minutes until 2026-08-08, when
+// the demo adapter still wrote three rows a minute, and 125-166 (median 143)
+// in the week before the 2026-09-26 snapshot, depending on how many
+// collectors answered. The shorter end also clears an ended event sooner.
+const DETECTION_WINDOW_MINUTES = envInt("DETECTION_WINDOW_MINUTES", 120);
+if (DETECTION_WINDOW_MINUTES === 0) {
+  console.error("❌ Refusing to start: DETECTION_WINDOW_MINUTES must be at least 1");
+  process.exit(1);
+}
 // The autonomous governance loop is opt-in.
 //
 // It used to be on by default, so adding an LLM key was enough to have the
@@ -2823,16 +2841,38 @@ function saveDetectedIssues(detectedIssues: DetectedIssue[]): {
   return { saved, inserted, recurrences, escalations };
 }
 
-// Helper function for background issue detection
-async function detectAndSaveIssues() {
-  const signalRows = signalDb.getRecent.all(1000);
-  const signals = signalRows.map(deserializeSignal);
+/**
+ * Run the detectors over the last DETECTION_WINDOW_MINUTES.
+ *
+ * Both detect paths share this, like saveDetectedIssues, so the HTTP route and
+ * the scheduler cannot read different inputs. What the input is, and why it is
+ * no longer the newest 1,000 rows, is in detection-input.ts.
+ */
+function runDetectors(now = new Date()) {
+  // The collector's clock, or the newest observed row when that is later
+  // (a row written by something other than a collection pass) or unknown —
+  // the same rule /api/health applies.
+  const newest = signalDb.getLatestObservedTimestamp.get() as { timestamp?: string } | undefined;
+  const window = detectionWindow({
+    now,
+    windowMinutes: DETECTION_WINDOW_MINUTES,
+    collectIntervalSeconds: SIGNAL_COLLECT_INTERVAL,
+    lastObservedAt: laterTimestamp(newest?.timestamp, signalChanges.lastObservedAt),
+  });
+  const rows = buildDetectionInput(readDetectionRows(detectionRowSource, window), window);
+  const signals = rows.map(deserializeSignal);
 
-  const detectedIssues = [
+  const issues = [
     ...anomalyDetector.analyze(signals),
     ...thresholdDetector.analyze(signals),
     ...trendDetector.analyze(signals),
-  ];
+  ].map(collapseRepeatedSignals);
+  return { issues, window, signals: signals.length };
+}
+
+// Helper function for background issue detection
+async function detectAndSaveIssues() {
+  const { issues: detectedIssues } = runDetectors();
 
   const { saved: savedIssues, inserted: insertedCount, recurrences, escalations } =
     saveDetectedIssues(detectedIssues);
@@ -3314,7 +3354,9 @@ httpServer.listen({ port: Number(PORT), host: HOST }, () => {
 
   // Auto issue detection
   if (ISSUE_DETECT_INTERVAL > 0) {
-    console.log(`🔍 Auto issue detection: every ${ISSUE_DETECT_INTERVAL}s`);
+    console.log(
+      `🔍 Auto issue detection: every ${ISSUE_DETECT_INTERVAL}s over the last ${DETECTION_WINDOW_MINUTES} min`,
+    );
 
     // Initial detection after a short delay
     setTimeout(async () => {

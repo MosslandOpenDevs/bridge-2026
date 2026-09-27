@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 // Imported by name so declaration emit can reference these types (TS4023).
 import type { Database as SqliteDatabase } from "better-sqlite3";
 import path from "path";
+import type { DetectionRowSource, StoredSignalRow } from "./detection-input.js";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -582,6 +583,31 @@ export const signalDb = {
     SELECT * FROM signals WHERE category = ? ORDER BY timestamp DESC LIMIT ?
   `),
 
+  /**
+   * Issue detection's reads (detection-input.ts). Every row stamped in a
+   * window: a range on idx_signals_timestamp.
+   */
+  detectionWindow: db.prepare(`
+    SELECT * FROM signals WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC
+  `),
+
+  /** The row of a stream in force just before a time: one idx_signals_stream seek. */
+  detectionLatestInStream: db.prepare(`
+    SELECT * FROM signals WHERE stream = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1
+  `),
+
+  /**
+   * The same for a row stored before streams were recorded. Bounded below, so
+   * it is a range on idx_signals_synthetic_timestamp that stops at the first
+   * match rather than a walk of the category's history (checked with EXPLAIN
+   * QUERY PLAN on the 2026-09-26 snapshot, with and without ANALYZE).
+   */
+  detectionLatestLegacy: db.prepare(`
+    SELECT * FROM signals
+    WHERE synthetic = 0 AND stream IS NULL AND category = ? AND timestamp >= ? AND timestamp < ?
+    ORDER BY timestamp DESC LIMIT 1
+  `),
+
   /** Newest *observed* signal time. Excludes the demo adapter on purpose:
    *  synthetic rows keep arriving when real collection is dead, so including
    *  them makes a stalled pipeline look healthy. Used by /health. */
@@ -612,6 +638,15 @@ export const signalDb = {
   countObservedSince: db.prepare(`
     SELECT COUNT(*) as count FROM signals WHERE synthetic = 0 AND timestamp >= ?
   `),
+};
+
+/** Issue detection's reads over the statements above (detection-input.ts). */
+export const detectionRowSource: DetectionRowSource = {
+  between: (from, to) => signalDb.detectionWindow.all(from, to) as StoredSignalRow[],
+  latestInStream: (stream, before) =>
+    signalDb.detectionLatestInStream.get(stream, before) as StoredSignalRow | undefined,
+  latestLegacy: (category, from, before) =>
+    signalDb.detectionLatestLegacy.get(category, from, before) as StoredSignalRow | undefined,
 };
 
 // Migrate existing database: add kind and direction columns if they don't exist

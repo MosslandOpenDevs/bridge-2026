@@ -1283,6 +1283,121 @@ async function testDetectionCountsOnlyNewRows() {
 }
 
 /**
+ * A condition that holds without changing stays detected.
+ *
+ * Production's medium_activity has read 0 since before change-only storage,
+ * so it is stored once and never again. Detection used to read the newest
+ * 1,000 rows; after ~3 days of other streams' changes that row was no longer
+ * among them, and the open "Low blog activity" issue stopped being re-seen —
+ * last_seen_at froze while the blog was still silent. Detection now reads a
+ * time window and carries each gauge's row in force into it
+ * (detection-input.ts), so the issue is re-seen on every pass.
+ *
+ * Collection has to be on for that (with it off nothing is carried in), so
+ * this boots with an hourly interval and a recorded last observation of now.
+ * A trigger drops any medium_activity reading the live adapter might store,
+ * so the seeded row is the only one. 1,200 newer rows of another stream, all
+ * older than the window, are what pushed the row out of the old read: with
+ * them, reverting to the newest-1,000 read fails this test.
+ */
+async function testPersistingGaugeStaysDetected() {
+  const dbPath = join(dataDir, "e2e.db");
+  const fingerprint = "medium_activity|issue|";
+  const fourDaysAgo = new Date(Date.now() - 4 * 24 * 3600 * 1000).toISOString();
+
+  stopServer(true);
+  await sleep(500);
+  let db = new Database(dbPath);
+  try {
+    db.transaction(() => {
+      db.prepare(`DELETE FROM issues WHERE fingerprint = ?`).run(fingerprint);
+      db.prepare(`DELETE FROM signals WHERE category = 'medium_activity'`).run();
+      db.prepare(
+        `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic, stream)
+         VALUES ('persisting-medium', 'persisting-medium', 'api', ?, 'medium_activity', 'low', 0, 'posts/week',
+                 'Medium blog: 0 posts in last week', 0, 'medium_activity|blog_activity')`,
+      ).run(fourDaysAgo);
+      const filler = db.prepare(
+        `INSERT INTO signals (id, original_id, source, timestamp, category, severity, value, unit, description, synthetic, stream)
+         VALUES (?, ?, 'window-probe', ?, 'window_probe', 'low', ?, 'n/a', 'probe', 0, 'window_probe|probe')`,
+      );
+      // Every 3 minutes from ~63 h to 3 h ago: newer than the medium row,
+      // outside the 2 h window.
+      for (let i = 0; i < 1200; i++) {
+        const at = new Date(Date.now() - (3 * 3600 + i * 180) * 1000).toISOString();
+        filler.run(`wp-${i}`, `wp-${i}`, at, 1);
+      }
+      db.prepare(
+        `INSERT INTO collector_state (id, last_observed_at) VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET last_observed_at = excluded.last_observed_at`,
+      ).run(new Date().toISOString());
+      db.exec(`CREATE TRIGGER e2e_hold_medium BEFORE INSERT ON signals
+               WHEN NEW.category = 'medium_activity' BEGIN SELECT RAISE(IGNORE); END`);
+    })();
+  } finally {
+    db.close();
+  }
+
+  const openRow = () => {
+    const reader = new Database(dbPath, { readonly: true });
+    try {
+      return reader
+        .prepare(`SELECT id, last_seen_at, signal_ids, description FROM issues
+                  WHERE fingerprint = ? AND status = 'detected'`)
+        .all(fingerprint) as { id: string; last_seen_at: string; signal_ids: string; description: string }[];
+    } finally {
+      reader.close();
+    }
+  };
+
+  try {
+    await startServer({ SIGNAL_COLLECT_INTERVAL: "3600", MOSSLAND_API_URL: "http://127.0.0.1:9" });
+
+    const first = await post("/api/issues/detect");
+    assertStatus(first.response, 200, "first detection");
+    assert(first.data.input?.stepSeconds === 3600, `detect: gauges sampled hourly, got ${JSON.stringify(first.data.input)}`);
+    const [row] = openRow();
+    assert(row, "detect: a medium_activity stored four days ago should still raise its issue");
+    assert(row.description.includes("Low blog activity"), `detect: the threshold rule, got ${row.description}`);
+    const ids: string[] = JSON.parse(row.signal_ids);
+    assert(
+      ids.length === 1 && ids[0] === "persisting-medium",
+      `signal_ids: the stored row once, however many samples it was, got ${row.signal_ids}`,
+    );
+
+    await sleep(20);
+    const second = await post("/api/issues/detect");
+    assertStatus(second.response, 200, "second detection");
+    const after = openRow();
+    assert(after.length === 1 && after[0].id === row.id, "detect: the open issue is re-seen, not duplicated");
+    assert(
+      Date.parse(after[0].last_seen_at) > Date.parse(row.last_seen_at),
+      `detect: last_seen_at should advance while the condition holds: ${row.last_seen_at} -> ${after[0].last_seen_at}`,
+    );
+
+    const listed = await get("/api/issues?limit=50");
+    const issue = listed.data.issues.find((i: { id: string }) => i.id === row.id);
+    assert(
+      issue && issue.signals.length === 1 && issue.signals[0].id === "persisting-medium" &&
+        issue.signals[0].timestamp === fourDaysAgo,
+      "issues: the embedded signal is the stored row, with its own timestamp",
+    );
+  } finally {
+    stopServer(true);
+    await sleep(500);
+    db = new Database(dbPath);
+    try {
+      db.exec("DROP TRIGGER IF EXISTS e2e_hold_medium");
+      db.prepare(`DELETE FROM signals WHERE category IN ('medium_activity', 'window_probe')`).run();
+      db.prepare(`DELETE FROM issues WHERE fingerprint = ? OR category = 'window_probe'`).run(fingerprint);
+    } finally {
+      db.close();
+    }
+    await startServer();
+  }
+}
+
+/**
  * Opening a database that predates the `synthetic` column must migrate it,
  * and must leave /health's query with an efficient plan.
  *
@@ -2586,6 +2701,7 @@ async function main() {
     await runTest("Unchanged signals are not stored", testUnchangedSignalsAreNotStored);
     await runTest("Large issue pages leave signals out", testIssueListDefaults);
     await runTest("Detection counts only new rows", testDetectionCountsOnlyNewRows);
+    await runTest("A persisting condition stays detected", testPersistingGaugeStaysDetected);
     await runTest("Legacy database upgrades and keeps health fast", testLegacyDatabaseUpgrade);
     await runTest("Proposal settings are validated", testProposalValidation);
     await runTest("Voting integrity", testVotingIntegrity);
