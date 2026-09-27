@@ -338,9 +338,11 @@ any of these holds; everything else is deleted:
   `/api/issues` embeds), anomaly evidence in `issues.evidence`, signals inside
   `proposals.decision_packet`. The script scans every text column of every
   other table for ids, so no issue or proposal loses its evidence
-- it is within the **last 7 days** (`--keep-recent-days`), so issue detection
-  (newest 1,000 rows), `/api/signals?limit=N` and the monitors read exactly what
-  they read before
+- it is within the **last 7 days** (`--keep-recent-days`), so `/api/signals?limit=N`
+  and the monitors read exactly what they read before. Issue detection reads
+  the last `DETECTION_WINDOW_MINUTES` (120) plus, for each level, the row in
+  force when that window opens — a reading this always keeps, since every
+  row it deletes repeats a kept one (`apps/api/src/detection-input.ts`)
 
 **Synthetic** (demo) rows are kept unless `--export-synthetic <file.jsonl.gz>`
 is given; then all of them are written to that file first (verbatim columns,
