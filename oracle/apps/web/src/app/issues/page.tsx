@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useAccount } from "@/hooks/useMOC";
 import { AlertTriangle, MessageSquare, Users, Shield, Coins, Code, ChevronRight, Bot, Loader2, RefreshCw, CheckCircle, Clock, MessageCircle, FlaskConical } from "lucide-react";
 import { cn, timeAgo } from "@/lib/utils";
@@ -14,15 +14,16 @@ import { DebatePanel } from "@/components/DebatePanel";
 
 // Progress component for deliberation
 function DeliberationProgress({ isActive }: { isActive: boolean }) {
+  const t = useTranslations("issues.progress");
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState(0);
 
   const stages = [
-    { label: "Risk Agent 분석 중...", duration: 3000 },
-    { label: "Treasury Agent 분석 중...", duration: 3000 },
-    { label: "Community Agent 분석 중...", duration: 3000 },
-    { label: "Product Agent 분석 중...", duration: 3000 },
-    { label: "Moderator 종합 중...", duration: 2000 },
+    { label: t("risk"), duration: 3000 },
+    { label: t("treasury"), duration: 3000 },
+    { label: t("community"), duration: 3000 },
+    { label: t("product"), duration: 3000 },
+    { label: t("moderator"), duration: 2000 },
   ];
 
   useEffect(() => {
@@ -61,11 +62,11 @@ function DeliberationProgress({ isActive }: { isActive: boolean }) {
       <div className="flex items-center justify-between text-sm">
         <div className="flex items-center space-x-2">
           <Loader2 className="w-4 h-4 animate-spin text-moss-600" />
-          <span className="text-gray-600">{stages[stage]?.label || "분석 중..."}</span>
+          <span className="text-gray-600">{stages[stage]?.label || t("analyzing")}</span>
         </div>
         <div className="flex items-center space-x-1 text-gray-400">
           <Clock className="w-3 h-3" />
-          <span className="text-xs">약 15초 소요</span>
+          <span className="text-xs">{t("eta")}</span>
         </div>
       </div>
       <div className="w-full bg-gray-200 rounded-full h-2">
@@ -75,19 +76,27 @@ function DeliberationProgress({ isActive }: { isActive: boolean }) {
         />
       </div>
       <div className="flex justify-between text-xs text-gray-400">
-        <span>4개 에이전트 심의 + Moderator 종합</span>
+        <span>{t("summary")}</span>
         <span>{Math.round(progress)}%</span>
       </div>
     </div>
   );
 }
 
-const priorityColors: Record<string, string> = {
-  urgent: "bg-red-100 text-red-700",
-  high: "bg-orange-100 text-orange-700",
-  medium: "bg-yellow-100 text-yellow-700",
-  low: "bg-green-100 text-green-700",
+// Priority is the rule-based detector's rating (anomaly.ts: "urgent" when most
+// of the signals involved were high severity), and on the live data 555 of
+// 3,811 issues carry it. Shown as a small dot next to a label, not as a red
+// badge leading every card: the page read as a wall of URGENT alarms for
+// conditions nobody had assessed.
+const priorityDots: Record<string, string> = {
+  urgent: "bg-red-400",
+  high: "bg-orange-400",
+  medium: "bg-yellow-400",
+  low: "bg-green-400",
 };
+
+const PRIORITIES = ["urgent", "high", "medium", "low"];
+const STATUSES = ["detected", "deliberating", "proposed", "resolved"];
 
 const categoryIcons: Record<string, React.ElementType> = {
   governance: Users,
@@ -106,6 +115,7 @@ const stanceColors: Record<string, string> = {
 
 export default function IssuesPage() {
   const t = useTranslations();
+  const locale = useLocale();
   const tToast = useTranslations("toast");
   const tAdmin = useTranslations("admin");
   const hasAdminKey = useHasAdminKey();
@@ -118,7 +128,10 @@ export default function IssuesPage() {
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["issues"],
-    queryFn: () => api.getIssues(),
+    // The list never reads the embedded signal objects (only their ids, for the
+    // count), and embedding them made this request ~0.75 MB at the default
+    // limit. Deliberating an existing issue re-reads it from the DB by id.
+    queryFn: () => api.getIssues(undefined, { includeSignals: false }),
     refetchInterval: 30000,
   });
 
@@ -180,10 +193,10 @@ export default function IssuesPage() {
   const issues = data?.issues ?? [];
 
   const roleLabels: Record<string, string> = {
-    risk: "Risk",
-    treasury: t("delegation.treasury"),
-    community: t("delegation.community"),
-    product: "Product",
+    risk: t("issues.roles.risk"),
+    treasury: t("issues.roles.treasury"),
+    community: t("issues.roles.community"),
+    product: t("issues.roles.product"),
   };
 
   return (
@@ -226,6 +239,19 @@ export default function IssuesPage() {
             issues.map((issue: any) => {
               const CategoryIcon = categoryIcons[issue.category] || AlertTriangle;
               const agentOpinions = issue.agentOpinions || [];
+              const priority = PRIORITIES.includes(issue.priority) ? issue.priority : "medium";
+              // The API has never sent `signalCount`, which is why every card
+              // said "Related Signals: 0". signalIds is always present; the
+              // embedded signals array only when includeSignals is on.
+              const signalCount = Array.isArray(issue.signalIds)
+                ? issue.signalIds.length
+                : Array.isArray(issue.signals)
+                  ? issue.signals.length
+                  : 0;
+              // The detector folds a recurring condition into one issue and
+              // counts it (db.ts fingerprint), so an issue can be weeks old and
+              // still current; show both ends.
+              const occurrences = Number(issue.occurrenceCount) || 1;
               return (
                 <div
                   key={issue.id}
@@ -242,11 +268,10 @@ export default function IssuesPage() {
                       </div>
                       <div className="min-w-0">
                         <div className="flex items-center flex-wrap gap-1 sm:gap-2">
-                          <span className={cn("badge text-xs", priorityColors[issue.priority] || "bg-gray-100 text-gray-700")}>
-                            {(issue.priority || "medium").toUpperCase()}
-                          </span>
                           <span className="badge bg-blue-50 text-blue-600 text-xs">
-                            {issue.status}
+                            {STATUSES.includes(issue.status)
+                              ? t(`issues.statusLabels.${issue.status}`)
+                              : issue.status}
                           </span>
                           {issue.synthetic && (
                             <span
@@ -261,8 +286,26 @@ export default function IssuesPage() {
                         <h3 className="mt-2 font-semibold text-gray-900 text-sm sm:text-base line-clamp-2">{issue.title}</h3>
                         <p className="mt-1 text-xs sm:text-sm text-gray-500 line-clamp-2">{issue.description}</p>
                         <div className="mt-2 flex items-center flex-wrap gap-2 sm:gap-4 text-xs text-gray-400">
-                          <span>{timeAgo(new Date(issue.detectedAt))}</span>
-                          <span>{t("issues.relatedSignals")}: {issue.signalCount || 0}</span>
+                          <span
+                            className="flex items-center gap-1 text-gray-500"
+                            title={t("issues.priorityHint")}
+                          >
+                            <span
+                              aria-hidden="true"
+                              className={cn("w-2 h-2 rounded-full", priorityDots[priority])}
+                            />
+                            {t("issues.priorityLabel")}: {t(`issues.priorityLevels.${priority}`)}
+                          </span>
+                          <span>{t("issues.firstDetected", { time: timeAgo(issue.detectedAt, locale) })}</span>
+                          {occurrences > 1 && issue.lastSeenAt && (
+                            <span>
+                              {t("issues.occurrences", {
+                                count: occurrences,
+                                time: timeAgo(issue.lastSeenAt, locale),
+                              })}
+                            </span>
+                          )}
+                          <span>{t("issues.relatedSignals")}: {signalCount.toLocaleString(locale)}</span>
                         </div>
                       </div>
                     </div>
@@ -293,7 +336,7 @@ export default function IssuesPage() {
         <div className="lg:col-span-1">
           {selectedIssue ? (
             <div className="card sticky top-24 max-h-[calc(100vh-8rem)] overflow-y-auto">
-              <h3 className="font-semibold text-gray-900 mb-4 sticky top-0 bg-white pb-2 -mt-2 pt-2">Decision Packet</h3>
+              <h3 className="font-semibold text-gray-900 mb-4 sticky top-0 bg-white pb-2 -mt-2 pt-2">{t("issues.decisionPacket")}</h3>
 
               {!selectedIssue.decisionPacket && (!selectedIssue.agentOpinions || selectedIssue.agentOpinions.length === 0) ? (
                 <div className="text-center py-8 text-gray-500">
@@ -325,9 +368,9 @@ export default function IssuesPage() {
                     <div className="mt-4 space-y-2">
                       <div className="flex items-center justify-center space-x-2 text-moss-600">
                         <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>{t("issues.debating") || "Debating..."}</span>
+                        <span>{t("issues.debating")}</span>
                       </div>
-                      <p className="text-xs text-gray-400">Multi-round debate in progress...</p>
+                      <p className="text-xs text-gray-400">{t("issues.debateInProgress")}</p>
                     </div>
                   )}
                 </div>
@@ -453,7 +496,7 @@ export default function IssuesPage() {
           ) : (
             <div className="card text-center py-12 text-gray-500">
               <AlertTriangle className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-              <p>{t("common.view")}</p>
+              <p>{t("issues.selectIssue")}</p>
             </div>
           )}
         </div>

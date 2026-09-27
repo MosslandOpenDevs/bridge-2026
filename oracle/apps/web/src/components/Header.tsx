@@ -9,6 +9,7 @@ import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { RealtimeIndicator } from "./RealtimeIndicator";
 import { AdminKeyButton } from "./AdminKeyButton";
+import { VOTING_ENABLED } from "@/lib/voting";
 import {
   Activity,
   AlertTriangle,
@@ -25,7 +26,9 @@ const navigationKeys = [
   { key: "signals", href: "/signals", icon: Activity },
   { key: "issues", href: "/issues", icon: AlertTriangle },
   { key: "proposals", href: "/proposals", icon: Vote },
-  { key: "delegation", href: "/delegation", icon: Users },
+  // Delegation is part of BRIDGE's own voting, which is off unless
+  // NEXT_PUBLIC_VOTING_ENABLED is set; /delegation then points to Agora.
+  ...(VOTING_ENABLED ? [{ key: "delegation", href: "/delegation", icon: Users } as const] : []),
   { key: "outcomes", href: "/outcomes", icon: BarChart3 },
 ] as const;
 
@@ -86,11 +89,15 @@ export function Header() {
             <div className="hidden sm:block">
               <LanguageSwitcher />
             </div>
-            <ConnectButton
-              showBalance={false}
-              chainStatus="none"
-              accountStatus={{ smallScreen: "avatar", largeScreen: "full" }}
-            />
+            {/* The wallet is for voting and delegating, which happen on
+                Agora while BRIDGE's own voting is off. */}
+            {VOTING_ENABLED && (
+              <ConnectButton
+                showBalance={false}
+                chainStatus="none"
+                accountStatus={{ smallScreen: "avatar", largeScreen: "full" }}
+              />
+            )}
           </div>
         </div>
       </div>

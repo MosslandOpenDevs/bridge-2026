@@ -138,6 +138,10 @@ async function startServer(overrides: Record<string, string> = {}): Promise<void
     env: {
       ...process.env,
       PORT: String(port),
+      // Listen where baseUrl points, even if apps/api/.env binds a tailnet
+      // address; empty for the same dotenv reason as the LLM keys below.
+      HOST: "",
+      TRUST_PROXY: "",
       DB_PATH: join(dataDir, "e2e.db"),
       ADMIN_API_KEY: ADMIN_KEY,
       NODE_ENV: "test",
@@ -169,6 +173,11 @@ async function startServer(overrides: Record<string, string> = {}): Promise<void
       AUTO_DELIBERATE_ENABLED: "",
       AUTO_PROPOSAL_ENABLED: "",
       OUTCOME_EVAL_ENABLED: "",
+      // BRIDGE's own voting is off by default (Mossland DAO votes on Agora),
+      // but the code stays behind VOTING_ENABLED and the governance tests keep
+      // exercising it. testVotingOffByDefault boots without this to pin the
+      // default.
+      VOTING_ENABLED: "1",
       // No chain access: demo weights, no signature requirement.
       MAINNET_RPC_URL: "off",
       REQUIRE_VOTE_SIGNATURE: "never",
@@ -294,6 +303,38 @@ async function createProposal(options: Record<string, unknown> = {}) {
   return data.proposal;
 }
 
+/**
+ * The `stats:update` payload a new Socket.IO connection receives.
+ *
+ * Spoken over Engine.IO's long-polling transport with plain fetch — open,
+ * CONNECT to the default namespace, read until the event arrives, close — so
+ * the suite needs no socket.io-client dependency.
+ */
+async function socketStats(): Promise<any> {
+  const base = `${baseUrl}/socket.io/?EIO=4&transport=polling`;
+  const open = await fetch(base);
+  assertStatus(open, 200, "socket handshake");
+  const { sid } = JSON.parse((await open.text()).slice(1));
+  const url = `${base}&sid=${sid}`;
+  const send = (packet: string) =>
+    fetch(url, { method: "POST", body: packet, headers: { "Content-Type": "text/plain" } });
+  try {
+    assertStatus(await send("40"), 200, "socket connect");
+    for (let poll = 0; poll < 3; poll++) {
+      const body = await (await fetch(url, { signal: AbortSignal.timeout(5000) })).text();
+      // Engine.IO v4 separates packets in one polling payload with 0x1e.
+      for (const packet of body.split("\x1e")) {
+        if (!packet.startsWith("42")) continue;
+        const [event, data] = JSON.parse(packet.slice(2));
+        if (event === "stats:update") return data;
+      }
+    }
+    throw new Error("socket: no stats:update after connecting");
+  } finally {
+    await send("1").catch(() => undefined);
+  }
+}
+
 /* -------------------------------- tests ------------------------------- */
 
 async function testHealthCheck() {
@@ -353,6 +394,158 @@ async function testAutonomousLoopOffByDefault() {
     "Outcome evaluation: DISABLED",
   ]) {
     assert(await logContains(line), `startup log should say "${line}"`);
+  }
+}
+
+/**
+ * Boot a second, throwaway API process with its own port and database, for
+ * tests about how the process starts rather than what it serves. Resolves once
+ * GET /health answers (not /api/health, which the global rate limiter counts)
+ * or with the exit code if the process stops first.
+ */
+async function bootSide(
+  env: Record<string, string>,
+): Promise<{ url: string; exitCode: number | null; log: () => string; stop: () => void }> {
+  const dir = mkdtempSync(join(tmpdir(), "oracle-side-"));
+  const port = await freePort();
+  const out: string[] = [];
+  const child = spawn(process.execPath, [join(API_ROOT, "dist", "index.js")], {
+    cwd: API_ROOT,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "",
+      TRUST_PROXY: "",
+      DB_PATH: join(dir, "side.db"),
+      ADMIN_API_KEY: ADMIN_KEY,
+      NODE_ENV: "test",
+      ENABLE_MOCK_SIGNALS: "0",
+      ANTHROPIC_API_KEY: "",
+      OPENAI_API_KEY: "",
+      LLM_PROVIDER: "",
+      OLLAMA_BASE_URL: "",
+      SIGNAL_COLLECT_INTERVAL: "0",
+      ISSUE_DETECT_INTERVAL: "0",
+      AUTO_FINALIZE_INTERVAL: "0",
+      AUTO_DELIBERATE_ENABLED: "",
+      AUTO_PROPOSAL_ENABLED: "",
+      OUTCOME_EVAL_ENABLED: "",
+      MAINNET_RPC_URL: "off",
+      ...env,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", (c) => out.push(String(c)));
+  child.stderr?.on("data", (c) => out.push(String(c)));
+  // 'close', not 'exit': only then has the refusal message been read off the pipe.
+  const closed = new Promise((resolve) => child.on("close", resolve));
+  const stop = () => {
+    child.kill("SIGTERM");
+    rmSync(dir, { recursive: true, force: true });
+  };
+  const url = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) {
+      await closed;
+      stop();
+      return { url, exitCode: child.exitCode, log: () => out.join(""), stop };
+    }
+    try {
+      if ((await fetch(`${url}/health`)).ok) {
+        return { url, exitCode: null, log: () => out.join(""), stop };
+      }
+    } catch {
+      // not up yet
+    }
+    await sleep(100);
+  }
+  stop();
+  throw new Error(`side API neither came up nor exited:\n${out.join("")}`);
+}
+
+/** Whether this host can listen on ::1, i.e. has an IPv6 loopback at all. */
+async function hasIpv6Loopback(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const srv = createServer();
+    srv.once("error", () => resolve(false));
+    srv.listen(0, "::1", () => srv.close(() => resolve(true)));
+  });
+}
+
+/**
+ * HOST binds one address, and TRUST_PROXY decides whose X-Forwarded-For moves
+ * a caller into another rate-limit bucket. The second half is the reason the
+ * setting exists: with the default of one hop, anything reaching the port
+ * without nginx can name a new address per request and never be limited.
+ */
+async function testBindHostAndTrustedProxy() {
+  // Three /api/ requests a minute per client, so a shared bucket shows at once.
+  const limit = { RATE_LIMIT_GLOBAL: "3" };
+  const forged = (url: string, i: number) =>
+    fetch(`${url}/api/health`, { headers: { "X-Forwarded-For": `203.0.113.${i}` } });
+
+  const bound = await bootSide({ ...limit, HOST: "127.0.0.1", TRUST_PROXY: "127.0.0.1" });
+  try {
+    assert(bound.exitCode === null, `HOST=127.0.0.1 should boot:\n${bound.log()}`);
+    const health = await fetch(`${bound.url}/api/health`);
+    assertStatus(health, 200, "health on the bound address");
+    assert((await health.json()).service === "bridge", "health: bound server should answer as bridge");
+    const port = new URL(bound.url).port;
+    assert(
+      bound.log().includes(`Listening on 127.0.0.1:${port}, X-Forwarded-For trusted from 127.0.0.1`),
+      `startup log should name the bound address and the trusted proxy:\n${bound.log()}`,
+    );
+    // Answering on 127.0.0.1 is also what a wildcard bind does. The bind is
+    // only real if another local address is refused; ::1 is the one every
+    // dual-stack host has (skipped where it does not exist).
+    if (await hasIpv6Loopback()) {
+      const other = await fetch(`http://[::1]:${port}/health`).then(
+        (res) => `answered ${res.status}`,
+        (error: unknown) => {
+          const cause = (error as { cause?: { code?: string } }).cause;
+          return cause?.code ?? String(error);
+        },
+      );
+      assert(other === "ECONNREFUSED", `HOST=127.0.0.1 should refuse [::1]:${port}, got ${other}`);
+    } else {
+      console.log("    (no ::1 on this host; skipped the other-interface check)");
+    }
+    // The caller is the trusted proxy here, so each forwarded address is a
+    // client of its own and none of them reaches the limit.
+    for (let i = 1; i <= 5; i++) {
+      assertStatus(await forged(bound.url, i), 200, `forwarded client ${i} via the trusted proxy`);
+    }
+  } finally {
+    bound.stop();
+  }
+
+  // Same forged headers from a peer that is not the named proxy: they are
+  // ignored, every request counts against the caller, and the fourth is 429.
+  const direct = await bootSide({ ...limit, TRUST_PROXY: "100.107.17.114" });
+  try {
+    assert(direct.exitCode === null, `TRUST_PROXY=<ip> should boot:\n${direct.log()}`);
+    const statuses: number[] = [];
+    for (let i = 1; i <= 4; i++) statuses.push((await forged(direct.url, i)).status);
+    assert(
+      statuses.join(",") === "200,200,200,429",
+      `a direct caller should not escape the limit by forging X-Forwarded-For, got ${statuses.join(",")}`,
+    );
+  } finally {
+    direct.stop();
+  }
+}
+
+async function testInvalidTrustProxyStopsBoot() {
+  for (const value of ["true", "10.0.0.1, 2", "10.0.0.0/33", "nginx.internal"]) {
+    const side = await bootSide({ TRUST_PROXY: value });
+    if (side.exitCode === null) side.stop();
+    assert(side.exitCode === 1, `TRUST_PROXY="${value}" should stop the boot, exit code ${side.exitCode}`);
+    assert(
+      side.log().includes(`Refusing to start: TRUST_PROXY must be a hop count`) &&
+        side.log().includes(`got "${value}"`),
+      `TRUST_PROXY="${value}" should be named in the refusal:\n${side.log()}`,
+    );
   }
 }
 
@@ -763,6 +956,7 @@ async function testSignalChangeFilterRule() {
     streamOf,
   );
   assert(twice.stored === 1 && twice.skipped === 1, "a repeat inside one pass is skipped");
+
 }
 
 /**
@@ -771,9 +965,11 @@ async function testSignalChangeFilterRule() {
  *
  * Covers what the rule is for: an unchanged reading is not stored again, a
  * changed one is, /api/health still advances when nothing was stored (its
- * freshness must not start meaning "the market last moved"), and a restart —
- * which makes MosslandAdapter re-emit the latest disclosure as "new" — is
- * recognised from the seeded filter instead of storing it again.
+ * freshness must not start meaning "the market last moved"), and after a
+ * restart an unchanged reading is recognised from the seeded filter instead
+ * of being stored again. MosslandAdapter itself no longer re-announces the
+ * latest disclosure after a restart (it is seeded from stored events), which
+ * the restart step checks too.
  */
 async function testUnchangedSignalsAreNotStored() {
   const { createServer: createHttpServer } = await import("node:http");
@@ -805,7 +1001,8 @@ async function testUnchangedSignalsAreNotStored() {
       return db
         .prepare(
           `SELECT id, timestamp, value, description, stream FROM signals
-           WHERE category = 'mossland_disclosure' ORDER BY timestamp`,
+           WHERE category IN ('mossland_disclosure', 'mossland_disclosure_published')
+           ORDER BY timestamp`,
         )
         .all() as Row[];
     } finally {
@@ -832,16 +1029,13 @@ async function testUnchangedSignalsAreNotStored() {
   try {
     await startServer(env);
 
+    // An unrecognised list is the adapter's baseline: no event, only the total.
     await collect("first collection");
     const first = ours();
+    assert(first.length === 1, `first pass: only the total should be stored, got ${first.length}`);
     assert(
-      first.length === 2,
-      `first pass: the latest disclosure and the total should be stored, got ${first.length}`,
-    );
-    assert(
-      first.map((row) => row.stream).sort().join(",") ===
-        "mossland_disclosure|disclosure,mossland_disclosure|disclosure_stats",
-      `first pass: the event and the total are separate streams, got ${first.map((row) => row.stream)}`,
+      first[0].stream === "mossland_disclosure|disclosure_stats",
+      `first pass: the total's stream, got ${first[0].stream}`,
     );
 
     const second = await collect("repeated collection");
@@ -849,7 +1043,7 @@ async function testUnchangedSignalsAreNotStored() {
       (s: { category: string; value: number }) => s.category === "mossland_disclosure" && s.value === 3,
     );
     assert(total, "second pass: the unchanged total should still be collected");
-    assert(ours().length === 2, `second pass: an unchanged reading must not be stored, got ${ours().length} rows`);
+    assert(ours().length === 1, `second pass: an unchanged reading must not be stored, got ${ours().length} rows`);
     assert(second.skipped >= 1, `second pass: the response should count the skip, got ${second.skipped}`);
 
     const health = await get("/api/health");
@@ -893,26 +1087,34 @@ async function testUnchangedSignalsAreNotStored() {
     ];
     await collect("collection after a change");
     const changed = ours();
-    assert(changed.length === 4, `changed pass: the new event and the new total should be stored, got ${changed.length}`);
+    assert(changed.length === 3, `changed pass: the new event and the new total should be stored, got ${changed.length}`);
     assert(
-      changed.some((row) => row.description.includes("E2E disclosure D")) &&
-        changed.some((row) => row.stream?.endsWith("disclosure_stats") && row.value === 4),
-      "changed pass: rows for disclosure D and a total of 4",
+      changed.some(
+        (row) =>
+          row.description.includes("E2E disclosure D") &&
+          row.stream === "mossland_disclosure_published|disclosure",
+      ) && changed.some((row) => row.stream?.endsWith("disclosure_stats") && row.value === 4),
+      "changed pass: an event row for disclosure D and a total of 4",
     );
 
-    // A restart forgets the adapter's last disclosure date, so it reports D as
-    // new again. The filter, seeded from the database, knows it is stored.
     stopServer(true);
     await sleep(500);
     await startServer(env);
+    // The adapter is seeded from the stored events, so D is not announced
+    // again; the unchanged total is still collected, and the filter, seeded
+    // from the database, knows it is stored.
     const afterRestart = await collect("collection after a restart");
     assert(
-      afterRestart.signals.some(
+      !afterRestart.signals.some(
         (s: { description: string }) => s.description.includes("E2E disclosure D"),
       ),
-      "restart: the adapter should re-emit the latest disclosure",
+      "restart: the adapter should not re-announce the latest disclosure",
     );
-    assert(ours().length === 4, `restart: the re-emitted disclosure must not be stored again, got ${ours().length} rows`);
+    assert(
+      afterRestart.skipped >= 1,
+      `restart: the unchanged total should be skipped, got skipped=${afterRestart.skipped}`,
+    );
+    assert(ours().length === 3, `restart: nothing unchanged may be stored again, got ${ours().length} rows`);
   } finally {
     await new Promise<void>((resolve) => stub.close(() => resolve()));
     stopServer(true);
@@ -926,6 +1128,74 @@ async function testUnchangedSignalsAreNotStored() {
       db.close();
     }
     await startServer();
+  }
+}
+
+/**
+ * Embedded signals are what made ?limit=500 a 6.8MB answer in production, so
+ * large pages leave them out unless asked, and no page exceeds 200 rows. Small
+ * pages — the issues page reads the default 50 — keep embedding, so existing
+ * consumers see no change.
+ */
+async function testIssueListDefaults() {
+  const category = "issue_list_probe";
+  const db = new Database(join(dataDir, "e2e.db"));
+  try {
+    // More open rows than the cap, so the cap is what limits the page.
+    const insert = db.prepare(
+      `INSERT INTO issues (id, title, description, category, priority, status, detected_at, signal_ids, synthetic, fingerprint)
+       VALUES (?, 'probe', 'probe', ?, 'low', 'detected', ?, '[]', 1, ?)`,
+    );
+    const at = new Date().toISOString();
+    db.transaction(() => {
+      for (let i = 0; i < 205; i++) insert.run(`ilp-${i}`, category, at, `${category}|issue|`);
+    })();
+  } finally {
+    db.close();
+  }
+
+  try {
+    const embedded = (issues: any[]) => issues.every((issue) => Array.isArray(issue.signals));
+    const bare = (issues: any[]) => issues.every((issue) => !("signals" in issue));
+
+    const small = await get("/api/issues");
+    assertStatus(small.response, 200, "default issue list");
+    assert(
+      small.data.signalsIncluded === true && small.data.count > 0 && embedded(small.data.issues),
+      "issues: the default page of 50 should still embed signals",
+    );
+
+    const large = await get("/api/issues?limit=51");
+    assertStatus(large.response, 200, "issue list of 51");
+    assert(
+      large.data.signalsIncluded === false && large.data.count === 51 && bare(large.data.issues),
+      `issues: a page over 50 should leave signals out by default, got signalsIncluded=${large.data.signalsIncluded}`,
+    );
+
+    const asked = await get("/api/issues?limit=51&includeSignals=true");
+    assert(
+      asked.data.signalsIncluded === true && embedded(asked.data.issues),
+      "issues: includeSignals=true should still embed on a large page",
+    );
+
+    const declined = await get("/api/issues?limit=10&includeSignals=false");
+    assert(
+      declined.data.signalsIncluded === false && bare(declined.data.issues),
+      "issues: includeSignals=false should hold on a small page",
+    );
+
+    const capped = await get("/api/issues?limit=1000");
+    assert(
+      capped.data.count === 200,
+      `issues: limit should be capped at 200, got ${capped.data.count}`,
+    );
+  } finally {
+    const cleanup = new Database(join(dataDir, "e2e.db"));
+    try {
+      cleanup.prepare(`DELETE FROM issues WHERE category = ?`).run(category);
+    } finally {
+      cleanup.close();
+    }
   }
 }
 
@@ -1166,6 +1436,86 @@ async function testVotingIntegrity() {
   assert(tally.data.tally.voteCount === 2, "tally: expected 2 ballots");
 }
 
+/**
+ * Voting and delegation moved to Agora: with VOTING_ENABLED left at its
+ * default, every vote and delegation write must answer 410 with a code and a
+ * link a client can act on, while the reads keep serving the history. Empty
+ * rather than omitted, as with the autonomous-loop flags, so an apps/api/.env
+ * that turns voting on cannot change what this pins.
+ */
+async function testVotingOffByDefault() {
+  // Created while voting is on, so the DELETE below has something real to refuse.
+  const owner = voterAddress(0xd1);
+  const conditions = [
+    { field: "decisionPacket.issue.category", operator: "in", value: ["governance"] },
+  ];
+  const created = await post(
+    "/api/delegations",
+    { delegator: owner, delegate: "risk-agent", conditions },
+    false,
+  );
+  assertStatus(created.response, 201, "delegation while voting is on");
+
+  stopServer(true);
+  await sleep(500);
+  const logFrom = serverLog.length;
+  await startServer({ VOTING_ENABLED: "" });
+  try {
+    assert(
+      await logContains("Voting and delegation: DISABLED", logFrom),
+      'startup log should say "Voting and delegation: DISABLED"',
+    );
+
+    const assertMoved = (context: string, result: { response: Response; data: any }) => {
+      assertStatus(result.response, 410, context);
+      assert(
+        result.data?.code === "VOTING_MOVED_TO_AGORA",
+        `${context}: expected code VOTING_MOVED_TO_AGORA, got ${result.data?.code}`,
+      );
+      assert(
+        result.data?.agoraUrl === "https://agora.moss.land",
+        `${context}: expected agoraUrl https://agora.moss.land, got ${result.data?.agoraUrl}`,
+      );
+    };
+
+    // Admin proposal creation is unaffected; only the public writes close.
+    const proposal = await createProposal({ votingPeriod: 60_000 });
+    assertMoved(
+      "vote with voting off",
+      await post(
+        `/api/proposals/${proposal.id}/vote`,
+        { voter: voterAddress(0xd2), choice: "for", weight: "100" },
+        false,
+      ),
+    );
+    assertMoved(
+      "delegation with voting off",
+      await post(
+        "/api/delegations",
+        { delegator: voterAddress(0xd3), delegate: "risk-agent", conditions },
+        false,
+      ),
+    );
+    assertMoved(
+      "revocation with voting off",
+      await del(`/api/delegations/${created.data.policy.id}`, undefined, false),
+    );
+
+    const detail = await get(`/api/proposals/${proposal.id}`);
+    assertStatus(detail.response, 200, "proposal detail with voting off");
+    const history = await get(`/api/delegations?delegator=${owner}`);
+    assertStatus(history.response, 200, "delegation history with voting off");
+    assert(
+      history.data.policies.some((p: any) => p.id === created.data.policy.id && p.active),
+      "a refused revocation must leave the stored delegation as it was",
+    );
+  } finally {
+    stopServer(true);
+    await sleep(500);
+    await startServer();
+  }
+}
+
 async function testProposalListIncludesTally() {
   const proposal = await createProposal({ votingPeriod: 60_000 });
   await post(
@@ -1282,6 +1632,99 @@ async function testProposalListMarksSynthetic() {
 
   const invalid = await get("/api/proposals?synthetic=hide");
   assertStatus(invalid.response, 400, "unknown synthetic filter");
+}
+
+/**
+ * The full proposal list is 3.38MB in production and it could not be asked for
+ * less; limit and offset page it after the filters, and without them the
+ * answer is exactly what it was.
+ */
+async function testProposalListPaging() {
+  // At least three, whatever ran before.
+  await createProposal({ votingPeriod: 60_000 });
+  await createProposal({ votingPeriod: 60_000 });
+  const newest = await createProposal({ votingPeriod: 60_000 });
+
+  const full = await get("/api/proposals");
+  assertStatus(full.response, 200, "unpaged list");
+  const all: string[] = full.data.proposals.map((p: { id: string }) => p.id);
+  assert(
+    full.data.count === all.length && full.data.returned === all.length && all.length >= 3,
+    `unpaged list: count ${full.data.count} and returned ${full.data.returned} should both be ${all.length}`,
+  );
+
+  const first = await get("/api/proposals?limit=2");
+  assertStatus(first.response, 200, "first page");
+  assert(
+    first.data.count === all.length && first.data.returned === 2,
+    `first page: expected count ${all.length} and returned 2, got ${first.data.count}/${first.data.returned}`,
+  );
+  assert(
+    first.data.proposals.map((p: { id: string }) => p.id).join() === all.slice(0, 2).join(),
+    "first page should be the head of the unpaged list",
+  );
+  assert(
+    typeof first.data.proposals[0].tally === "object",
+    "paged rows should carry their tally like unpaged ones",
+  );
+
+  const second = await get("/api/proposals?limit=2&offset=1");
+  assert(
+    second.data.proposals.map((p: { id: string }) => p.id).join() === all.slice(1, 3).join(),
+    "offset should shift the page along the same order",
+  );
+
+  const past = await get(`/api/proposals?offset=${all.length}`);
+  assert(
+    past.data.returned === 0 && past.data.count === all.length,
+    "an offset past the end should return an empty page but the full count",
+  );
+
+  // Pages are cut oldest first unless asked otherwise: the default is the
+  // unpaged order, and order=desc puts the newest proposal on the first page.
+  const ids = (data: any) => data.proposals.map((p: { id: string }) => p.id).join();
+  const asc = await get("/api/proposals?order=asc");
+  assert(ids(asc.data) === all.join(), "order=asc should be the default, unpaged order");
+  const latest = await get("/api/proposals?order=desc&limit=1");
+  assertStatus(latest.response, 200, "newest page");
+  assert(
+    latest.data.returned === 1 && latest.data.proposals[0].id === newest.id,
+    `order=desc&limit=1 should be the proposal created last (${newest.id}), got ${ids(latest.data)}`,
+  );
+  const desc = await get("/api/proposals?order=desc");
+  const created = desc.data.proposals.map((p: { createdAt: string }) => Date.parse(p.createdAt));
+  assert(
+    desc.data.count === all.length &&
+      created.every((t: number, i: number) => i === 0 || created[i - 1] >= t),
+    "order=desc should list every proposal, newest createdAt first",
+  );
+  const descPage = await get("/api/proposals?order=desc&limit=2&offset=1");
+  assert(
+    ids(descPage.data) === desc.data.proposals.slice(1, 3).map((p: { id: string }) => p.id).join(),
+    "offset should shift a desc page along the desc order",
+  );
+  const badOrder = await get("/api/proposals?order=newest");
+  assertStatus(badOrder.response, 400, "unknown order");
+
+  // count is the filtered total, not the table's.
+  const excluded = await get("/api/proposals?synthetic=exclude");
+  const excludedPage = await get("/api/proposals?synthetic=exclude&limit=1");
+  assert(
+    excludedPage.data.count === excluded.data.count && excludedPage.data.returned === 1,
+    "count should be the total matching the filters",
+  );
+
+  const oversized = await get("/api/proposals?limit=100000");
+  assertStatus(oversized.response, 200, "oversized limit");
+  assert(
+    oversized.data.returned === Math.min(all.length, 200),
+    `limit should be capped at 200, got ${oversized.data.returned}`,
+  );
+
+  for (const query of ["limit=0", "limit=abc", "limit=-1", "limit=1.5", "offset=-1", "offset=x"]) {
+    const bad = await get(`/api/proposals?${query}`);
+    assertStatus(bad.response, 400, `malformed paging ${query}`);
+  }
 }
 
 async function testVotingTimeline() {
@@ -1921,6 +2364,173 @@ async function testStats() {
     data.outcomes.successRate === 0.5,
     `stats: expected 1 of 2 proofs successful, got ${data.outcomes.successRate}`,
   );
+
+  // Added fields. Conditions are distinct open fingerprints, so never more
+  // than the rows; the last day's rows are a subset of all rows.
+  for (const [label, value] of [
+    ["signals.lastDay", data.signals.lastDay],
+    ["issues.conditions", data.issues.conditions],
+    ["issues.synthetic.conditions", data.issues.synthetic.conditions],
+    ["issues.openRows", data.issues.openRows],
+    ["issues.synthetic.openRows", data.issues.synthetic.openRows],
+  ] as const) {
+    assert(
+      Number.isInteger(value) && value >= 0,
+      `stats: ${label} should be a count, got ${JSON.stringify(value)}`,
+    );
+  }
+  assert(
+    data.signals.lastDay <= data.signals.total,
+    `stats: ${data.signals.lastDay} rows in the last day exceeds ${data.signals.total} in total`,
+  );
+  // conditions are counted over openRows, which are a subset of all rows.
+  for (const scope of [data.issues, data.issues.synthetic]) {
+    assert(
+      scope.conditions <= scope.openRows && scope.openRows <= scope.total,
+      `stats: expected conditions <= openRows <= total, got ${scope.conditions}/${scope.openRows}/${scope.total}`,
+    );
+  }
+  assert(
+    typeof data.asOf === "string" && !Number.isNaN(Date.parse(data.asOf)),
+    `stats: asOf should be a timestamp, got ${JSON.stringify(data.asOf)}`,
+  );
+}
+
+/**
+ * /api/stats is served from a cache that the Socket.IO connect handler shares,
+ * dropped by a successful write that can move its figures and by nothing else.
+ *
+ * Also pins what `conditions` means: rows left over from before open issues
+ * were folded by fingerprint count once per condition, not once per row.
+ */
+async function testStatsCache() {
+  const first = await get("/api/stats");
+  assertStatus(first.response, 200, "stats");
+  const again = await get("/api/stats");
+  assert(
+    JSON.stringify(again.data) === JSON.stringify(first.data),
+    "stats: a second read inside the window should be the cached payload",
+  );
+
+  const agree = (socket: any, stats: any, label: string) =>
+    assert(
+      socket.signals === stats.signals.total &&
+        socket.issues === stats.issues.total &&
+        socket.proposals === stats.proposals.total &&
+        socket.activeProposals === stats.proposals.active &&
+        socket.synthetic.signals === stats.signals.synthetic.total &&
+        socket.synthetic.issues === stats.issues.synthetic.total &&
+        socket.synthetic.proposals === stats.proposals.synthetic.total,
+      `${label}: socket ${JSON.stringify(socket)} disagrees with /api/stats`,
+    );
+  agree(await socketStats(), first.data, "on connect");
+
+  // Three open rows of one condition, one of another, one closed: as legacy
+  // duplicates would sit in the table. Written behind the API's back, so the
+  // cache cannot know about them until something invalidates it.
+  const category = "conditions_probe";
+  const at = new Date().toISOString();
+  const db = new Database(join(dataDir, "e2e.db"));
+  try {
+    const insert = db.prepare(
+      `INSERT INTO issues (id, title, description, category, priority, status, detected_at, synthetic, fingerprint)
+       VALUES (?, 'probe', 'probe', ?, 'low', ?, ?, 0, ?)`,
+    );
+    insert.run("cp-1", category, "detected", at, `${category}|issue|up`);
+    insert.run("cp-2", category, "detected", at, `${category}|issue|up`);
+    insert.run("cp-3", category, "deliberating", at, `${category}|issue|up`);
+    insert.run("cp-4", category, "detected", at, `${category}|issue|down`);
+    insert.run("cp-5", category, "resolved", at, `${category}|anomaly|up`);
+  } finally {
+    db.close();
+  }
+
+  try {
+    const cached = await get("/api/stats");
+    assert(
+      cached.data.asOf === first.data.asOf && cached.data.issues.total === first.data.issues.total,
+      "stats: an out-of-band row should not show before the cache is dropped",
+    );
+    // The rows are in the table now, so a handler that counted per connection
+    // would report five more. Only one that reads the cache reports none.
+    const socketCached = await socketStats();
+    assert(
+      socketCached.issues === first.data.issues.total,
+      `stats: the socket should read the cache, got ${socketCached.issues} issue rows against ${first.data.issues.total} cached`,
+    );
+
+    // A refused write changed nothing, so it must not cost a recomputation.
+    const refused = await post("/api/proposals", { decisionPacket: {} });
+    assertStatus(refused.response, 400, "malformed proposal");
+    const stillCached = await get("/api/stats");
+    assert(
+      stillCached.data.asOf === first.data.asOf,
+      "stats: a failed write should leave the cache in place",
+    );
+
+    // Nor does a public write that succeeds but moves nothing stats counts:
+    // otherwise anyone could force a recomputation every other request.
+    const anyProposal = await get("/api/proposals?limit=1");
+    const tally = await post(
+      `/api/proposals/${anyProposal.data.proposals[0].id}/tally`,
+      undefined,
+      false,
+    );
+    assertStatus(tally.response, 200, "tally");
+    const afterTally = await get("/api/stats");
+    assert(
+      afterTally.data.asOf === first.data.asOf,
+      "stats: a read-only tally should leave the cache in place",
+    );
+
+    // Any successful write, not only the ones that recompute on purpose.
+    await createProposal({ votingPeriod: 60_000 });
+    const fresh = await get("/api/stats");
+    assert(fresh.data.asOf !== first.data.asOf, "stats: a successful write should drop the cache");
+    assert(
+      fresh.data.proposals.total === first.data.proposals.total + 1,
+      "stats: the new proposal should be counted after the write",
+    );
+    assert(
+      fresh.data.issues.total === first.data.issues.total + 5,
+      `stats: expected 5 more issue rows, got ${fresh.data.issues.total - first.data.issues.total}`,
+    );
+    assert(
+      fresh.data.issues.conditions === first.data.issues.conditions + 2,
+      `stats: 4 open rows of 2 conditions should add 2 conditions, got ${
+        fresh.data.issues.conditions - first.data.issues.conditions
+      }`,
+    );
+    assert(
+      fresh.data.issues.openRows === first.data.issues.openRows + 4,
+      `stats: the resolved probe row should not count as open, got ${
+        fresh.data.issues.openRows - first.data.issues.openRows
+      } more open rows`,
+    );
+    agree(await socketStats(), fresh.data, "after a write");
+
+    // A collection recomputes at once, so its event and the next read agree.
+    const collected = await post("/api/signals/collect");
+    assertStatus(collected.response, 200, "collect signals");
+    const afterCollect = await get("/api/stats");
+    assert(
+      afterCollect.data.signals.total + afterCollect.data.signals.synthetic.total ===
+        fresh.data.signals.total +
+          fresh.data.signals.synthetic.total +
+          collected.data.stored +
+          collected.data.synthetic,
+      "stats: the collected rows should be counted after a collection",
+    );
+  } finally {
+    const cleanup = new Database(join(dataDir, "e2e.db"));
+    try {
+      cleanup.prepare(`DELETE FROM issues WHERE category = ?`).run(category);
+    } finally {
+      cleanup.close();
+    }
+    // Drop the cache again so nothing after this reads the probe rows.
+    await post("/api/signals/collect");
+  }
 }
 
 async function testNotFoundPaths() {
@@ -1944,6 +2554,8 @@ async function main() {
   try {
     await runTest("Health check", testHealthCheck);
     await runTest("Autonomous loop is off by default", testAutonomousLoopOffByDefault);
+    await runTest("HOST binds one address and TRUST_PROXY names the proxy", testBindHostAndTrustedProxy);
+    await runTest("An invalid TRUST_PROXY stops the boot", testInvalidTrustProxyStopsBoot);
     await runTest("Health ignores synthetic signals", testHealthIgnoresSyntheticSignals);
     await runTest("Health staleness rule", testHealthStalenessRule);
     await runTest("Health reports down when the database cannot be read", testHealthReportsDown);
@@ -1952,12 +2564,15 @@ async function main() {
     await runTest("Signals and issues", testSignalsAndIssues);
     await runTest("Signal change filter rule", testSignalChangeFilterRule);
     await runTest("Unchanged signals are not stored", testUnchangedSignalsAreNotStored);
+    await runTest("Large issue pages leave signals out", testIssueListDefaults);
     await runTest("Detection counts only new rows", testDetectionCountsOnlyNewRows);
     await runTest("Legacy database upgrades and keeps health fast", testLegacyDatabaseUpgrade);
     await runTest("Proposal settings are validated", testProposalValidation);
     await runTest("Voting integrity", testVotingIntegrity);
+    await runTest("Voting and delegation are off by default", testVotingOffByDefault);
     await runTest("Proposal responses carry a tally", testProposalListIncludesTally);
     await runTest("Proposal list marks synthetic proposals", testProposalListMarksSynthetic);
+    await runTest("Proposal list pages", testProposalListPaging);
     await runTest("Voting timeline is enforced", testVotingTimeline);
     await runTest("A vote without quorum expires", testUnquorateProposalExpires);
     await runTest("Execution and measured outcome", testExecutionAndMeasuredOutcome);
@@ -1971,6 +2586,7 @@ async function main() {
     // measured proof survived, and this one mints a second.
     await runTest("A fully successful outcome", testFullySuccessfulOutcome);
     await runTest("Stats", testStats);
+    await runTest("Stats cache is shared with the socket and dropped on writes", testStatsCache);
     await runTest("Unknown ids return 404", testNotFoundPaths);
     // Last: it deletes the observed signals earlier tests count.
     await runTest("Health is degraded while ingestion stalls", testHealthWhileIngestionStalls);

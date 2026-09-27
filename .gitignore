@@ -14,25 +14,6 @@ build/
 *.js.map
 *.d.ts.map
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-.venv
-*.egg-info/
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
 # Environment variables
 .env
 .env.local

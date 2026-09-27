@@ -24,12 +24,15 @@ const ISSUE_LOOKBACK = 50;
 function StatCard({
   title,
   value,
+  detail,
   icon: Icon,
   trend,
   href,
 }: {
   title: string;
   value: string | number;
+  /** Secondary figure under the headline, e.g. the raw rows behind it. */
+  detail?: string;
   icon: React.ElementType;
   trend?: string;
   href?: string;
@@ -38,8 +41,11 @@ function StatCard({
     <div className="card hover:shadow-md transition-shadow cursor-pointer p-4 sm:p-6">
       <div className="flex items-center justify-between">
         <div className="min-w-0 flex-1">
-          <p className="text-xs sm:text-sm font-medium text-gray-500 truncate">{title}</p>
+          {/* Wraps rather than truncates: these labels say what the number
+              counts, and on a two-column phone grid a clipped one hides it. */}
+          <p className="text-xs sm:text-sm font-medium text-gray-500 leading-snug">{title}</p>
           <p className="mt-1 text-xl sm:text-2xl font-semibold text-gray-900">{value}</p>
+          {detail && <p className="mt-0.5 text-xs text-gray-500 leading-snug">{detail}</p>}
           {trend && (
             <p className="mt-1 text-xs sm:text-sm text-moss-600 flex items-center">
               <TrendingUp className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
@@ -239,6 +245,10 @@ function RecentActivity({
 
 export default function Dashboard() {
   const t = useTranslations();
+  // format.number is Intl.NumberFormat for the active locale: "881,519"
+  // rather than "881519", which is hard to read at a glance in either language.
+  const format = useFormatter();
+  const num = (value: number | undefined) => format.number(value ?? 0);
 
   const {
     data: stats,
@@ -265,15 +275,34 @@ export default function Dashboard() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
+        {/*
+          The signal total counts stored rows, most of them repeats of the
+          previous minute's reading, so it is labelled as rows rather than as
+          signals. The last-24h figure is how many rows were stored, not
+          whether collection is running: once only changed readings are
+          stored, a quiet day stores few. Issues lead with distinct open
+          conditions: a persisting condition used to add a row every pass, and
+          754 rows were 12 conditions when this was written. The secondary
+          figure is the open rows those conditions are counted over, not the
+          all-time total, so the two numbers always describe the same issues.
+        */}
         <StatCard
           title={t("dashboard.totalSignals")}
-          value={statsPending ? "..." : stats?.signals.total ?? 0}
+          value={statsPending ? "..." : num(stats?.signals.total)}
+          detail={
+            stats
+              ? t("dashboard.signalRowsLastDay", { count: num(stats.signals.lastDay) })
+              : undefined
+          }
           icon={Activity}
           href="/signals"
         />
         <StatCard
-          title={t("issues.title")}
-          value={statsPending ? "..." : stats?.issues.total ?? 0}
+          title={t("dashboard.issueConditions")}
+          value={statsPending ? "..." : num(stats?.issues.conditions)}
+          detail={
+            stats ? t("dashboard.issueOpenRows", { count: num(stats.issues.openRows) }) : undefined
+          }
           icon={AlertTriangle}
           href="/issues"
         />

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getAddress } from "viem";
 import express, { Express } from "express";
 import { createServer } from "http";
+import { isIP } from "node:net";
 import { Server as SocketIOServer } from "socket.io";
 import cors from "cors";
 import helmet from "helmet";
@@ -21,7 +22,7 @@ import {
   saveProof,
   hydrate,
 } from "./governance-store.js";
-import {
+import db, {
   signalDb,
   issueDb,
   proposalDb,
@@ -50,6 +51,7 @@ import {
 // Import blockchain service
 import { blockchainService } from "./blockchain.js";
 import { deriveHealth, healthHttpStatus, resolveHealthConfig } from "./health.js";
+import { loadMosslandAdapterState } from "./mossland-state.js";
 import { SignalChangeFilter, laterTimestamp, signalStream } from "./signal-dedupe.js";
 
 // Import security utilities
@@ -207,10 +209,12 @@ if (ETHERSCAN_API_KEY) {
   console.log("✅ EtherscanAdapter registered");
 }
 
-// MosslandAdapter doesn't require API key
+// MosslandAdapter doesn't require API key. Seeded from the stored signals so a
+// restart does not announce an old disclosure as new.
 const mosslandAdapter = new MosslandAdapter({
   apiUrl: MOSSLAND_API_URL,
   language: SIGNAL_LANGUAGE,
+  state: loadMosslandAdapterState(db),
 });
 signalRegistry.registerAdapter(mosslandAdapter);
 console.log("✅ MosslandAdapter registered");
@@ -423,8 +427,52 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "100kb" }));
 
-// Trust the first proxy hop so rate limiting sees the real client IP behind nginx.
-app.set("trust proxy", 1);
+/**
+ * Which peers may speak for the client in X-Forwarded-For. The per-IP rate
+ * limits below key on req.ip, and req.ip is only as honest as this setting.
+ *
+ * The default, one hop, trusts whoever connects directly. That is right behind
+ * nginx, but a caller that reaches the port without nginx is trusted too, and
+ * can put a new address in X-Forwarded-For on every request to get a fresh
+ * rate-limit bucket each time. Naming the proxy's address instead makes such a
+ * caller count as its own socket address, whatever the header says.
+ *
+ * TRUST_PROXY is a hop count or a comma-separated list of IPs/CIDRs (Express's
+ * loopback, linklocal and uniquelocal names work too). A bare number always
+ * means hops: passed to Express as a string, "2" would reach proxy-addr, which
+ * reads it as the IPv4 address 0.0.0.2 and so would trust no real proxy.
+ */
+const TRUST_PROXY_NAMES = new Set(["loopback", "linklocal", "uniquelocal"]);
+function refuseTrustProxy(raw: string, detail: string): never {
+  console.error(
+    `❌ Refusing to start: TRUST_PROXY must be a hop count (e.g. 1) or a comma-separated ` +
+      `list of proxy IPs/CIDRs (e.g. 100.107.17.114), got "${raw}": ${detail}`,
+  );
+  process.exit(1);
+}
+function resolveTrustProxy(raw: string | undefined): number | string[] {
+  const value = raw?.trim() ?? "";
+  if (value === "") return 1;
+  if (/^\d+$/.test(value)) return Number(value);
+  const entries = value.split(",").map((entry) => entry.trim());
+  for (const entry of entries) {
+    if (TRUST_PROXY_NAMES.has(entry)) continue;
+    const slash = entry.indexOf("/");
+    const address = slash === -1 ? entry : entry.slice(0, slash);
+    // node:net rather than proxy-addr's parser, which also takes "0x7f000001"
+    // and bare integers as IPv4, so "10.0.0.1,2" would mean 0.0.0.2.
+    if (isIP(address) === 0) refuseTrustProxy(raw ?? "", `"${entry}" is not an IP address or CIDR`);
+  }
+  return entries;
+}
+const TRUST_PROXY = resolveTrustProxy(process.env.TRUST_PROXY);
+try {
+  // Express compiles the setting here, so a bad prefix length (/33) throws now
+  // rather than on the first request.
+  app.set("trust proxy", TRUST_PROXY);
+} catch (error) {
+  refuseTrustProxy(process.env.TRUST_PROXY ?? "", error instanceof Error ? error.message : String(error));
+}
 
 // Rate limit caps are env-tunable so tests / load benchmarks can relax them.
 const RATE_LIMIT_GLOBAL = parseInt(process.env.RATE_LIMIT_GLOBAL || "120", 10);
@@ -483,31 +531,67 @@ app.use(
   }),
 );
 
+// Public writes that cannot move any figure in /api/stats. A tally only reads;
+// a vote or a delegation changes no proposal's status and nothing else the
+// payload counts. Every other write route requires the admin key.
+const STATS_NEUTRAL_WRITES = [
+  /^\/api\/proposals\/[^/]+\/(vote|tally)\/?$/,
+  /^\/api\/delegations(\/|$)/,
+];
+
+// Any other write that succeeds may have moved a figure in /api/stats — a
+// proposal finalized, an outcome recorded, an issue closed — so it drops the
+// cached payload. Done in res.end, before the response leaves, so a client
+// that reads stats straight after its own write cannot be answered from the
+// old cache. Failed writes (4xx/5xx) and the public writes above leave it
+// alone: they changed nothing stats counts, and letting them through would let
+// an anonymous caller force the synchronous recomputation on every other
+// request (POST .../tally answers 200 for any existing id). What is left needs
+// the admin key.
+app.use((req, res, next) => {
+  if (
+    req.method === "GET" ||
+    req.method === "HEAD" ||
+    req.method === "OPTIONS" ||
+    STATS_NEUTRAL_WRITES.some((pattern) => pattern.test(req.path))
+  ) {
+    next();
+    return;
+  }
+  const end = res.end;
+  res.end = function (this: express.Response, ...args: unknown[]) {
+    if (res.statusCode < 400) invalidateStats();
+    return (end as (...a: unknown[]) => express.Response).apply(this, args);
+  } as typeof res.end;
+  next();
+});
+
 // Socket.IO connection handling
 io.on("connection", (socket) => {
   console.log(`🔌 Client connected: ${socket.id}`);
 
-  // Send current stats on connection. Same rule as GET /api/stats: the headline
-  // counts are observations, the demo totals travel separately.
-  const signalCounts = signalDb.counts.get() as SyntheticSplit;
-  const issueCounts = issueDb.counts.get() as SyntheticSplit;
-  const syntheticProposalIds = new Set(
-    (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
-  );
-  const proposals = votingSystem.listProposals();
-  const realProposals = proposals.filter((p) => !syntheticProposalIds.has(p.id));
-
-  socket.emit("stats:update", {
-    signals: signalCounts.observed,
-    issues: issueCounts.observed,
-    proposals: realProposals.length,
-    activeProposals: realProposals.filter((p) => p.status === "active").length,
-    synthetic: {
-      signals: signalCounts.synthetic,
-      issues: issueCounts.synthetic,
-      proposals: proposals.length - realProposals.length,
-    },
-  });
+  // Send current stats on connection, read from the GET /api/stats cache. Each
+  // connection used to run its own full COUNT over ~1.1M signal rows, so
+  // anyone opening sockets in a loop held the event loop for as long as they
+  // liked; now a connection costs a cache read, and the socket and the HTTP
+  // endpoint cannot disagree. Same rule as there: the headline counts are
+  // observations, the demo totals travel separately.
+  try {
+    const stats = currentStats();
+    socket.emit("stats:update", {
+      signals: stats.signals.total,
+      issues: stats.issues.total,
+      proposals: stats.proposals.total,
+      activeProposals: stats.proposals.active,
+      synthetic: {
+        signals: stats.signals.synthetic.total,
+        issues: stats.issues.synthetic.total,
+        proposals: stats.proposals.synthetic.total,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to send stats on connect:", error);
+  }
 
   socket.on("disconnect", () => {
     console.log(`🔌 Client disconnected: ${socket.id}`);
@@ -670,11 +754,25 @@ function populateIssueSignals(issue: any) {
 }
 
 // Issue endpoints
+// Embedding each issue's signals is what makes this endpoint heavy: at
+// ?limit=500 production answered with 6.8MB, one signal lookup per id. Small
+// pages keep embedding by default, so the issues page and any consumer that
+// relies on `signals` at the default limit see no change; past
+// ISSUE_EMBED_DEFAULT_MAX the default flips to off, and a caller that really
+// wants signals on a big page asks with includeSignals=true. The limit is
+// capped at 200 either way (it was 500); production's 754 open rows are 12
+// distinct conditions, so no page that size is short of anything.
+const ISSUE_EMBED_DEFAULT_MAX = 50;
+const ISSUE_LIST_MAX = 200;
+
 app.get("/api/issues", async (req, res) => {
   try {
-    const limit = clampLimit(req.query.limit, 50);
+    const limit = clampLimit(req.query.limit, 50, ISSUE_LIST_MAX);
     const status = req.query.status as string;
-    const includeSignals = req.query.includeSignals !== "false"; // Include signals by default
+    const includeSignals =
+      req.query.includeSignals === undefined
+        ? limit <= ISSUE_EMBED_DEFAULT_MAX
+        : req.query.includeSignals !== "false";
 
     let rows;
     if (status) {
@@ -690,7 +788,8 @@ app.get("/api/issues", async (req, res) => {
       issues = issues.map(populateIssueSignals);
     }
 
-    res.json({ issues, count: issues.length });
+    // Said outright, so a caller missing `signals` on a large page can see why.
+    res.json({ issues, count: issues.length, signalsIncluded: includeSignals });
   } catch (error) {
     console.error("Failed to fetch issues:", error);
     res.status(500).json({ error: "Failed to fetch issues" });
@@ -1091,6 +1190,30 @@ type SyntheticFilter = (typeof SYNTHETIC_FILTERS)[number];
 //
 // `?synthetic=` defaults to include: consumers that predate the field keep
 // receiving exactly the rows they did, with one more property on each.
+//
+// `?limit=` and `?offset=` page the filtered list. Without them the whole list
+// comes back, as it always has — 3.38MB uncompressed in production, which is
+// why monitor.moss.land stopped reading this endpoint: it had no way to ask
+// for less. `count` is every proposal that matched the filters, `returned` how
+// many are in this page, so a caller can tell a short page from the end.
+//
+// `?order=` sets the order pages are cut from. The default, asc, is the order
+// the list always had: oldest first (proposals load ORDER BY created_at ASC and
+// new ones are appended), so ?limit=20 alone is the twenty OLDEST proposals.
+// A caller that wants the latest — monitor.moss.land does — asks for
+// order=desc, newest createdAt first, and gets them in one request instead of
+// reading `count` and computing an offset.
+const PROPOSAL_PAGE_MAX = 200;
+const PROPOSAL_ORDERS = ["asc", "desc"] as const;
+type ProposalOrder = (typeof PROPOSAL_ORDERS)[number];
+
+/** A non-negative integer query value, or undefined when absent; NaN if malformed. */
+function intParam(raw: unknown): number | undefined {
+  if (raw === undefined) return undefined;
+  const text = String(raw);
+  return /^\d+$/.test(text) ? Number(text) : NaN;
+}
+
 app.get("/api/proposals", (req, res) => {
   try {
     const status = req.query.status as string | undefined;
@@ -1101,18 +1224,51 @@ app.get("/api/proposals", (req, res) => {
       });
     }
 
+    // Malformed paging is refused rather than ignored: falling back to the
+    // full list would hand a caller that asked for a page the very payload it
+    // was trying to avoid. An oversized limit is clamped, like the other list
+    // endpoints' limits, and `returned` shows what was applied.
+    const rawLimit = intParam(req.query.limit);
+    const offset = intParam(req.query.offset) ?? 0;
+    if (Number.isNaN(rawLimit) || rawLimit === 0) {
+      return res.status(400).json({
+        error: `limit must be an integer from 1 to ${PROPOSAL_PAGE_MAX}`,
+      });
+    }
+    if (Number.isNaN(offset)) {
+      return res.status(400).json({ error: "offset must be a non-negative integer" });
+    }
+    const limit = rawLimit === undefined ? undefined : Math.min(rawLimit, PROPOSAL_PAGE_MAX);
+    const order = (req.query.order ?? "asc") as ProposalOrder;
+    if (!PROPOSAL_ORDERS.includes(order)) {
+      return res.status(400).json({
+        error: `order must be one of: ${PROPOSAL_ORDERS.join(", ")}`,
+      });
+    }
+
     const syntheticIds = new Set(
       (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
     );
-    const proposals = votingSystem
+    const matching = votingSystem
       .listProposals(status as any)
       .filter((p) =>
         syntheticFilter === "include"
           ? true
           : syntheticIds.has(p.id) === (syntheticFilter === "only"),
-      )
+      );
+    // Reversed before the (stable) sort, so proposals created in the same
+    // millisecond still come newest-inserted first.
+    const ordered =
+      order === "desc"
+        ? [...matching]
+            .reverse()
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        : matching;
+    // Paged before tallying, so a page costs its own rows' tallies only.
+    const proposals = ordered
+      .slice(offset, limit === undefined ? undefined : offset + limit)
       .map((p) => ({ ...withTally(p), synthetic: syntheticIds.has(p.id) }));
-    res.json({ proposals, count: proposals.length });
+    res.json({ proposals, count: matching.length, returned: proposals.length });
   } catch (error) {
     console.error("Failed to fetch proposals:", error);
     res.status(500).json({ error: "Failed to fetch proposals" });
@@ -1292,7 +1448,7 @@ async function resolveVotingWeight(
   return balance;
 }
 
-app.post("/api/proposals/:id/vote", async (req, res) => {
+app.post("/api/proposals/:id/vote", requireVotingEnabled, async (req, res) => {
   try {
     const { voter, choice, weight, reason, signature, nonce, timestamp } = req.body;
     if (!voter || !choice) {
@@ -1958,7 +2114,7 @@ const createDelegationSchema = z
   })
   .strict();
 
-app.post("/api/delegations", async (req, res) => {
+app.post("/api/delegations", requireVotingEnabled, async (req, res) => {
   try {
     const parsed = createDelegationSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -2075,7 +2231,7 @@ app.get("/api/delegations/:id", (req, res) => {
   }
 });
 
-app.delete("/api/delegations/:id", async (req, res) => {
+app.delete("/api/delegations/:id", requireVotingEnabled, async (req, res) => {
   try {
     const policy = delegationManager.getPolicy(req.params.id);
     if (!policy) {
@@ -2172,6 +2328,25 @@ app.get("/api/llm/usage", requireAdminKey, (req, res) => {
 });
 
 /**
+ * How long a computed stats payload is served before it is computed again.
+ *
+ * The moss.land homepage widget (~2,170 IPs over 30 days) and monitor.moss.land
+ * each poll /api/stats every 30s, the dashboard does per open tab, and every
+ * Socket.IO connection used to run the same counts once more. Computing them
+ * groups ~1.1M signal rows, and better-sqlite3 is synchronous, so every request
+ * held the event loop for ~62ms on the 2026-09-26 snapshot while all other
+ * requests waited. The numbers only move when this process writes, so they
+ * are computed at most once per window, and sooner when a write of ours
+ * changes them: a collection tick recomputes at once (its socket event carries
+ * the new total), and a detection or finalize tick, or any successful write
+ * request, drops the cache so the next read recomputes.
+ *
+ * The window is the pollers' own interval, so none of them reads a figure
+ * older than it would have seen between two of its polls anyway.
+ */
+const STATS_MAX_AGE_MS = 30_000;
+
+/**
  * System stats, with the demo data reported beside the real data and never
  * inside it.
  *
@@ -2181,69 +2356,141 @@ app.get("/api/llm/usage", requireAdminKey, (req, res) => {
  * value now gets the number of things this service actually observed. It used
  * to get that plus 223,074 values MockAdapter invented, with nothing in the
  * response to say so.
+ *
+ * Fields are only ever added here: the moss.land widget, monitor.moss.land and
+ * mossland-backend read this payload by key.
  */
+function computeStats() {
+  const now = Date.now();
+  const issueCounts = issueDb.counts.get() as SyntheticSplit;
+
+  const byCategory = (synthetic: 0 | 1) =>
+    signalDb.countByCategory.all(synthetic) as { category: string; count: number }[];
+  const byStatus = (synthetic: 0 | 1) =>
+    issueDb.countByStatus.all(synthetic) as { status: string; count: number }[];
+  const openIssues = (synthetic: 0 | 1) =>
+    issueDb.countOpen.get(synthetic) as { conditions: number; openRows: number };
+  const openObserved = openIssues(0);
+  const openSynthetic = openIssues(1);
+  const sum = (rows: { count: number }[]) => rows.reduce((n, row) => n + row.count, 0);
+
+  // category is NOT NULL, so the per-category counts cover every row exactly
+  // once and their sum is the total. A separate COUNT(*) walked the whole
+  // table a second time for the same number: 26ms of the 62.
+  const observedCategories = byCategory(0);
+  const syntheticCategories = byCategory(1);
+
+  const syntheticProposalIds = new Set(
+    (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
+  );
+  const allProposals = votingSystem.listProposals();
+  const tallyProposals = (proposals: typeof allProposals) => ({
+    total: proposals.length,
+    active: proposals.filter((p) => p.status === "active").length,
+    passed: proposals.filter((p) => p.status === "passed").length,
+    rejected: proposals.filter((p) => p.status === "rejected").length,
+    // Voting ended without reaching quorum: closed, but not decided. Counted
+    // apart from `rejected`, which it used to be folded into.
+    expired: proposals.filter((p) => p.status === "expired").length,
+  });
+
+  const proofs = outcomeTracker.listProofs();
+
+  return {
+    signals: {
+      // Stored observation rows, not distinct readings. Until collection
+      // stores only readings that changed, most rows repeat the previous
+      // minute's value; afterwards the legacy repeats stay until compacted.
+      total: sum(observedCategories),
+      // Observed rows stored in the last 24 hours. A volume figure, not a
+      // liveness one: once only changed readings are stored, a quiet day
+      // stores few rows while collection is running fine. Whether it is
+      // running is /api/health's lastObservedSignalAt.
+      lastDay: (
+        signalDb.countObservedSince.get(new Date(now - DAY_MS).toISOString()) as {
+          count: number;
+        }
+      ).count,
+      byCategory: observedCategories,
+      adapterCount: signalRegistry.listAdapters().length,
+      synthetic: {
+        total: sum(syntheticCategories),
+        byCategory: syntheticCategories,
+      },
+    },
+    issues: {
+      // Every issue row stored, in any status — kept for the consumers that
+      // read it. It counts detections, not problems.
+      total: issueCounts.observed,
+      // Distinct conditions among open issues. A condition that persisted used
+      // to mint a new row on every detection pass, and those rows are still
+      // open: 754 rows are 12 conditions on the 2026-09-26 snapshot.
+      conditions: openObserved.conditions,
+      // The open rows those conditions are counted over. Shown beside
+      // `conditions` rather than `total`, which also counts closed rows: once
+      // legacy duplicates are closed, conditions would shrink while total
+      // stayed at its all-time high, and the pair would stop describing the
+      // same thing.
+      openRows: openObserved.openRows,
+      byStatus: byStatus(0),
+      synthetic: {
+        total: issueCounts.synthetic,
+        conditions: openSynthetic.conditions,
+        openRows: openSynthetic.openRows,
+        byStatus: byStatus(1),
+      },
+    },
+    proposals: {
+      ...tallyProposals(allProposals.filter((p) => !syntheticProposalIds.has(p.id))),
+      synthetic: tallyProposals(
+        allProposals.filter((p) => syntheticProposalIds.has(p.id)),
+      ),
+    },
+    outcomes: {
+      totalProofs: proofs.length,
+      // null, not 0, when nothing has been measured yet. Zero proofs is not
+      // a zero success rate — it is the absence of one — and the dashboard
+      // rendered the difference as "0%", which reads as a service that tries
+      // and fails rather than one that has not yet measured anything.
+      successRate:
+        proofs.length > 0
+          ? proofs.filter((p) => p.overallSuccess).length / proofs.length
+          : null,
+    },
+    // When these figures were computed. Up to STATS_MAX_AGE_MS old.
+    asOf: new Date(now).toISOString(),
+  };
+}
+
+type StatsPayload = ReturnType<typeof computeStats>;
+
+let statsCache: { payload: StatsPayload; computedAt: number } | undefined;
+
+/** The stats payload, recomputed only when the cached one is too old. */
+function currentStats(): StatsPayload {
+  const now = Date.now();
+  if (statsCache && now - statsCache.computedAt < STATS_MAX_AGE_MS) {
+    return statsCache.payload;
+  }
+  const payload = computeStats();
+  statsCache = { payload, computedAt: now };
+  return payload;
+}
+
+/** Drop the cached stats; the next read computes them. */
+function invalidateStats(): void {
+  statsCache = undefined;
+}
+
+/** Recompute now, for a write whose own event publishes a figure from it. */
+function refreshStats(): StatsPayload {
+  invalidateStats();
+  return currentStats();
+}
+
 app.get("/api/stats", (req, res) => {
   try {
-    const signalCounts = signalDb.counts.get() as SyntheticSplit;
-    const issueCounts = issueDb.counts.get() as SyntheticSplit;
-
-    const byCategory = (synthetic: 0 | 1) =>
-      signalDb.countByCategory.all(synthetic) as { category: string; count: number }[];
-    const byStatus = (synthetic: 0 | 1) =>
-      issueDb.countByStatus.all(synthetic) as { status: string; count: number }[];
-
-    const syntheticProposalIds = new Set(
-      (proposalDb.syntheticIds.all() as { id: string }[]).map((row) => row.id),
-    );
-    const allProposals = votingSystem.listProposals();
-    const tallyProposals = (proposals: typeof allProposals) => ({
-      total: proposals.length,
-      active: proposals.filter((p) => p.status === "active").length,
-      passed: proposals.filter((p) => p.status === "passed").length,
-      rejected: proposals.filter((p) => p.status === "rejected").length,
-      // Voting ended without reaching quorum: closed, but not decided. Counted
-      // apart from `rejected`, which it used to be folded into.
-      expired: proposals.filter((p) => p.status === "expired").length,
-    });
-
-    const proofs = outcomeTracker.listProofs();
-
-    res.json({
-      signals: {
-        total: signalCounts.observed,
-        byCategory: byCategory(0),
-        adapterCount: signalRegistry.listAdapters().length,
-        synthetic: {
-          total: signalCounts.synthetic,
-          byCategory: byCategory(1),
-        },
-      },
-      issues: {
-        total: issueCounts.observed,
-        byStatus: byStatus(0),
-        synthetic: {
-          total: issueCounts.synthetic,
-          byStatus: byStatus(1),
-        },
-      },
-      proposals: {
-        ...tallyProposals(allProposals.filter((p) => !syntheticProposalIds.has(p.id))),
-        synthetic: tallyProposals(
-          allProposals.filter((p) => syntheticProposalIds.has(p.id)),
-        ),
-      },
-      outcomes: {
-        totalProofs: proofs.length,
-        // null, not 0, when nothing has been measured yet. Zero proofs is not
-        // a zero success rate — it is the absence of one — and the dashboard
-        // rendered the difference as "0%", which reads as a service that tries
-        // and fails rather than one that has not yet measured anything.
-        successRate:
-          proofs.length > 0
-            ? proofs.filter((p) => p.overallSuccess).length / proofs.length
-            : null,
-      },
-    });
+    res.json(currentStats());
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch stats" });
   }
@@ -2384,12 +2631,46 @@ const AUTO_PROPOSAL_ENABLED = envFlag("AUTO_PROPOSAL_ENABLED", false);
 const AUTO_PROPOSAL_THRESHOLD = parseFloat(process.env.AUTO_PROPOSAL_THRESHOLD || "0.7");
 const AUTO_PROPOSAL_PROPOSER = process.env.AUTO_PROPOSAL_PROPOSER || "auto-system";
 
+// BRIDGE's own voting and delegation are off unless VOTING_ENABLED=1.
+//
+// Mossland DAO decides on Agora (agora.moss.land), and BRIDGE's proposals are
+// non-binding. In production no vote and no delegation was ever recorded here:
+// only two vote requests ever arrived, both refused, and snapshot-weighted
+// voting needs historical balances the free non-archive RPC cannot serve, so a
+// holder who tried could not have been counted anyway. Offering a vote nobody
+// can complete only suggests these proposals are decided here.
+//
+// Off means writes answer 410 Gone and point at Agora; reads keep serving the
+// (empty) history, and admin proposal creation and auto-finalize are untouched.
+// The voting code stays behind the flag, and the e2e suite keeps running it
+// with the flag on, until the 2026-11-20 review decides whether to delete it.
+const VOTING_ENABLED = envFlag("VOTING_ENABLED", false);
+const AGORA_URL = "https://agora.moss.land";
+
+/**
+ * Refuse a vote or delegation write while voting is off. A function
+ * declaration so the routes registered above this point can name it.
+ */
+function requireVotingEnabled(
+  _req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+) {
+  if (VOTING_ENABLED) return next();
+  res.status(410).json({
+    error: "Voting and delegation on BRIDGE are closed. Mossland DAO votes on Agora.",
+    code: "VOTING_MOVED_TO_AGORA",
+    agoraUrl: AGORA_URL,
+  });
+}
+
 // Last stored reading per stream, seeded from the database before the server
 // listens so a restart compares against what is stored rather than storing
-// every stream again. That matters beyond one extra row each: MosslandAdapter
-// keeps the date of the last disclosure in memory, so every restart re-emits
-// the latest disclosure as "new", and the seed is what recognises it as the
-// row already stored.
+// every stream again. That matters beyond one extra row each: an adapter that
+// keeps its last-seen item only in memory re-emits it after every restart
+// (SocialAdapter's latest Medium post does; MosslandAdapter no longer does,
+// since it is seeded from stored disclosures), and the seed is what
+// recognises such a reading as the row already stored.
 //
 // One DISTINCT over the partial idx_signals_stream plus one seek per stream.
 // Measured on a copy of the 2026-09-26 production database (1.1M rows) with a
@@ -2460,7 +2741,6 @@ async function collectAndSaveSignals() {
   // /api/signals and toasts "{count} new signals", and neither is true of a
   // pass that changed nothing.
   if (plan.writes.length > 0) {
-    const signalCounts = signalDb.counts.get() as SyntheticSplit;
     io.emit("signals:collected", {
       // Rows written, synthetic included — the number of new entries a client
       // will find. It used to be every reading collected.
@@ -2468,7 +2748,7 @@ async function collectAndSaveSignals() {
       stored: plan.stored,
       skipped: plan.skipped,
       synthetic: plan.synthetic,
-      total: signalCounts.observed,
+      total: refreshStats().signals.total,
       signals: plan.writes.slice(0, 5).map(({ signal }) => signal),
     });
   }
@@ -2708,6 +2988,10 @@ async function detectAndSaveIssues() {
     );
   }
 
+  // Issue rows, their statuses and any proposals promoted from them may have
+  // moved; the next /api/stats read recomputes.
+  invalidateStats();
+
   return {
     detected: detectedIssues.length,
     // Rows actually created. `saved` is this plus escalations, i.e. everything
@@ -2809,6 +3093,9 @@ function finalizeDueProposals(): { finalized: number; failed: number } {
     }
   }
 
+  // Proposal counts in /api/stats just moved; the next read recomputes them.
+  if (finalized > 0) invalidateStats();
+
   return { finalized, failed };
 }
 
@@ -2878,7 +3165,45 @@ void checkArchiveRpc();
 
 // Start server
 const PORT = process.env.PORT || 4000;
-httpServer.listen(PORT, () => {
+// Unset listens on every interface, as it always has. On a host whose LAN can
+// reach the port, HOST=<the address the proxy connects to> keeps direct
+// callers out entirely; TRUST_PROXY above only stops them spoofing their IP.
+const HOST = process.env.HOST?.trim() || undefined;
+const LISTEN_AT = HOST ? `${isIP(HOST) === 6 ? `[${HOST}]` : HOST}:${PORT}` : `*:${PORT}`;
+// Without this an address that is not up yet (a tailnet IP before tailscaled)
+// or a taken port surfaces as an unhandled 'error' event and a stack trace.
+// The exit code is the same; pm2 restarts the process either way.
+const refuseToListen = (error: NodeJS.ErrnoException) => {
+  console.error(`❌ Refusing to start: cannot listen on ${LISTEN_AT}: ${error.code ?? error.message}`);
+  process.exit(1);
+};
+// Where the socket really is, from the kernel rather than from HOST: a name
+// such as "localhost" resolves to one address (::1 on some hosts, so
+// 127.0.0.1 is then refused), and the log should say which.
+let BOUND_AT = LISTEN_AT;
+httpServer.once("error", refuseToListen);
+httpServer.once("listening", () => {
+  httpServer.off("error", refuseToListen);
+  const bound = httpServer.address();
+  if (HOST && bound && typeof bound === "object") {
+    BOUND_AT = `${bound.family === "IPv6" ? `[${bound.address}]` : bound.address}:${bound.port}`;
+  }
+  console.log(
+    `🌐 Listening on ` +
+      (!HOST
+        ? `${LISTEN_AT} (all interfaces; set HOST to bind one address)`
+        : isIP(HOST) === 0
+          ? `${BOUND_AT} (HOST=${HOST})`
+          : BOUND_AT) +
+      `, X-Forwarded-For trusted from ` +
+      (typeof TRUST_PROXY !== "number"
+        ? TRUST_PROXY.join(", ")
+        : TRUST_PROXY === 0
+          ? "no one"
+          : `the nearest ${TRUST_PROXY} hop(s)`),
+  );
+});
+httpServer.listen({ port: Number(PORT), host: HOST }, () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
@@ -2892,7 +3217,7 @@ httpServer.listen(PORT, () => {
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
 
-🚀 API server running on http://localhost:${PORT}
+🚀 API server running on http://${HOST ? BOUND_AT : `localhost:${PORT}`}
 📡 Endpoints:
    - GET  /health              - Health check
    - GET  /api/signals         - List signals (from DB)
@@ -3024,6 +3349,12 @@ httpServer.listen(PORT, () => {
     console.log(`📝 Auto proposal promotion: ENABLED (consensus ≥ ${AUTO_PROPOSAL_THRESHOLD}, proposer ${AUTO_PROPOSAL_PROPOSER})`);
   } else {
     console.log(`📝 Auto proposal promotion: DISABLED (set AUTO_PROPOSAL_ENABLED=1 to enable)`);
+  }
+
+  if (VOTING_ENABLED) {
+    console.log(`🗳️  Voting and delegation: ENABLED`);
+  } else {
+    console.log(`🗳️  Voting and delegation: DISABLED — writes answer 410 and point to ${AGORA_URL} (set VOTING_ENABLED=1 to enable)`);
   }
 
   if (OUTCOME_EVAL_ENABLED && OUTCOME_EVAL_INTERVAL > 0) {
