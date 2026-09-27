@@ -118,6 +118,8 @@ export interface SignalWritePlan<T extends CollectedSignal> {
    */
   lastObservedAt: string | null;
   updates: Map<string, Reading>;
+  /** Newest reading per stream in the pass, stored or skipped. */
+  observedStreams: Map<string, string>;
 }
 
 /**
@@ -129,17 +131,24 @@ export interface SignalWritePlan<T extends CollectedSignal> {
  */
 export class SignalChangeFilter {
   private readonly last = new Map<string, Reading>();
+  private readonly streamObservedAt = new Map<string, string>();
   private observedAt: string | null;
 
   constructor(seed: Iterable<StreamSeed>, lastObservedAt: string | null) {
+    this.observedAt = laterTimestamp(lastObservedAt, null);
     for (const row of seed) {
       this.last.set(row.stream, {
         value: row.value,
         description: row.description,
         severity: row.severity,
       });
+      // Per-stream times are not persisted: at boot every seeded stream is
+      // taken as last seen when the collector as a whole last was. That can
+      // overstate a stream that had already gone quiet, for at most one
+      // detection window — its first pass without it leaves the time where it
+      // is — and it is no worse than the whole-collector time used before.
+      if (this.observedAt) this.streamObservedAt.set(row.stream, this.observedAt);
     }
-    this.observedAt = laterTimestamp(lastObservedAt, null);
   }
 
   get streamCount(): number {
@@ -155,6 +164,19 @@ export class SignalChangeFilter {
     return this.observedAt;
   }
 
+  /**
+   * When each stream last produced a reading, stored or not.
+   *
+   * The collector's time says only that some adapter answered. One adapter
+   * can stay silent while the others answer — Medium's feed did for 38% of
+   * the week before the 2026-09-26 snapshot, up to 11.8 h at a time — and
+   * issue detection must not carry that stream's last reading forward through
+   * the silence as if it had been observed (detection-input.ts).
+   */
+  get streamLastObservedAt(): ReadonlyMap<string, string> {
+    return this.streamObservedAt;
+  }
+
   plan<T extends CollectedSignal>(
     signals: readonly T[],
     streamOf: (signal: T) => string,
@@ -165,6 +187,7 @@ export class SignalChangeFilter {
     let skipped = 0;
     let synthetic = 0;
     let observedAt: string | null = null;
+    const observedStreams = new Map<string, string>();
 
     for (const signal of signals) {
       if (signal.synthetic) {
@@ -175,8 +198,10 @@ export class SignalChangeFilter {
         continue;
       }
 
-      observedAt = laterTimestamp(observedAt, isoOf(signal.timestamp));
+      const at = isoOf(signal.timestamp);
+      observedAt = laterTimestamp(observedAt, at);
       const stream = streamOf(signal);
+      if (at) observedStreams.set(stream, laterTimestamp(observedStreams.get(stream), at)!);
       const reading: Reading = {
         value: signal.value,
         description: signal.description,
@@ -195,12 +220,15 @@ export class SignalChangeFilter {
     }
 
     const lastObservedAt = observedAt ? laterTimestamp(this.observedAt, observedAt) : null;
-    return { writes, stored, skipped, synthetic, observedAt, lastObservedAt, updates };
+    return { writes, stored, skipped, synthetic, observedAt, lastObservedAt, updates, observedStreams };
   }
 
   /** Call once the plan's writes are committed. */
   commit(plan: SignalWritePlan<CollectedSignal>): void {
     for (const [stream, reading] of plan.updates) this.last.set(stream, reading);
+    for (const [stream, at] of plan.observedStreams) {
+      this.streamObservedAt.set(stream, laterTimestamp(this.streamObservedAt.get(stream), at)!);
+    }
     this.observedAt = laterTimestamp(this.observedAt, plan.observedAt);
   }
 }

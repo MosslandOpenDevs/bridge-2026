@@ -2858,6 +2858,7 @@ function runDetectors(now = new Date()) {
     windowMinutes: DETECTION_WINDOW_MINUTES,
     collectIntervalSeconds: SIGNAL_COLLECT_INTERVAL,
     lastObservedAt: laterTimestamp(newest?.timestamp, signalChanges.lastObservedAt),
+    streamObservedAt: signalChanges.streamLastObservedAt,
   });
   const rows = buildDetectionInput(readDetectionRows(detectionRowSource, window), window);
   const signals = rows.map(deserializeSignal);

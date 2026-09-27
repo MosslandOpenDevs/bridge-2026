@@ -145,6 +145,13 @@ export interface DetectionWindow {
    * detectors must not be told it did. Null when nothing was ever observed.
    */
   sampleEnd: string | null;
+  /**
+   * When each stream last produced a reading (SignalChangeFilter). A gauge is
+   * sampled only up to its own stream's time, or its newest stored row when
+   * that is later: `sampleEnd` alone would carry a silent adapter's last
+   * reading forward for as long as any other adapter kept answering.
+   */
+  streamObservedAt: ReadonlyMap<string, string>;
   /** Sampling step. Null when collection is off: nothing is resampled. */
   stepMs: number | null;
   /** How far before `start` a pre-#39 row may still be in force; see readDetectionRows. */
@@ -158,6 +165,8 @@ export interface DetectionWindowOptions {
   collectIntervalSeconds: number;
   /** When the collectors last observed the world, stored or not. */
   lastObservedAt: string | null;
+  /** When each stream last produced a reading, stored or not. */
+  streamObservedAt: ReadonlyMap<string, string>;
 }
 
 export function detectionWindow(options: DetectionWindowOptions): DetectionWindow {
@@ -169,6 +178,7 @@ export function detectionWindow(options: DetectionWindowOptions): DetectionWindo
     start: new Date(endMs - lengthMs).toISOString(),
     end: new Date(endMs).toISOString(),
     sampleEnd: Number.isNaN(observedMs) ? null : new Date(Math.min(observedMs, endMs)).toISOString(),
+    streamObservedAt: options.streamObservedAt,
     // Collection off (the e2e suite, a read-only replica): no cadence to
     // sample at and no collector vouching that a stored level still holds, so
     // every row goes in as stored — gauges included, and nothing carried in
@@ -204,9 +214,13 @@ export interface DetectionRowSource {
  * The row carried in prefers the stream-tagged row. A row with no stream is
  * consulted only when the stream has no tagged row before the window — the
  * first window after upgrading to change-only storage — and only within one
- * window length before it: until then every observed reading was stored on
- * every pass, so a gauge that was still being observed has a legacy row that
- * recent, and an older one is a reading the collector had stopped making.
+ * window length before it. The bound keeps the seek short (it stops at the
+ * range's end instead of walking the category's history); it does not decide
+ * what is observed. Until the upgrade every observed reading was stored on
+ * every pass, so a legacy row older than that means the stream went unobserved
+ * from then until its first tagged row, and buildDetectionInput would not
+ * sample that stretch anyway: a stream is sampled only as far as it was
+ * observed, tagged or not.
  */
 export function readDetectionRows(source: DetectionRowSource, window: DetectionWindow): DetectionRows {
   const inWindow = source.between(window.start, window.end);
@@ -234,8 +248,10 @@ export function readDetectionRows(source: DetectionRowSource, window: DetectionW
  * reference per row.
  *
  * Samples are aligned on `sampleEnd` rather than on `start`, so the newest
- * sample is the newest observation whatever the window length. A stream whose
- * first row falls inside the window has no samples before it.
+ * sample is the newest observation whatever the window length. Each stream
+ * stops at its own last observation (see DetectionWindow.streamObservedAt),
+ * and a stream whose first row falls inside the window has no samples before
+ * it.
  */
 export function buildDetectionInput(rows: DetectionRows, window: DetectionWindow): StoredSignalRow[] {
   const out: StoredSignalRow[] = [];
@@ -270,7 +286,7 @@ export function buildDetectionInput(rows: DetectionRows, window: DetectionWindow
     for (let t = Date.parse(window.sampleEnd); t >= startMs; t -= stepMs) times.push(t);
     times.reverse();
 
-    for (const list of series.values()) {
+    for (const [stream, list] of series) {
       // Oldest first; at the same instant a tagged row wins over a legacy one,
       // being the later-written of the two.
       list.sort(
@@ -278,10 +294,15 @@ export function buildDetectionInput(rows: DetectionRows, window: DetectionWindow
           (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0) ||
           Number(Boolean(a.stream)) - Number(Boolean(b.stream)),
       );
+      // A stored row is itself an observation, which covers rows written by
+      // something other than a collection pass.
+      const observed = laterIso(window.streamObservedAt.get(stream), list[list.length - 1].timestamp);
+      const until = observed < window.sampleEnd ? observed : window.sampleEnd;
       let next = 0;
       let inForce: StoredSignalRow | undefined;
       for (const t of times) {
         const at = new Date(t).toISOString();
+        if (at > until) break;
         while (next < list.length && list[next].timestamp <= at) inForce = list[next++];
         if (inForce) out.push({ ...inForce, timestamp: at });
       }
@@ -289,6 +310,11 @@ export function buildDetectionInput(rows: DetectionRows, window: DetectionWindow
   }
 
   return out.sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0));
+}
+
+/** The later of an optional and a present ISO timestamp, compared as text. */
+function laterIso(a: string | undefined, b: string): string {
+  return a !== undefined && a > b ? a : b;
 }
 
 interface IssueWithSignals {

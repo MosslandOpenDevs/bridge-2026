@@ -15,6 +15,7 @@ import {
   buildDetectionInput,
   collapseRepeatedSignals,
   detectionWindow,
+  GAUGE_STREAMS,
   gaugeStreamOf,
   readDetectionRows,
   type DetectionRows,
@@ -73,9 +74,16 @@ const mediumActivity = (timestamp: string, value = 0, id?: string) =>
     description: `Medium blog: ${value} posts in last week`,
   });
 
-/** The window a production pass would read: 120 min, one sample a minute. */
-const window60 = (lastObservedAt: string | null) =>
-  detectionWindow({ now: NOW, windowMinutes: 120, collectIntervalSeconds: 60, lastObservedAt });
+/** Every gauge stream last observed at `at`, as when all adapters answer. */
+const allObservedAt = (at: string | null) =>
+  new Map(at ? [...GAUGE_STREAMS.keys()].map((stream) => [stream, at] as const) : []);
+
+/**
+ * The window a production pass would read: 120 min, one sample a minute. By
+ * default every stream was observed when the collector last was.
+ */
+const window60 = (lastObservedAt: string | null, streamObservedAt = allObservedAt(lastObservedAt)) =>
+  detectionWindow({ now: NOW, windowMinutes: 120, collectIntervalSeconds: 60, lastObservedAt, streamObservedAt });
 
 /** The medium_activity rule exactly as index.ts has it. */
 const lowBlogActivity = new ThresholdDetector({
@@ -219,6 +227,91 @@ function testResampledChangePointsEqualThePerMinuteSeries() {
   }
 }
 
+function testEachGaugeStopsAtItsOwnLastObservation() {
+  // The collector answered a moment ago, but only through some adapters:
+  // Medium's feed last answered 3 h ago, the price feed now. Its reading must
+  // not be carried through the silence on the strength of the others.
+  const price = row({ id: "price", category: "moc_price", stream: "moc_price|price", timestamp: ago(3 * 24 * 60 * MIN), value: 28 });
+  const blog = mediumActivity(ago(4 * 24 * 60 * MIN), 0, "blog");
+  const streamObservedAt = new Map([
+    ["moc_price|price", NOW.toISOString()],
+    ["medium_activity|blog_activity", ago(180 * MIN)],
+  ]);
+  const input = buildDetectionInput({ inWindow: [], carriedIn: [price, blog] }, window60(NOW.toISOString(), streamObservedAt));
+  const count = (id: string) => input.filter((s) => s.id === id).length;
+  assert(count("blog") === 0, `a stream silent for 3 h gets no samples, got ${count("blog")}`);
+  assert(count("price") === 121, `a stream observed now gets the whole window, got ${count("price")}`);
+  assert(lowBlogActivity.analyze(toSignals(input)).length === 0, "so its condition is not re-seen while it is silent");
+
+  // Silent for the last 30 min: sampled up to then.
+  const partial = buildDetectionInput(
+    { inWindow: [], carriedIn: [blog] },
+    window60(NOW.toISOString(), new Map([["medium_activity|blog_activity", ago(30 * MIN)]])),
+  );
+  assert(partial.length === 91, `samples from -120 to -30 min, got ${partial.length}`);
+
+  // No time at all for the stream (never observed since boot): no samples
+  // past its own newest row, which is itself an observation.
+  const none = buildDetectionInput({ inWindow: [], carriedIn: [blog] }, window60(NOW.toISOString(), new Map()));
+  assert(none.length === 0, `no observation after a row 4 days old: no samples, got ${none.length}`);
+  const written = mediumActivity(ago(10 * MIN), 1, "written");
+  const direct = buildDetectionInput({ inWindow: [written], carriedIn: [blog] }, window60(NOW.toISOString(), new Map()));
+  assert(
+    direct.length === 111 && direct[0].timestamp === ago(10 * MIN),
+    `samples end at a row newer than the stream's recorded time: got ${direct.length}, newest ${direct[0]?.timestamp}`,
+  );
+}
+
+function testTheFilterRecordsEachStreamsLastObservation() {
+  const boot = "2026-09-27T11:00:00.000Z";
+  const filter = new SignalChangeFilter(
+    [{ stream: "medium_activity|blog_activity", value: 0, description: "Medium blog: 0 posts in last week", severity: "low" }],
+    boot,
+  );
+  assert(
+    filter.streamLastObservedAt.get("medium_activity|blog_activity") === boot,
+    "a seeded stream starts at the collector's last observation",
+  );
+
+  const streamOf = (s: { category: string }) => `${s.category}|${s.category === "moc_price" ? "price" : "blog_activity"}`;
+  const reading = (category: string, value: number, timestamp: string, description = `${category} ${value}`) => ({
+    category,
+    value,
+    description,
+    severity: "low",
+    timestamp,
+  });
+  // A pass where only the price feed answered, with a changed price.
+  const t1 = "2026-09-27T11:01:00.000Z";
+  const pass = filter.plan([reading("moc_price", 28, t1)], streamOf);
+  assert(filter.streamLastObservedAt.get("moc_price|price") === undefined, "nothing is recorded before commit");
+  filter.commit(pass);
+  assert(filter.streamLastObservedAt.get("moc_price|price") === t1, "a stored reading is an observation");
+  assert(
+    filter.streamLastObservedAt.get("medium_activity|blog_activity") === boot,
+    "a stream absent from the pass keeps its time",
+  );
+
+  // An unchanged reading is not stored, but it is still an observation.
+  const t2 = "2026-09-27T11:02:00.000Z";
+  const same = filter.plan(
+    [reading("medium_activity", 0, t2, "Medium blog: 0 posts in last week"), reading("moc_price", 28, t2)],
+    streamOf,
+  );
+  assert(same.stored === 0 && same.skipped === 2, "both unchanged");
+  filter.commit(same);
+  assert(filter.streamLastObservedAt.get("medium_activity|blog_activity") === t2, "skipped, still observed");
+  assert(filter.streamLastObservedAt.get("moc_price|price") === t2, "skipped, still observed");
+
+  // Synthetic readings observe nothing.
+  const demo = filter.plan([{ ...reading("token_price", 1, "2026-09-27T11:03:00.000Z"), synthetic: true }], streamOf);
+  filter.commit(demo);
+  assert(filter.streamLastObservedAt.size === 2, "a synthetic reading records no stream");
+
+  const noBoot = new SignalChangeFilter([{ stream: "moc_price|price", value: 1, description: "x", severity: "low" }], null);
+  assert(noBoot.streamLastObservedAt.size === 0, "nothing ever observed: no stream time to seed");
+}
+
 function testIssuesReferenceEachStoredRowOnce() {
   const window = window60(NOW.toISOString());
   const before = mediumActivity(ago(3 * 24 * 60 * MIN), 1, "ma-before");
@@ -255,6 +348,7 @@ function testCollectionOffReadsRowsAsStored() {
     windowMinutes: 120,
     collectIntervalSeconds: 0,
     lastObservedAt: NOW.toISOString(),
+    streamObservedAt: allObservedAt(NOW.toISOString()),
   });
   assert(window.stepMs === null, "no step without a collection interval");
 
@@ -280,7 +374,7 @@ function testCollectionOffReadsRowsAsStored() {
   assert(input[0].timestamp === inside.timestamp, "with its own timestamp");
 
   for (const bad of [Number.NaN, -60]) {
-    const w = detectionWindow({ now: NOW, windowMinutes: 120, collectIntervalSeconds: bad, lastObservedAt: null });
+    const w = detectionWindow({ now: NOW, windowMinutes: 120, collectIntervalSeconds: bad, lastObservedAt: null, streamObservedAt: new Map() });
     assert(w.stepMs === null, `interval ${bad} reads as collection off`);
   }
 }
@@ -365,6 +459,8 @@ async function main() {
   await runTest("An unchanged gauge still reaches the detectors", testUnchangedGaugeStillReachesTheDetectors);
   await runTest("Events are read as stored, inside the window", testEventsAreReadAsStoredInsideTheWindow);
   await runTest("No samples past a stalled collector", testNoSamplesPastAStalledCollector);
+  await runTest("Each gauge stops at its own last observation", testEachGaugeStopsAtItsOwnLastObservation);
+  await runTest("The filter records each stream's last observation", testTheFilterRecordsEachStreamsLastObservation);
   await runTest("Resampled change points equal the per-minute series", testResampledChangePointsEqualThePerMinuteSeries);
   await runTest("Issues reference each stored row once", testIssuesReferenceEachStoredRowOnce);
   await runTest("Collection off reads rows as stored", testCollectionOffReadsRowsAsStored);
