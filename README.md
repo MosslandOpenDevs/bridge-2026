@@ -326,7 +326,8 @@ or restarted. Operations detail:
 
 Backups: the pre-deploy snapshots are the only copies taken automatically. A
 daily verified backup (`bridge-db-backup`, [#35](https://github.com/MosslandOpenDevs/bridge-2026/pull/35)) is available but does nothing
-until an operator starts it, and nothing is copied off the host yet.
+until an operator starts it, and off-host copies are manual (the 2026-09-26
+snapshot and the 2026-09-27 pre-compaction snapshot).
 
 ---
 
@@ -383,13 +384,13 @@ happens next.
 
 ## Status
 
-As of 2026-09-26, from `GET https://bridge.moss.land/api/stats` and the
+As of 2026-09-27, from `GET https://bridge.moss.land/api/stats` and the
 production database. Stage by stage, with more detail in
 [`oracle/PROGRESS.md`](oracle/PROGRESS.md):
 
 | Stage | In production | Evidence |
 |---|---|---|
-| Signal collection | **Automatic**, every 60 s | 885k observed rows from three adapters (Mossland, GitHub, Medium), about 9.5k a day |
+| Signal collection | **Automatic**, every 60 s | 104k observed rows from three adapters (Mossland, GitHub, Medium) after the 2026-09-27 compaction; only changed readings are stored since then |
 | Issue detection | **Automatic**, every 300 s | 754 observed issue rows, which are 12 distinct conditions |
 | AI deliberation | **Admin request only** | `AUTO_DELIBERATE_ENABLED` defaults off ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)) |
 | Proposals | **Admin only** | `AUTO_PROPOSAL_ENABLED` defaults off ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)); 21 real proposals, 1 active and 20 expired |
@@ -400,19 +401,26 @@ production database. Stage by stage, with more detail in
 
 What that means in practice:
 
-- **Signals are live, and mostly repeats.** About 99% of observed rows repeat
-  the previous minute's reading. After [#39](https://github.com/MosslandOpenDevs/bridge-2026/pull/39) an observed signal is stored only
-  when it changes (about 340 rows a day instead of about 9.5k). [#37](https://github.com/MosslandOpenDevs/bridge-2026/pull/37) fixes two
+- **Signals are live, and stored only when they change.** Until 2026-09-27
+  about 99% of stored rows repeated the previous minute's reading. Since
+  [#39](https://github.com/MosslandOpenDevs/bridge-2026/pull/39) an observed signal is stored only when it changes (about 340 rows a
+  day instead of about 9.5k), and `/api/health` still reports every collection
+  pass. [#37](https://github.com/MosslandOpenDevs/bridge-2026/pull/37) fixes two
   collector artefacts: the per-document "new disclosure" event shared a
   category with the disclosure total, which is where 18 of the 21 real
   proposals came from, and the MOC price alert re-fired every minute and lost
-  its sign. [#40](https://github.com/MosslandOpenDevs/bridge-2026/pull/40) adds an operator-run compaction script for the rows already
-  stored; running it is a separate decision.
+  its sign. [#40](https://github.com/MosslandOpenDevs/bridge-2026/pull/40)'s operator-run compaction was run on 2026-09-27: observed rows
+  889,617 → 104,082 (every removed row equal to the kept row before it), the
+  database 482.5 MB → 63.4 MB, all 37,046 signal ids that issues and proposals
+  reference still resolve. The pre-compaction snapshot is kept on and off the
+  host.
 - **Issue counts overstate conditions.** The 754 issue rows are 12 distinct
   conditions; [#41](https://github.com/MosslandOpenDevs/bridge-2026/pull/41) adds `issues.conditions` to `/api/stats` and shows that
   number on the home page.
-- **Demo data is labelled.** 223,074 synthetic signals (none newer than
-  2026-08-08), 3,057 synthetic issues and 143 synthetic proposals are counted
+- **Demo data is labelled.** The demo adapter's 223,074 signals (none newer
+  than 2026-08-08) were exported to a file and removed on 2026-09-27, except
+  the 22,688 that issues still reference. Those, 3,057 synthetic issues and
+  143 synthetic proposals are counted
   apart from observed data in `/api/stats`, carry a "synthetic" label on the
   signals and issues pages, and are hidden from the proposals page by default (`?synthetic=exclude|only|include`, [#31](https://github.com/MosslandOpenDevs/bridge-2026/pull/31)). The site carries a
   persistent AI-content notice ([#32](https://github.com/MosslandOpenDevs/bridge-2026/pull/32)).

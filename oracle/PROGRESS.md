@@ -1,19 +1,19 @@
 # BRIDGE Oracle - 개발 진행 현황
 
-## 현재 상태 (2026-09-26)
+## 현재 상태 (2026-09-27)
 
 BRIDGE 는 MIP-1 의 `Lab` 서비스입니다(레지스트리에 지정된 maintainer 는 아직
 없음). 아래 표가 이 문서에서 유일하게 현재를 말하는 부분이고, 그 아래
 "History (superseded)" 는 예전 기록입니다.
 
 수치 출처: `GET https://bridge.moss.land/api/stats` 와 `/api/health`
-(2026-09-26 조회), 같은 날 04:37Z 의 운영 DB 스냅샷.
+(2026-09-27 조회), 2026-09-26 04:37Z 의 운영 DB 스냅샷, 2026-09-27 압축 실행 로그.
 
 ### 단계별 운영 상태
 
 | 단계 | 상태 | 운영 수치 / 근거 |
 |------|------|------|
-| 신호 수집 (L0) | **자동** — 60초마다 | 관측 행 885,403 (어댑터 3개: Mossland·GitHub·Medium). 하루 약 9.5k 행이 쌓이고 그중 약 99%가 직전 분의 반복. 최근 7일 카테고리별 서로 다른 (value, description) 조합: github_commit 1/10,078, mossland_disclosure 1/10,080, mossland_roadmap 1/10,080, medium_activity 1/6,212, moc_market 423/10,080 |
+| 신호 수집 (L0) | **자동** — 60초마다 | 관측 행 104,082 (어댑터 3개: Mossland·GitHub·Medium, 2026-09-27 압축 후). 2026-09-27 전까지는 하루 약 9.5k 행이 쌓였고 그중 약 99%가 직전 분의 반복이었음. 지금은 바뀐 값만 저장 (#39). 압축 전 최근 7일 카테고리별 서로 다른 (value, description) 조합: github_commit 1/10,078, mossland_disclosure 1/10,080, mossland_roadmap 1/10,080, medium_activity 1/6,212, moc_market 423/10,080 |
 | 이슈 탐지 (L1) | **자동** — 300초마다 | 관측 이슈 754행, 서로 다른 조건(category·kind·direction) 12개. `/api/stats` 의 이슈 수는 조건 수의 약 60배 |
 | 에이전트 심의 (L2) | **관리자 요청 시에만** | `POST /api/deliberate`, `POST /api/debate` 는 `ADMIN_API_KEY` 필요. 자동 심의 `AUTO_DELIBERATE_ENABLED` 기본 off ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)) |
 | 제안 생성 | **관리자만** | 자동 승격 `AUTO_PROPOSAL_ENABLED` 기본 off ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)). 제안 164개 = 실제 21 (진행 중 1, 만료 20) + 데모 143 (모두 만료). 실제 21개 중 18개는 수집기 결함에서 나옴 ([#37](https://github.com/MosslandOpenDevs/bridge-2026/pull/37) 참고) |
@@ -22,22 +22,22 @@ BRIDGE 는 MIP-1 의 `Lab` 서비스입니다(레지스트리에 지정된 maint
 | 실행 (Atomic Actuation) | **쓰인 적 없음** | executions 0행. 통과한 제안이 없음 |
 | 결과 증명 (L4) | **꺼짐** | `OUTCOME_EVAL_ENABLED` 기본 off ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)). outcome proofs 0행, `outcomes.successRate` = null |
 | 온체인 기록 | **없음** | `OracleGovernance` 미배포. `blockchainService` 의 쓰기 메서드는 호출하는 곳이 없음. 체인은 MOC 잔고 읽기에만 씀 ([docs/on-chain-state.md](docs/on-chain-state.md)) |
-| 데모 데이터 | **꺼짐, 표시됨** | 합성 신호 223,074행(가장 최근 2026-08-08), 합성 이슈 3,057, 합성 제안 143. `/api/stats` 에서 분리 집계, 신호·이슈 페이지에서는 라벨로 표시, 제안 목록에서는 기본으로 숨김 ([#31](https://github.com/MosslandOpenDevs/bridge-2026/pull/31)) |
+| 데모 데이터 | **꺼짐, 표시됨** | 합성 신호 223,074행(가장 최근 2026-08-08) 중 이슈가 참조하는 22,688행만 남기고 2026-09-27 에 파일로 내보낸 뒤 삭제. 합성 이슈 3,057, 합성 제안 143. `/api/stats` 에서 분리 집계, 신호·이슈 페이지에서는 라벨로 표시, 제안 목록에서는 기본으로 숨김 ([#31](https://github.com/MosslandOpenDevs/bridge-2026/pull/31)) |
 | 헬스 | **파생** ([#30](https://github.com/MosslandOpenDevs/bridge-2026/pull/30)) | `/api/health` 가 DB 읽기와 최신 관측 신호 나이로 `ok` / `degraded` / `down` 을 답함. 배포 게이트는 `?strict=1` |
-| DB · 백업 | 배포 전 스냅샷만 | DB 501 MB, 하루 약 7.5 MB 증가, 그중 96% 가 signals 와 그 인덱스. 정기·외부 백업 없음 |
+| DB · 백업 | 배포 전 스냅샷 + 수동 외부 사본 | 압축으로 482.5 MB → 63.4 MB (2026-09-27). 압축 전에는 하루 약 7.5 MB 증가, 그중 96% 가 signals 와 그 인덱스. 매일 백업(#35)은 운영자가 켜야 돌고, 외부 사본은 수동(2026-09-26 스냅샷, 2026-09-27 압축 전 스냅샷) |
 
 ### 알려진 문제와 이 문제를 다루는 PR
 
-위 표는 [#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)–[#32](https://github.com/MosslandOpenDevs/bridge-2026/pull/32) 까지 머지·배포된 지금의 운영 상태입니다. 투표·위임 행만
-예외로 [#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34) 머지 후의 상태를 적었습니다 — 그 전에는 쓰기 API 가 열려 있지만
-한 번도 쓰이지 않았습니다. 아래 PR 은 이 문서와 함께 머지될 예정이고, 머지되면
-신호 저장량 같은 표의 수치가 바뀝니다.
+위 표는 [#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)–[#41](https://github.com/MosslandOpenDevs/bridge-2026/pull/41) 이 머지·배포되고(2026-09-26~27) 2026-09-27 에
+신호 압축을 실행한 뒤의 운영 상태입니다. 아래는 그중 #33 이후 PR 입니다.
 
 - **[#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)** — BRIDGE 투표·위임 쓰기를 끄고(410 `VOTING_MOVED_TO_AGORA`) 웹의
   지갑·투표 UI 를 숨기며 `/delegation` 을 Agora 안내로 바꿉니다. 측정된 적 없는
   에이전트 평판·정확도 숫자도 뺍니다. 다시 켜는 절차는 `apps/api/.env.example`.
 - **[#39](https://github.com/MosslandOpenDevs/bridge-2026/pull/39)** — 바뀌지 않은 관측 신호를 다시 저장하지 않습니다(하루 약 9.5k →
-  약 340행). `signals.stream` 컬럼과 부분 인덱스가 추가됩니다.
+  약 340행). `signals.stream` 컬럼과 부분 인덱스가 추가됩니다. moss.land
+  공시 대시보드의 BRIDGE 신선도는 이제 `/api/health` 의 `lastProcessedAt` 을
+  씁니다([MosslandCore/mossland-website-2026#50](https://github.com/MosslandCore/mossland-website-2026/pull/50), 먼저 배포).
 - **[#37](https://github.com/MosslandOpenDevs/bridge-2026/pull/37)** — 공시 문서마다 나던 "새 공시" 이벤트(value=1)와 공시 총계(약 53)가
   같은 카테고리 `mossland_disclosure` 에 섞여 이상 탐지가 둘을 함께 z-score
   했고, 재시작마다 "새 공시"를 다시 냈습니다. 실제 제안 21개 중 18개가 여기서
@@ -54,8 +54,11 @@ BRIDGE 는 MIP-1 의 `Lab` 서비스입니다(레지스트리에 지정된 maint
   같은 메시지 7개가 약 71번씩 반복돼 보였음). 이슈 카드는 실제 관련 신호 수와
   반복 감지 횟수를 보여 줍니다.
 - **[#40](https://github.com/MosslandOpenDevs/bridge-2026/pull/40)** — 이미 쌓인 반복 신호 행을 운영자가 직접 돌릴 때만 압축하는
-  스크립트. 실행 여부는 별도 결정이고, 돌리면 `signals.total` 이 약 88만에서
-  약 10만으로 줄어듭니다. 절차는 `deploy/README.md`.
+  스크립트. 2026-09-27 01:35Z 에 운영에서 실행했습니다(유지보수자 승인, API 약
+  35초 정지): 관측 889,617 → 104,082행, 합성 223,074행은 내보낸 뒤 이슈가
+  참조하는 22,688행만 남김, DB 482.5 → 63.4 MB, 참조되는 신호 id 37,046개는
+  모두 그대로. 압축 전 스냅샷과 내보낸 파일은 서버와 외부에 보관. 절차는
+  `deploy/README.md`.
 - **[#35](https://github.com/MosslandOpenDevs/bridge-2026/pull/35)** — 매일 검증된 DB 백업(`bridge-db-backup`). 머지만으로는 돌지 않고
   운영자가 켜야 합니다.
 - **[#38](https://github.com/MosslandOpenDevs/bridge-2026/pull/38)** — API 를 한 주소에만 바인드하고 지정한 프록시의 `X-Forwarded-For`
