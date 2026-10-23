@@ -6,12 +6,16 @@ import { useLocale } from "next-intl";
 import { Globe } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Locale, locales } from "@/i18n/config";
-import { setLocale } from "@/lib/locale";
 
 const localeNames: Record<Locale, string> = {
   en: "EN",
   ko: "KO",
 };
+
+// Same cookie src/i18n.ts reads on every request. It is written here in the
+// browser on purpose: a Server Action would put an unauthenticated POST
+// endpoint on every page just to set one non-sensitive cookie.
+const LOCALE_COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
 
 export function LanguageSwitcher() {
   const locale = useLocale() as Locale;
@@ -21,8 +25,8 @@ export function LanguageSwitcher() {
   const handleLocaleChange = (newLocale: Locale) => {
     if (newLocale === locale) return;
 
-    startTransition(async () => {
-      await setLocale(newLocale);
+    document.cookie = `locale=${newLocale}; path=/; max-age=${LOCALE_COOKIE_MAX_AGE}; samesite=lax`;
+    startTransition(() => {
       router.refresh();
     });
   };
