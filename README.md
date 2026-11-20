@@ -387,17 +387,20 @@ record: BRIDGE is to become a static archive (see
 
 ## Status
 
-As of 2026-09-27, from `GET https://bridge.moss.land/api/stats` and the
-production database. Stage by stage, with more detail in
+Unless a figure carries its own date, counts are from the public API at
+`https://bridge.moss.land` on 2026-11-20: `GET /api/stats` and `/api/health` at
+08:39 UTC, `/api/proposals` (votes) at 08:44 UTC and `/api/outcomes`
+(executions) at 10:08 UTC. The delegation count is from the production database
+snapshot of 2026-09-26. Stage by stage, with more detail (as of 2026-09-27) in
 [`oracle/PROGRESS.md`](oracle/PROGRESS.md):
 
 | Stage | In production | Evidence |
 |---|---|---|
-| Signal collection | **Automatic**, every 60 s | 104k observed rows from three adapters (Mossland, GitHub, Medium) after the 2026-09-27 compaction; only changed readings are stored since then |
+| Signal collection | **Automatic**, every 60 s | 113,620 observed rows from three adapters (Mossland, GitHub, Medium); 104,082 right after the 2026-09-27 compaction, and only changed readings are stored since then |
 | Issue detection | **Automatic**, every 300 s | 754 observed issue rows, which are 12 distinct conditions |
 | AI deliberation | **Admin request only** | `AUTO_DELIBERATE_ENABLED` defaults off ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)) |
-| Proposals | **Admin only** | `AUTO_PROPOSAL_ENABLED` defaults off ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)); 21 real proposals, 1 active and 20 expired |
-| Voting / delegation | **Off** ([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)) — binding votes happen on [Agora](https://agora.moss.land) | 0 votes and 0 delegations, ever |
+| Proposals | **Admin only** | `AUTO_PROPOSAL_ENABLED` defaults off ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)); 21 real proposals, all 21 expired (0 active, 0 passed, 0 rejected) |
+| Voting / delegation | **Off** ([#34](https://github.com/MosslandOpenDevs/bridge-2026/pull/34)) — binding votes happen on [Agora](https://agora.moss.land) | 0 votes, ever; 0 delegations as of the 2026-09-26 database snapshot |
 | Execution | **Never used** | 0 executions |
 | Outcome proof | **Off** | `OUTCOME_EVAL_ENABLED` defaults off ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)); 0 outcome proofs |
 | On-chain recording | **None** | `OracleGovernance` never deployed; no caller of the write paths |
@@ -406,9 +409,10 @@ What that means in practice:
 
 - **Signals are live, and stored only when they change.** Until 2026-09-27
   about 99% of stored rows repeated the previous minute's reading. Since
-  [#39](https://github.com/MosslandOpenDevs/bridge-2026/pull/39) an observed signal is stored only when it changes (about 340 rows a
-  day instead of about 9.5k), and `/api/health` still reports every collection
-  pass. [#37](https://github.com/MosslandOpenDevs/bridge-2026/pull/37) fixes two
+  [#39](https://github.com/MosslandOpenDevs/bridge-2026/pull/39) an observed signal is stored only when it changes (the observed total
+  grew by 9,538 rows in the 54 days from the compaction to 2026-11-20, about
+  177 a day, instead of about 9.5k a day), and `/api/health` still reports
+  every collection pass. [#37](https://github.com/MosslandOpenDevs/bridge-2026/pull/37) fixes two
   collector artefacts: the per-document "new disclosure" event shared a
   category with the disclosure total, which is where 18 of the 21 real
   proposals came from, and the MOC price alert re-fired every minute and lost
@@ -428,8 +432,8 @@ What that means in practice:
   signals and issues pages, and are hidden from the proposals page by default (`?synthetic=exclude|only|include`, [#31](https://github.com/MosslandOpenDevs/bridge-2026/pull/31)). The site carries a
   persistent AI-content notice ([#32](https://github.com/MosslandOpenDevs/bridge-2026/pull/32)).
 - **Proposals are non-binding.** A proposal whose voting period ends without
-  quorum is `expired` ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)); every closed proposal so far has expired, 163 of
-  the 164 including demo ones.
+  quorum is `expired` ([#29](https://github.com/MosslandOpenDevs/bridge-2026/pull/29)); every proposal so far has expired, all 164
+  including demo ones (21 real, 143 demo).
 - **Health is derived.** `/api/health` reports `ok`, `degraded` or `down`
   from whether the database reads and how old the newest observed signal is
   ([#30](https://github.com/MosslandOpenDevs/bridge-2026/pull/30)); the deploy gate uses `?strict=1`.

@@ -8,6 +8,8 @@ BRIDGE 는 MIP-1 의 `Lab` 서비스입니다(레지스트리에 지정된 maint
 
 수치 출처: `GET https://bridge.moss.land/api/stats` 와 `/api/health`
 (2026-09-27 조회), 2026-09-26 04:37Z 의 운영 DB 스냅샷, 2026-09-27 압축 실행 로그.
+아래 표와 PR 목록의 수치는 2026-09-27 기준이고, 그 뒤에 공개 API 로 다시 읽은
+수치는 [루트 README 의 Status](../README.md#status) 에 있습니다.
 
 ### 단계별 운영 상태
 
