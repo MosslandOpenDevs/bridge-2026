@@ -25,13 +25,16 @@ and hidden from the proposals list by default, and `/api/health` reports
 whether collection is actually keeping up. The
 numbers are in [Status](#status).
 
-<a id="direction-under-review"></a>**Direction under review.** Whether BRIDGE continues, and as what, is open. The
-option on the table is a trial as a read-only tracker of dated commitments —
-from Agora decisions and the Mossland disclosures
-[`TRACKING.md`](https://github.com/mossland/Disclosure-and-Materials/blob/main/disclosures/TRACKING.md) —
-with three gates: **2026-10-20** (the owner's answer), **2026-11-20** (evidence
-that anyone outside the project uses it) and **2026-12-21** (keep it, move it to
-a GitHub Action, or archive it). This is a review, not a commitment. MIP-1 lists
+<a id="direction-under-review"></a>**Direction: static archive.** Earlier versions of this README
+described a direction review: a possible trial of BRIDGE as a read-only tracker
+of dated commitments, with a gate on 2026-10-20 for the owner's answer. The
+answer, recorded here in November 2026: the tracker trial will not go ahead,
+and BRIDGE is to become a static, read-only archive. No date is set for that
+change yet. Until it happens, BRIDGE keeps running as described above; when it
+happens, this README and the
+[links.moss.land registry](https://links.moss.land/ecosystem-registry.json)
+entry `bridge` will say so. The review's later gates, 2026-11-20 and
+2026-12-21, belonged to the tracker trial and no longer apply. MIP-1 lists
 BRIDGE as a Lab service; the registry names no maintainer yet.
 
 **Long-term vision (not what runs today).** The design this repository started
@@ -361,8 +364,8 @@ snapshot and the 2026-09-27 pre-compaction snapshot).
 ## Roadmap (original design)
 
 This is the roadmap the project was designed around. It is not a plan of
-record: the [direction review](#direction-under-review) and its gates decide what
-happens next.
+record: BRIDGE is to become a static archive (see
+[Direction](#direction-under-review)).
 
 ### 2026
 - Reality-driven agenda generation
@@ -441,8 +444,9 @@ infrastructure.
 ## Contributing
 
 Issues and pull requests are welcome; read [`CONTRIBUTING.md`](CONTRIBUTING.md)
-first. For substantial changes, open an issue first to discuss direction,
-especially while the [direction review](#direction-under-review) is open. Please
+first. For substantial changes, open an issue first to discuss the change. Note
+that BRIDGE is to become a static archive (see
+[Direction](#direction-under-review)). Please
 keep the design principles above in mind — in particular **human sovereignty**
 and **auditability**. Security reports go to **security@moss.land** (see
 [Security posture](#security-posture)).
